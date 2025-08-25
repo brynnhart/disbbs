@@ -7,6 +7,9 @@ const http = require('http');
 const WebSocket = require('ws');
 const Database = require('better-sqlite3');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto'); // NEW: for secure invite codes
+
+
 
 const DB_PATH = process.env.DB_PATH || './dis.sqlite3';
 const db = new Database(DB_PATH);
@@ -37,12 +40,28 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS invites (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER,              -- NULL = no expiry
+  used_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  used_at INTEGER,                 -- NULL = unused
+  note TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_invites_code       ON invites(code);
+CREATE INDEX IF NOT EXISTS idx_invites_expires_at ON invites(expires_at);
+CREATE INDEX IF NOT EXISTS idx_invites_used_at    ON invites(used_at);
+
+
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
   body TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  expires_at INTEGER, -- NULL means never expire
+  expires_at INTEGER -- NULL means never expire
 );
 CREATE INDEX IF NOT EXISTS idx_messages_expires_at ON messages(expires_at);
 CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
@@ -73,10 +92,7 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/ws' });
 
 /* ======================= Shared Chat HUB ======================== */
-const HUB = {
-  chatLog: [],         // array of { ts, user, html }
-  clients: new Set()
-};
+const HUB = { chatLog: [], clients: new Set(), online: new Set() };
 
 /* ======================= Utilities (ops) ======================== */
 function sendOps(ws, ops) {
@@ -155,7 +171,7 @@ function splashSVG(){
     '<linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#19C3C3"/><stop offset="100%" stop-color="#CC66FF"/></linearGradient>',
     '<filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>',
     '</defs>',
-    '<rect width="1200" height="600" fill="#000"/>',
+    '<rect width="1200" height="400" fill="#000"/>',
     '<rect x="30" y="30" width="1140" height="540" rx="8" ry="8" fill="none" stroke="url(#g1)" stroke-width="2"/>',
     '<g filter="url(#glow)" font-family="ui-monospace, Menlo, Consolas, monospace" font-weight="700" text-anchor="middle">',
     '<text x="600" y="260" font-size="84" fill="#f0f">DEAD INTERNET SOCIETY</text>',
@@ -163,9 +179,6 @@ function splashSVG(){
     '<g font-family="ui-monospace, Menlo, Consolas, monospace" text-anchor="middle">',
     '<text x="600" y="320" font-size="20" fill="#E6E6E6" opacity="0.9">no feeds • no infinite scroll • just people</text>',
     '<text x="600" y="352" font-size="16" fill="#19C3C3" opacity="0.9">punk-built • human-scale • honest connection</text>',
-    '</g>',
-    '<g font-family="ui-monospace, Menlo, Consolas, monospace" text-anchor="middle" opacity="0.75">',
-    '<text x="600" y="520" font-size="14" fill="#E6E6E6">press enter to begin • type /help anytime</text>',
     '</g>',
     '</svg>',
     '</div>'
@@ -207,14 +220,16 @@ function renderSplash(api, state){
   api.batch(b=>{
     b.clear();
     b.printHTML(splashSVG());
-    b.print('Login required.', 'yellow'); b.hr();
-    b.print('Enter username:', 'cyan');
-    b.setInputType('text', 'Username');
+    b.print('Enter username to log in', 'cyan');
+b.print('or type /register <user> <pass> <invite> to create a new account.', 'dim');
+b.setInputType('text', 'Username or /register');
+
   });
   state.login.step='username'; state.login.tempUser='';
 }
 function splashHandleCommand(cmd, api){
-  if (cmd==='help'){ api.hr(); api.print('Splash commands:', 'yellow'); api.print('  /help   Show help','cyan'); api.print('  /clear  Clear the screen','cyan'); return true; }
+  if (cmd==='help'){ api.hr(); api.print('Splash commands:', 'yellow'); api.print('  /help   Show help','cyan'); api.print('  /clear  Clear the screen','cyan'); api.print('  /register <user> <pass> <invite>   Create a new account', 'cyan');
+return true; }
   if (cmd==='clear'){ api.clear(); return true; }
   return false;
 }
@@ -222,14 +237,18 @@ function splashHandleRaw(text, api, state){
   if (state.login.step==='username'){
     if (!text){ api.print('Please enter a username.', 'dim'); return true; }
     state.login.tempUser = text;
-    api.print('Enter password:', 'cyan'); api.setInputType('password', 'Password'); state.login.step='password';
+    api.print('Enter password:', 'cyan'); api.setInputType('password', 'Password'); state.login.step='password'; return true;
   }
   if (state.login.step==='password'){
   const user = verifyLogin(state.login.tempUser, text);
   if (user) {
     state.authenticated = true;
     state.username = user.username; // keep canonical case
+    HUB.online.add(state.username);
+broadcastSystem(`${state.username} joined`);
+
     state.userId = user.id;
+    state.isAdmin = !!user.is_admin;  
     api.setInputType('text', 'Type here… try /help'); api.print('Login successful.', 'green');
     routeGo(api, state, 'menu');
   } else {
@@ -370,20 +389,32 @@ function rulesHandleCommand(cmd, api, state){ if (cmd==='menu'||cmd==='main'){ r
 function rulesHandleRaw(text, api){ api.print('Use /main to return to the Command Hub.', 'dim'); return true; }
 
 /* ======================= Global Commands ======================= */
-function cmdHelp(api){
+function cmdHelp(api, state){
   api.hr();
   api.print('Global slash commands:', 'yellow');
+  api.print('  /register  Create an account: /register <user> <pass> <invite>', 'cyan');
   api.print('  /chat      Enter the Commons Chat', 'cyan');
   api.print('  /about     About Dead Internet Society', 'cyan');
   api.print('  /rules     Community rules', 'cyan');
+  api.print('  /passwd    Change your password: /passwd <old> <new>', 'cyan');
   api.print('  /format    Show DIS‑Markdown examples', 'cyan');
   api.print('  /colors    Show color swatches', 'cyan');
   api.print('  /whoami    Show current user', 'cyan');
+  api.print('  /who       List users currently online', 'cyan');
   api.print('  /main      Return to Command Hub', 'cyan');
   api.print('  /logout    Sign out', 'cyan');
+
+  if (state && state.isAdmin){
+  api.hr(); api.print('Admin:', 'yellow');
+  api.print('  /makeinvite [days] [note]   Create a single‑use invite', 'cyan');
+  api.print('  /listinvites [unused|used|all]  Show recent invites', 'cyan');
+  api.print('  /revokeinvite <code>        Expire an unused invite', 'cyan');
+}
+
   api.hr();
   api.print('DIS‑Markdown: **bold**, _italics_, __underline__, [dim]…[/dim], and color tags like [cyan]…[/cyan].', 'dim');
 }
+
 function cmdClear(api){ api.clear(); }
 function cmdWhoami(api, state){ api.print(state.authenticated ? (state.username||'guest') : 'Not logged in', 'cyan'); }
 function cmdChat(api, state){ if (requireAuth(api, state)) routeGo(api, state, 'chat'); }
@@ -401,6 +432,7 @@ function cmdFormat(api){
 }
 function cmdLogout(api, state){
   state.authenticated=false; state.username=null; state.login.step='username'; state.login.tempUser='';
+  if (state.username){ HUB.online.delete(state.username); broadcastSystem(`${state.username} left`); }
   api.setInputType('text', 'Username'); routeGo(api, state, 'splash');
 }
 function cmdMain(api, state){ if (requireAuth(api, state)) routeGo(api, state, 'menu'); }
@@ -408,22 +440,160 @@ function cmdColors(api){
   api.print('█ RED','red'); api.print('█ GREEN','green'); api.print('█ YELLOW','yellow');
   api.print('█ BLUE','blue'); api.print('█ MAGENTA','magenta'); api.print('█ CYAN','cyan'); api.print('█ WHITE','white');
 }
+function cmdRegister(api, state, args){
+  const [username, password, inviteCode] = args || [];
 
-function handleGlobalCommand(cmd, api, state){
-  switch(cmd){
-    case 'help': return cmdHelp(api), true;
-    case 'clear': return cmdClear(api), true;
-    case 'whoami': return cmdWhoami(api, state), true;
-    case 'chat': return cmdChat(api, state), true;
-    case 'about': return cmdAbout(api, state), true;
-    case 'rules': return cmdRules(api, state), true;
-    case 'format': return cmdFormat(api), true;
-    case 'logout': return cmdLogout(api, state), true;
-    case 'main': return cmdMain(api, state), true;
-    case 'colors': return cmdColors(api), true;
-    default: return false;
+  if (!username || !password || !inviteCode) {
+    api.print('Usage: /register <username> <password> <invite>', 'yellow');
+    return;
+  }
+  if (password.length < 6) {
+    api.print('Password must be at least 6 characters.', 'yellow');
+    return;
+  }
+
+  // 1) validate invite
+  const vi = validateInvite(inviteCode);
+  if (!vi.ok) {
+    const why = vi.reason === 'no_such' ? 'Invite not found.'
+              : vi.reason === 'used'    ? 'Invite already used.'
+              : vi.reason === 'expired' ? 'Invite expired.'
+              : 'Invalid invite.';
+    api.print(why, 'red');
+    return;
+  }
+
+  // 2) create the account (re-use your existing createUser)
+  const res = createUser(username, password);
+  if (!res.ok) {
+    api.print('That username is taken.', 'red');
+    return;
+  }
+
+  // 3) redeem invite (single-use)
+  try {
+    const newUser = findUserByName.get(username);
+    const changed = redeemInvite.run(newUser.id, inviteCode).changes;
+    if (!changed) {
+      api.print('Invite could not be redeemed (race condition). Try another.', 'red');
+      // Rollback user creation here only if you want strict semantics.
+      return;
+    }
+  } catch(e) {
+    api.print('Invite redemption failed. Try another code.', 'red');
+    return;
+  }
+
+  // 4) success messages differ based on session state
+  if (state && state.authenticated) {
+    api.print(`Account created: ${username}. You remain logged in as ${state.username}.`, 'green');
+  } else {
+    api.print('Account created. Please log in with your new credentials.', 'green');
   }
 }
+
+function cmdMakeInvite(api, state, args){
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; } // hide existence
+
+  // Parse: /makeinvite [days] [note...]
+  let days = 7, note = '';
+  if (args && args.length) {
+    const maybe = parseInt(args[0], 10);
+    if (!Number.isNaN(maybe) && maybe >= 0) {
+      days = maybe;
+      note = args.slice(1).join(' ').trim();
+    } else {
+      note = args.join(' ').trim();
+    }
+  }
+
+  const out = createInvite({ creatorId: state.userId, days, note });
+  if (!out.ok) {
+    api.print('Failed to create invite.', 'red');
+    return;
+  }
+
+  const expiresLine = out.expires_at
+    ? new Date(out.expires_at*1000).toLocaleString()
+    : 'never';
+  api.print('Invite created:', 'green');
+  api.print(`  Code: ${out.code}`, 'cyan');
+  api.print(`  Expires: ${expiresLine}`, 'cyan');
+  if (note) api.print(`  Note: ${note}`, 'cyan');
+  api.print('Share this code privately. It can be used only once.', 'dim');
+}
+
+function cmdWho(api){
+  const list = Array.from(HUB.online);
+  api.print(list.length ? `Online: ${list.join(', ')}` : 'Nobody online', 'cyan');
+}
+
+function cmdListInvites(api, state, args){
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin){ api.print('Unknown command.', 'red'); return; } // hidden to non-admins
+  const mode = (args[0]||'unused').toLowerCase(); // unused|used|all
+  let where = 'used_at IS NULL'; if (mode==='used') where='used_at IS NOT NULL'; else if (mode==='all') where='1=1';
+  const rows = db.prepare(`SELECT code, created_at, expires_at, used_at, note FROM invites WHERE ${where} ORDER BY created_at DESC LIMIT 50`).all();
+  if (!rows.length){ api.print('No invites found.', 'dim'); return; }
+  api.hr(); api.print(`Invites (${mode}):`, 'yellow');
+  rows.forEach(r=>{
+    const exp = r.expires_at ? new Date(r.expires_at*1000).toLocaleString() : 'never';
+    const used = r.used_at ? new Date(r.used_at*1000).toLocaleString() : '—';
+    api.print(`• ${r.code}  exp:${exp}  used:${used}  ${r.note?'- '+r.note:''}`, r.used_at?'dim':'cyan');
+  });
+}
+
+function cmdRevokeInvite(api, state, args){
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin){ api.print('Unknown command.', 'red'); return; }
+  const code = (args[0]||'').trim(); if (!code){ api.print('Usage: /revokeinvite <code>', 'yellow'); return; }
+  const row = getInvite.get(code);
+  if (!row){ api.print('No such invite.', 'red'); return; }
+  if (row.used_at){ api.print('Invite already used; cannot revoke.', 'yellow'); return; }
+  db.prepare(`UPDATE invites SET expires_at = strftime('%s','now') WHERE code = ? AND used_at IS NULL`).run(code);
+  api.print('Invite revoked.', 'green');
+}
+
+function cmdPasswd(api, state, args){
+  if (!requireAuth(api, state)) return;
+  const [oldp, newp] = args || [];
+  if (!oldp || !newp){ api.print('Usage: /passwd <old> <new>', 'yellow'); return; }
+  if (newp.length < 6){ api.print('New password must be at least 6 characters.', 'yellow'); return; }
+  const u = findUserByName.get(state.username);
+  if (!u || !bcrypt.compareSync(oldp, u.password_hash)){ api.print('Old password incorrect.', 'red'); return; }
+  const hash = bcrypt.hashSync(newp, 10);
+  db.prepare(`UPDATE users SET password_hash = ? WHERE id = ?`).run(hash, u.id);
+  api.print('Password updated.', 'green');
+}
+
+
+
+
+
+
+function handleGlobalCommand(cmd, api, state, args){
+  switch(cmd){
+    case 'help':       return cmdHelp(api, state), true;          // pass state now
+    case 'clear':      return cmdClear(api), true;
+    case 'whoami':     return cmdWhoami(api, state), true;
+    case 'who':        return cmdWho(api), true;
+    case 'passwd':     return cmdPasswd(api, state, args), true;
+    case 'register':   return cmdRegister(api, state, args), true; // UPDATED
+    case 'makeinvite': return cmdMakeInvite(api, state, args), true; // NEW (admin only)
+    case 'listinvites': return cmdListInvites(api, state, args), true;
+    case 'revokeinvite': return cmdRevokeInvite(api, state, args), true;
+    case 'chat':       return cmdChat(api, state), true;
+    case 'about':      return cmdAbout(api, state), true;
+    case 'rules':      return cmdRules(api, state), true;
+    case 'format':     return cmdFormat(api), true;
+    case 'logout':     return cmdLogout(api, state), true;
+    case 'main':       return cmdMain(api, state), true;
+    case 'colors':     return cmdColors(api), true;
+    default:           return false;
+  }
+}
+
 
 /* ======================= WS Lifecycle ========================== */
 wss.on('connection', (ws) => {
@@ -449,13 +619,13 @@ wss.on('connection', (ws) => {
         const parts = text.slice(1).split(/\s+/);
         const cmd = (parts[0] || '').toLowerCase();
         const args = parts.slice(1); // currently unused
-        if (!handleGlobalCommand(cmd, api, state)) {
+        if (!handleGlobalCommand(cmd, api, state, args)) {
           // delegate to screen-specific command handlers
           const handled = (state.currentScreen === 'splash' && splashHandleCommand(cmd, api))
                        || (state.currentScreen === 'chat'   && chatHandleCommand(cmd, api, state))
                        || (state.currentScreen === 'about'  && aboutHandleCommand(cmd, api, state))
                        || (state.currentScreen === 'rules'  && rulesHandleCommand(cmd, api, state))
-                       || (state.currentScreen === 'menu'   && (cmd==='help'? (cmdHelp(api), true): false));
+                       || (state.currentScreen === 'menu'   && (cmd==='help'? (cmdHelp(api, state), true): false));
           if (!handled){
             api.print(`Unknown command: /${cmd}`, 'red'); api.print('Try /help.', 'dim');
           }
@@ -474,7 +644,11 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('close', ()=> { HUB.clients.delete(ws); });
+  ws.on('close', ()=> {
+  HUB.clients.delete(ws);
+  const u = state && state.username;
+  if (u){ HUB.online.delete(u); broadcastSystem(`${u} left`); }
+});
   ws.on('error', (err)=> { try { api.print('WS Error: '+(err && err.message ? err.message : err), 'red'); } catch(e){} });
 });
 
@@ -487,6 +661,34 @@ function retentionSeconds() {
   return Math.max(0, days) * 24 * 60 * 60;
 }
 
+function makeInviteCode() {
+  // 20 bytes (160 bits) → 40 hex chars → group for readability
+  const hex = crypto.randomBytes(20).toString('hex').toUpperCase(); // e.g. 'A1B2...'
+  return hex.match(/.{1,4}/g).join('-'); // 'A1B2-...-...'
+}
+
+// returns { ok, code, expires_at, err }
+function createInvite({ creatorId, days, note }) {
+  const expires_at = (typeof days === 'number' && days > 0) ? (nowEpoch() + days*86400) : null;
+  const code = makeInviteCode();
+  try {
+    insertInvite.run(code, creatorId || null, expires_at, note || null);
+    return { ok:true, code, expires_at };
+  } catch (e) {
+    return { ok:false, err: e && e.message ? e.message : String(e) };
+  }
+}
+
+// returns { ok, reason? } and (on ok) the user is already created elsewhere
+function validateInvite(code) {
+  const row = getInvite.get(code);
+  if (!row) return { ok:false, reason:'no_such' };
+  if (row.used_at) return { ok:false, reason:'used' };
+  if (row.expires_at && row.expires_at <= nowEpoch()) return { ok:false, reason:'expired' };
+  return { ok:true, invite: row };
+}
+
+
 // Users
 const findUserByName = db.prepare(`SELECT * FROM users WHERE username = ?`);
 function verifyLogin(username, password) {
@@ -496,6 +698,32 @@ function verifyLogin(username, password) {
   db.prepare(`UPDATE users SET last_login_at = ? WHERE id = ?`).run(nowEpoch(), u.id);
   return u;
 }
+// Create a new user account (usernames are UNIQUE COLLATE NOCASE in schema)
+// Returns { ok:true, id } on success; { ok:false, reason:'exists' } if taken.
+function createUser(username, password, opts = {}) {
+  const existing = findUserByName.get(username);
+  if (existing) return { ok: false, reason: 'exists' };
+
+  const isAdmin = opts.isAdmin ? 1 : 0; // default non-admin
+  const hash = bcrypt.hashSync(password, 10);
+
+  try {
+    db.prepare(`
+      INSERT INTO users (username, password_hash, is_admin, created_at)
+      VALUES (?, ?, ?, strftime('%s','now'))
+    `).run(username, hash, isAdmin);
+
+    const row = db.prepare(`SELECT id FROM users WHERE username = ?`).get(username);
+    return { ok: true, id: row.id };
+  } catch (e) {
+    // If some other constraint hits
+    if ((e && e.message || '').toLowerCase().includes('unique')) {
+      return { ok:false, reason:'exists' };
+    }
+    throw e;
+  }
+}
+
 
 // Messages
 const insertMessage = db.prepare(`
@@ -510,6 +738,27 @@ const recentMessages = db.prepare(`
   LIMIT ?
 `);
 const sweepExpired = db.prepare(`DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')`);
+
+// ----- Invites
+const insertInvite = db.prepare(`
+  INSERT INTO invites (code, created_by, created_at, expires_at, note)
+  VALUES (?, ?, strftime('%s','now'), ?, ?)
+`);
+
+const getInvite = db.prepare(`
+  SELECT * FROM invites WHERE code = ?
+`);
+
+const redeemInvite = db.prepare(`
+  UPDATE invites
+     SET used_by = ?, used_at = strftime('%s','now')
+   WHERE code = ? AND used_at IS NULL
+`);
+
+function systemLine(t){ return `<span class="dim">* ${escapeHTML(t)}</span>`; }
+function broadcastSystem(t){ broadcastToChat(systemLine(t)); }
+
+
 
 /* ======================= Clean Sweeper ================================ */
 function runSweep() { try { sweepExpired.run(); } catch(e) { /* optional: log */ } }
