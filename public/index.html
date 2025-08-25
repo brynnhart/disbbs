@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dead Internet Society — BBS</title>
+<style>
+  :root{
+    --bg:#000;--fg:#E6E6E6;--red:#FF4545;--green:#2FD44F;--yellow:#E3C600;
+    --blue:#3AA0FF;--magenta:#CC66FF;--cyan:#19C3C3;--white:#FFF;
+    --accent:var(--cyan);--panel:#050505;--scroll-thumb:#19C3C380;--scroll-track:#0b0b0b;
+    --inputbar-h: clamp(44px, 5vh, 72px);
+  }
+  html,body{height:100%;background:var(--bg);overflow:hidden}
+  body{margin:0;color:var(--fg);font:14px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;letter-spacing:.2px}
+  .app{height:100vh;display:flex;flex-direction:column;background:var(--bg)}
+  @supports (height:100dvh){.app{height:100dvh}}
+  #terminal{flex:1 1 auto;padding:12px 14px 18px;box-sizing:border-box;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable both-edges;scrollbar-width:thin;scrollbar-color:var(--scroll-thumb) var(--scroll-track);border-bottom:1px solid #0e0e0e}
+  #terminal::-webkit-scrollbar{width:8px}
+  #terminal::-webkit-scrollbar-track{background:var(--scroll-track)}
+  #terminal::-webkit-scrollbar-thumb{background:var(--scroll-thumb);border-radius:8px}
+  #terminal::-webkit-scrollbar-thumb:hover{background:#19C3C3B3}
+  .line{white-space:pre-wrap;word-wrap:break-word}
+  .dim{opacity:.75}
+  .red{color:var(--red)} .green{color:var(--green)} .yellow{color:var(--yellow)}
+  .blue{color:var(--blue)} .magenta{color:var(--magenta)} .cyan{color:var(--cyan)} .white{color:var(--white)}
+  .u{text-decoration:underline}
+  .rule{height:1px;background:linear-gradient(90deg,transparent,var(--accent),transparent);margin:8px 0}
+  .banner{background:linear-gradient(180deg,#0a0a0a 0%,#050505 100%);border:1px solid #121212;padding:10px 12px;margin-bottom:10px}
+  #inputbar{flex:0 0 var(--inputbar-h);display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--panel);box-sizing:border-box}
+  .prompt{color:var(--accent)}
+  #cmdForm{display:flex;flex:1 1 auto;gap:8px;min-width:0}
+  #cmdInput{flex:1 1 auto;min-width:0;background:#0c0c0c;color:var(--fg);border:1px solid #151515;outline:0;padding:10px 12px;border-radius:6px;caret-color:var(--accent)}
+  #cmdInput::placeholder{color:#6a6a6a}
+  .btn{appearance:none;border:1px solid #1b1b1b;background:#0d0d0d;color:var(--fg);padding:9px 12px;border-radius:6px;cursor:pointer}
+  .btn:hover{border-color:#2a2a2a}
+  .svg-splash-wrap{display:flex;justify-content:center;margin:8px 0 12px}
+  .svg-splash{max-width:960px;width:96%;height:auto;display:block}
+</style>
+</head>
+<body>
+  <div class="app">
+    <div id="terminal" aria-live="polite" aria-atomic="false">
+      <div class="line dim">connecting…</div>
+    </div>
+    <div id="inputbar">
+      <div class="prompt">DIS&gt;</div>
+      <form id="cmdForm" autocomplete="off">
+        <input id="cmdInput" type="text" placeholder="Type here…" spellcheck="false" autofocus>
+        <button class="btn" type="submit">Enter</button>
+      </form>
+    </div>
+  </div>
+
+<script>
+(function(){
+  var term = document.getElementById('terminal');
+  var form = document.getElementById('cmdForm');
+  var input = document.getElementById('cmdInput');
+
+  function scrollToBottom(){
+    var near = term.scrollHeight - term.scrollTop - term.clientHeight < 40;
+    if (near) term.scrollTop = term.scrollHeight;
+  }
+  function op_clear(){ term.innerHTML=''; }
+  function op_print(text, cls){
+    var d = document.createElement('div'); d.className = 'line' + (cls ? ' ' + cls : '');
+    d.textContent = text || ''; term.appendChild(d); scrollToBottom();
+  }
+  function op_printHTML(html){
+    var d = document.createElement('div'); d.className = 'line';
+    d.innerHTML = html || ''; term.appendChild(d); scrollToBottom();
+  }
+  function op_hr(){
+    var d = document.createElement('div'); d.className = 'rule';
+    term.appendChild(d); scrollToBottom();
+  }
+  function op_setInput(type, placeholder){
+    try { if (type && input.type !== type) input.type = type; } catch(e){}
+    if (typeof placeholder !== 'undefined') input.placeholder = placeholder;
+  }
+
+  var proto = (location.protocol === 'https:' ? 'wss:' : 'ws:');
+  var ws = new WebSocket(proto + '//' + location.host + '/ws');
+
+  ws.addEventListener('open', function(){
+    ws.send(JSON.stringify({ type: 'init' }));
+  });
+  input.focus();
+
+  ws.addEventListener('message', function(ev){
+    var msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg.type === 'ops' && Array.isArray(msg.ops)) {
+      msg.ops.forEach(function(op){
+        if (op.op === 'clear') op_clear();
+        else if (op.op === 'print') op_print(op.text, op.cls);
+        else if (op.op === 'printHTML') op_printHTML(op.html);
+        else if (op.op === 'hr') op_hr();
+        else if (op.op === 'setInput') op_setInput(op.inputType, op.placeholder);
+      });
+    }
+  });
+
+  ws.addEventListener('close', function(){
+    op_print('Disconnected. Reload to reconnect.', 'red');
+  });
+
+  form.addEventListener('submit', function(e){
+    e.preventDefault();
+    var raw = (input.value || '').trim();
+    if (!raw) return;
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'input', raw: raw }));
+    }
+    input.value = '';
+    input.focus();
+  });
+})();
+</script>
+</body>
+</html>

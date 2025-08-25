@@ -1,0 +1,534 @@
+// server.js (Flat Functions Edition)
+// Dead Internet Society — Node/Express + WebSocket BBS (Single-Room)
+
+const path = require('path');
+const express = require('express');
+const http = require('http');
+const WebSocket = require('ws');
+const Database = require('better-sqlite3');
+const bcrypt = require('bcryptjs');
+
+const DB_PATH = process.env.DB_PATH || './dis.sqlite3';
+const db = new Database(DB_PATH);
+
+// Pragmas for durability & perf
+db.pragma('journal_mode = WAL');
+db.pragma('synchronous = NORMAL');
+db.pragma('foreign_keys = ON');
+
+// Migrations (idempotent)
+db.exec(`
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  password_hash TEXT NOT NULL,
+  is_admin INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  last_login_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  body TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER, -- NULL means never expire
+);
+CREATE INDEX IF NOT EXISTS idx_messages_expires_at ON messages(expires_at);
+CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
+`);
+
+// Seed default retention (in days) if missing (e.g., 7 days)
+const getSetting = db.prepare(`SELECT value FROM settings WHERE key=?`);
+const setSetting = db.prepare(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`);
+if (!getSetting.get('chat_retention_days')) setSetting.run('chat_retention_days', String(7));
+
+// Seed demo user if not present
+const getUser = db.prepare(`SELECT id FROM users WHERE username = ?`);
+if (!getUser.get('Punkyroo')) {
+  const hash = bcrypt.hashSync('password', 10);
+  db.prepare(`
+    INSERT INTO users(username, password_hash, is_admin, created_at)
+    VALUES (?, ?, 1, strftime('%s','now'))
+  `).run('Punkyroo', hash);
+}
+
+
+const PORT = process.env.PORT || 3000;
+
+/* ======================= Express + Static ======================= */
+const app = express();
+app.use(express.static(path.join(__dirname, 'public')));
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server, path: '/ws' });
+
+/* ======================= Shared Chat HUB ======================== */
+const HUB = {
+  chatLog: [],         // array of { ts, user, html }
+  clients: new Set()
+};
+
+/* ======================= Utilities (ops) ======================== */
+function sendOps(ws, ops) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'ops', ops }));
+  }
+}
+function makeApi(ws) {
+  function _send(ops){ sendOps(ws, ops); }
+  return {
+    ws,
+    clear(){ _send([{op:'clear'}]); },
+    print(t,cls){ _send([{op:'print', text:String(t||''), cls:cls||''}]); },
+    printHTML(h){ _send([{op:'printHTML', html:String(h||'')}]); },
+    hr(){ _send([{op:'hr'}]); },
+    setInputType(type, placeholder){ _send([{op:'setInput', inputType:type, placeholder:placeholder}]); },
+    batch(fn){
+      const ops=[]; 
+      const b={
+        clear(){ ops.push({op:'clear'}); },
+        print(t,cls){ ops.push({op:'print', text:String(t||''), cls:cls||''}); },
+        printHTML(h){ ops.push({op:'printHTML', html:String(h||'')}); },
+        hr(){ ops.push({op:'hr'}); },
+        setInputType(type, placeholder){ ops.push({op:'setInput', inputType:type, placeholder:placeholder}); }
+      };
+      fn(b); _send(ops);
+    }
+  };
+}
+function broadcastToChat(htmlLine){
+  HUB.clients.forEach((client)=>{
+    const ctx = client.__ctx;
+    if (!ctx) return;
+    const st = ctx.state;
+    if (st && st.currentScreen === 'chat') {
+      sendOps(client, [{op:'printHTML', html: htmlLine}]);
+    }
+  });
+}
+
+/* ======================= Sanitizer + DIS Markdown ============== */
+const ALLOWED_COLORS = ['red','green','yellow','blue','magenta','cyan','white'];
+function escapeHTML(s){
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function disUnderline(s){ return s.replace(/__([^_]+)__/g,'<span class="u">$1</span>'); }
+function disBold(s){ return s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>'); }
+function disItalics(s){ return s.replace(/(^|[^_])_([^_\n][^_]*?)_(?!_)/g,'$1<em>$2</em>'); }
+function disDim(s){ return s.replace(/\[dim\]([\s\S]*?)\[\/dim\]/gi,'<span class="dim">$1</span>'); }
+function disColors(s){
+  let out = s;
+  for (const c of ALLOWED_COLORS) {
+    const re = new RegExp('\\['+c+'\\]([\\s\\s]*?)\\[\\/'+c+'\\]','gi');
+    out = out.replace(re, '<span class="'+c+'">$1</span>');
+  }
+  return out;
+}
+function sanitizeAndFormatDIS(text){
+  let out = escapeHTML(text);
+  out = disUnderline(out);
+  out = disBold(out);
+  out = disItalics(out);
+  out = disDim(out);
+  out = disColors(out);
+  return out;
+}
+
+/* ======================= SVG Splash ============================ */
+function splashSVG(){
+  return [
+    '<div class="svg-splash-wrap">',
+    '<svg class="svg-splash" viewBox="0 0 1200 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Dead Internet Society">',
+    '<defs>',
+    '<linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#19C3C3"/><stop offset="100%" stop-color="#CC66FF"/></linearGradient>',
+    '<filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>',
+    '</defs>',
+    '<rect width="1200" height="600" fill="#000"/>',
+    '<rect x="30" y="30" width="1140" height="540" rx="8" ry="8" fill="none" stroke="url(#g1)" stroke-width="2"/>',
+    '<g filter="url(#glow)" font-family="ui-monospace, Menlo, Consolas, monospace" font-weight="700" text-anchor="middle">',
+    '<text x="600" y="260" font-size="84" fill="#f0f">DEAD INTERNET SOCIETY</text>',
+    '</g>',
+    '<g font-family="ui-monospace, Menlo, Consolas, monospace" text-anchor="middle">',
+    '<text x="600" y="320" font-size="20" fill="#E6E6E6" opacity="0.9">no feeds • no infinite scroll • just people</text>',
+    '<text x="600" y="352" font-size="16" fill="#19C3C3" opacity="0.9">punk-built • human-scale • honest connection</text>',
+    '</g>',
+    '<g font-family="ui-monospace, Menlo, Consolas, monospace" text-anchor="middle" opacity="0.75">',
+    '<text x="600" y="520" font-size="14" fill="#E6E6E6">press enter to begin • type /help anytime</text>',
+    '</g>',
+    '</svg>',
+    '</div>'
+  ].join('');
+}
+
+/* ======================= State / Router ======================== */
+function makeInitialState(){
+  return {
+    authenticated:false,
+    username:null,
+    currentScreen:'splash',
+    login:{ step:'username', tempUser:'' }
+  };
+}
+function routeGo(api, state, name){
+  state.currentScreen = name;
+  if (api && api.ws) { api.ws.__ctx = { state }; } // broadcast sees current screen
+  switch(name){
+    case 'splash': return renderSplash(api, state);
+    case 'menu':   return renderMenu(api, state);
+    case 'chat':   return renderChat(api, state);
+    case 'about':  return renderAbout(api, state);
+    case 'rules':  return renderRules(api, state);
+    default:       api.print('Unknown screen: '+name, 'red');
+  }
+}
+function requireAuth(api, state){
+  if (!state.authenticated){
+    api.print('You must be logged in. Returning to login…', 'yellow');
+    routeGo(api, state, 'splash');
+    return false;
+  }
+  return true;
+}
+
+/* ======================= Screen: Splash ======================== */
+function renderSplash(api, state){
+  api.batch(b=>{
+    b.clear();
+    b.printHTML(splashSVG());
+    b.print('Login required.', 'yellow'); b.hr();
+    b.print('Enter username:', 'cyan');
+    b.setInputType('text', 'Username');
+  });
+  state.login.step='username'; state.login.tempUser='';
+}
+function splashHandleCommand(cmd, api){
+  if (cmd==='help'){ api.hr(); api.print('Splash commands:', 'yellow'); api.print('  /help   Show help','cyan'); api.print('  /clear  Clear the screen','cyan'); return true; }
+  if (cmd==='clear'){ api.clear(); return true; }
+  return false;
+}
+function splashHandleRaw(text, api, state){
+  if (state.login.step==='username'){
+    if (!text){ api.print('Please enter a username.', 'dim'); return true; }
+    state.login.tempUser = text;
+    api.print('Enter password:', 'cyan'); api.setInputType('password', 'Password'); state.login.step='password';
+  }
+  if (state.login.step==='password'){
+  const user = verifyLogin(state.login.tempUser, text);
+  if (user) {
+    state.authenticated = true;
+    state.username = user.username; // keep canonical case
+    state.userId = user.id;
+    api.setInputType('text', 'Type here… try /help'); api.print('Login successful.', 'green');
+    routeGo(api, state, 'menu');
+  } else {
+    api.print('Invalid credentials. Try again.', 'red');
+    state.login.step='username'; state.login.tempUser='';
+    api.print('Enter username:', 'cyan'); api.setInputType('text','Username');
+  }
+  return true;
+}
+
+  return true;
+}
+
+/* ======================= Screen: Menu ========================== */
+function renderMenu(api, state){
+  if (!requireAuth(api, state)) return;
+  api.batch(b=>{
+    b.clear();
+    b.printHTML('<div class="banner"><div class="line"><span class="cyan">▄▄▄</span><span class="magenta"> Dead Internet Society </span><span class="cyan">▄▄▄</span></div><div class="line dim">Command Hub — use slash commands to navigate.</div></div>');
+    b.print('Global commands:', 'yellow');
+    b.print('  /chat      Enter the Commons Chat', 'cyan');
+    b.print('  /about     About Dead Internet Society', 'cyan');
+    b.print('  /rules     Community rules', 'cyan');
+    b.print('  /format    Show DIS‑Markdown examples', 'cyan');
+    b.print('  /colors    Show color swatches', 'cyan');
+    b.print('  /whoami    Show current user', 'cyan');
+    b.print('  /help      Show all commands', 'cyan');
+    b.print('  /logout    Sign out', 'cyan');
+    b.hr();
+    b.print('Tip: You can type these anywhere. /main brings you back here.', 'dim');
+  });
+}
+
+// Numbers are no longer used here—nudge the user toward slash commands.
+function menuHandleRaw(text, api, state){
+  if (!requireAuth(api, state)) return true;
+  api.print('Use slash commands here. Try /chat, /about, /rules, /help, or /main.', 'dim');
+  return true;
+}
+
+/* ======================= Screen: Chat ========================== */
+function renderChat(api, state){
+  if (!requireAuth(api, state)) return;
+  api.batch(b=>{
+    b.clear();
+    b.print('== The Commons Chat ==', 'magenta');
+    b.print('Topic: One big room to hang out — be kind, be weird.', 'dim'); b.hr();
+
+    const rows = recentMessages.all(100).reverse(); // oldest→newest
+    if (rows.length === 0) {
+      b.print('No messages yet. Type to chat. /leave to return to menu.', 'dim');
+    } else {
+      rows.forEach(r => {
+        const ts = new Date(r.created_at*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+        const user = r.username || 'anon';
+        const html = `[${ts}] &lt;${escapeHTML(user)}&gt; ${sanitizeAndFormatDIS(r.body)}`;
+        b.printHTML(html);
+      });
+    }
+
+    b.hr();
+    b.print('Tips: typing sends a message. /leave exits. /main for Command Hub. Try **bold**, _italics_, __underline__, or [cyan]color[/cyan].', 'dim');
+  });
+}
+
+function chatHandleCommand(cmd, api, state){
+  if (!requireAuth(api, state)) return true;
+  if (cmd==='leave' || cmd==='menu' || cmd==='main'){ routeGo(api, state, 'menu'); return true; }
+  return false;
+}
+function chatHandleRaw(text, api, state){
+  if (!requireAuth(api, state)) return true;
+  const msgText = (text||'').trim(); if (!msgText) return true;
+
+  const user = state.username || 'anon';
+  const uid = state.userId || null;
+  const created = nowEpoch();
+  const ttl = retentionSeconds(); // 0 => never expire
+  const expires = ttl > 0 ? (created + ttl) : null;
+
+  // Persist
+  insertMessage.run(uid, msgText, created, expires);
+
+  // Render line (single broadcast path)
+  const ts = new Date(created*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+  const html = `[${ts}] &lt;${escapeHTML(user)}&gt; ${sanitizeAndFormatDIS(msgText)}`;
+  broadcastToChat(html);
+
+  return true;
+}
+
+
+/* ======================= Screen: About ========================= */
+function renderAbout(api, state){
+  if (!requireAuth(api, state)) return;
+  api.batch(b=>{
+    b.clear();
+    b.print('== About Dead Internet Society ==', 'magenta'); b.hr();
+    b.print('Dead Internet Society is a punk‑style middle finger to the modern feed.', 'white');
+    b.print('No engagement farming. No surveillance. No dopamine casinos. No algorithm gods.', 'white');
+    b.print('It is small, hand‑rolled, and human‑scale — a cozy return to simplicity,', 'white');
+    b.print('honesty, and connection. Think ANSI glow, door games, and weird little rooms.', 'white'); b.hr();
+    b.print('Design principles:', 'yellow');
+    b.print('• Human first: rooms over feeds, presence over metrics.', 'cyan');
+    b.print('• Anti‑algorithm: no ranking engines shaping your mind.', 'cyan');
+    b.print('• Local vibes: low‑bandwidth friendly, readable forever.', 'cyan');
+    b.print('• Consent & care: moderation with empathy; clear lines on harm.', 'cyan');
+    b.print('• Make weird art: creative anarchy over polished sameness.', 'cyan');
+    b.print('• Data minimalism: collect the least, store the least.', 'cyan');
+    b.print('• Minimal Use: no infinite scroll; this BBS avoids dominating your attention.', 'cyan'); b.hr();
+    b.print('Navigation: /main for Command Hub.', 'dim');
+  });
+}
+function aboutHandleCommand(cmd, api, state){ if (cmd==='menu'||cmd==='main'){ routeGo(api, state, 'menu'); return true; } return false; }
+function aboutHandleRaw(text, api){ api.print('Use /main to return to the Command Hub.', 'dim'); return true; }
+
+/* ======================= Screen: Rules ========================= */
+function renderRules(api, state){
+  if (!requireAuth(api, state)) return;
+  api.batch(b=>{
+    b.clear();
+    b.print('== Rules of the Dead Internet Society ==', 'magenta'); b.hr();
+    b.print('1) No harassment or bigotry. Zero tolerance for targeted abuse.', 'white');
+    b.print('2) No doxxing. Keep personal info personal. Ask before sharing.', 'white');
+    b.print('3) No spam or growth‑hacking. This is not a funnel.', 'white');
+    b.print('4) No algorithm games. No clout‑chasing. We are not the feed.', 'white');
+    b.print('5) Mark sensitive content. Consent and context matter.', 'white');
+    b.print('6) Keep it human‑scale. Quality over volume. Touch grass as needed.', 'white');
+    b.print('7) Build don’t extract. Share tools, credit work, cite sources.', 'white');
+    b.print('8) Mods are gardeners. Expect empathy, clarity, and firm lines on harm.', 'white');
+    b.print('9) Data minimalism. Don’t post anything you wouldn’t paint on a wall.', 'white');
+    b.print('10) Have fun. Make weird. Help each other.', 'white'); b.hr();
+    b.print('Navigation: /main for Command Hub.', 'dim');
+
+  });
+}
+function rulesHandleCommand(cmd, api, state){ if (cmd==='menu'||cmd==='main'){ routeGo(api, state, 'menu'); return true; } return false; }
+function rulesHandleRaw(text, api){ api.print('Use /main to return to the Command Hub.', 'dim'); return true; }
+
+/* ======================= Global Commands ======================= */
+function cmdHelp(api){
+  api.hr();
+  api.print('Global slash commands:', 'yellow');
+  api.print('  /chat      Enter the Commons Chat', 'cyan');
+  api.print('  /about     About Dead Internet Society', 'cyan');
+  api.print('  /rules     Community rules', 'cyan');
+  api.print('  /format    Show DIS‑Markdown examples', 'cyan');
+  api.print('  /colors    Show color swatches', 'cyan');
+  api.print('  /whoami    Show current user', 'cyan');
+  api.print('  /main      Return to Command Hub', 'cyan');
+  api.print('  /logout    Sign out', 'cyan');
+  api.hr();
+  api.print('DIS‑Markdown: **bold**, _italics_, __underline__, [dim]…[/dim], and color tags like [cyan]…[/cyan].', 'dim');
+}
+function cmdClear(api){ api.clear(); }
+function cmdWhoami(api, state){ api.print(state.authenticated ? (state.username||'guest') : 'Not logged in', 'cyan'); }
+function cmdChat(api, state){ if (requireAuth(api, state)) routeGo(api, state, 'chat'); }
+function cmdAbout(api, state){ if (requireAuth(api, state)) routeGo(api, state, 'about'); }
+function cmdRules(api, state){ if (requireAuth(api, state)) routeGo(api, state, 'rules'); }
+function cmdFormat(api){
+  api.hr();
+  api.print('DIS‑Markdown examples (sanitized & rendered):', 'yellow');
+  ['**Bold** and _italics_ and __underline__.',
+   'Mixing: **bold and _italic_** plus [cyan]color[/cyan] and [dim]dim[/dim].',
+   'Colors: [red]red[/red] [green]green[/green] [yellow]yellow[/yellow] [blue]blue[/blue] [magenta]magenta[/magenta] [cyan]cyan[/cyan] [white]white[/white]',
+   'Safety: <script>alert(1)</script> will be escaped.'
+  ].forEach(ex => api.printHTML(sanitizeAndFormatDIS(ex)));
+  api.hr(); api.print('Use these in Chat; everything is sanitized first.', 'dim');
+}
+function cmdLogout(api, state){
+  state.authenticated=false; state.username=null; state.login.step='username'; state.login.tempUser='';
+  api.setInputType('text', 'Username'); routeGo(api, state, 'splash');
+}
+function cmdMain(api, state){ if (requireAuth(api, state)) routeGo(api, state, 'menu'); }
+function cmdColors(api){
+  api.print('█ RED','red'); api.print('█ GREEN','green'); api.print('█ YELLOW','yellow');
+  api.print('█ BLUE','blue'); api.print('█ MAGENTA','magenta'); api.print('█ CYAN','cyan'); api.print('█ WHITE','white');
+}
+
+function handleGlobalCommand(cmd, api, state){
+  switch(cmd){
+    case 'help': return cmdHelp(api), true;
+    case 'clear': return cmdClear(api), true;
+    case 'whoami': return cmdWhoami(api, state), true;
+    case 'chat': return cmdChat(api, state), true;
+    case 'about': return cmdAbout(api, state), true;
+    case 'rules': return cmdRules(api, state), true;
+    case 'format': return cmdFormat(api), true;
+    case 'logout': return cmdLogout(api, state), true;
+    case 'main': return cmdMain(api, state), true;
+    case 'colors': return cmdColors(api), true;
+    default: return false;
+  }
+}
+
+/* ======================= WS Lifecycle ========================== */
+wss.on('connection', (ws) => {
+  HUB.clients.add(ws);
+  const state = makeInitialState();
+  const api = makeApi(ws);
+
+  // store ctx for broadcast routing
+  ws.__ctx = { state };
+
+  // Boot splash
+  routeGo(api, state, 'splash');
+
+  ws.on('message', (raw) => {
+    let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type === 'init') return;
+
+    if (msg.type === 'input') {
+      const text = String(msg.raw || '').trim(); if (!text) return;
+
+      if (text.charAt(0) === '/') {
+        const parts = text.slice(1).split(/\s+/);
+        const cmd = (parts[0] || '').toLowerCase();
+        const args = parts.slice(1); // currently unused
+        if (!handleGlobalCommand(cmd, api, state)) {
+          // delegate to screen-specific command handlers
+          const handled = (state.currentScreen === 'splash' && splashHandleCommand(cmd, api))
+                       || (state.currentScreen === 'chat'   && chatHandleCommand(cmd, api, state))
+                       || (state.currentScreen === 'about'  && aboutHandleCommand(cmd, api, state))
+                       || (state.currentScreen === 'rules'  && rulesHandleCommand(cmd, api, state))
+                       || (state.currentScreen === 'menu'   && (cmd==='help'? (cmdHelp(api), true): false));
+          if (!handled){
+            api.print(`Unknown command: /${cmd}`, 'red'); api.print('Try /help.', 'dim');
+          }
+        }
+      } else {
+        // raw input to current screen
+        switch(state.currentScreen){
+          case 'splash': splashHandleRaw(text, api, state); break;
+          case 'menu':   menuHandleRaw(text, api, state); break;
+          case 'chat':   chatHandleRaw(text, api, state); break;
+          case 'about':  aboutHandleRaw(text, api); break;
+          case 'rules':  rulesHandleRaw(text, api); break;
+          default: api.print('Not sure what to do. Try /help.', 'dim');
+        }
+      }
+    }
+  });
+
+  ws.on('close', ()=> { HUB.clients.delete(ws); });
+  ws.on('error', (err)=> { try { api.print('WS Error: '+(err && err.message ? err.message : err), 'red'); } catch(e){} });
+});
+
+
+/* ======================= Helper Functions ======================== */
+function nowEpoch() { return Math.floor(Date.now()/1000); }
+function retentionSeconds() {
+  const row = getSetting.get('chat_retention_days');
+  const days = row ? parseInt(row.value, 10) : 7;
+  return Math.max(0, days) * 24 * 60 * 60;
+}
+
+// Users
+const findUserByName = db.prepare(`SELECT * FROM users WHERE username = ?`);
+function verifyLogin(username, password) {
+  const u = findUserByName.get(username);
+  if (!u) return null;
+  if (!bcrypt.compareSync(password, u.password_hash)) return null;
+  db.prepare(`UPDATE users SET last_login_at = ? WHERE id = ?`).run(nowEpoch(), u.id);
+  return u;
+}
+
+// Messages
+const insertMessage = db.prepare(`
+  INSERT INTO messages(user_id, body, created_at, expires_at) VALUES (?, ?, ?, ?)
+`);
+const recentMessages = db.prepare(`
+  SELECT m.id, m.body, m.created_at, u.username
+  FROM messages m
+  LEFT JOIN users u ON u.id = m.user_id
+  WHERE (m.expires_at IS NULL OR m.expires_at > strftime('%s','now'))
+  ORDER BY m.created_at DESC
+  LIMIT ?
+`);
+const sweepExpired = db.prepare(`DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')`);
+
+/* ======================= Clean Sweeper ================================ */
+function runSweep() { try { sweepExpired.run(); } catch(e) { /* optional: log */ } }
+runSweep();
+//setInterval(runSweep, 60 * 1000); // every 60s
+
+
+/* ======================= Graceful shutdown ==================== */
+process.on('SIGINT', () => {
+  try { db.close(); } finally { process.exit(0); }
+});
+process.on('SIGTERM', () => {
+  try { db.close(); } finally { process.exit(0); }
+});
+
+
+
+
+/* ======================= Start ================================ */
+server.listen(PORT, () => {
+  console.log('DIS BBS listening on http://localhost:'+PORT);
+});
