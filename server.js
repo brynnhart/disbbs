@@ -728,7 +728,7 @@ function cmdMessages(api, state, args){
 function cmdHere(api, state){
   if (!requireAuth(api, state)) return;
   const here = usersCurrentlyInChat();
-  api.print(here.length ? `Here now (${here.length}): ${here.join(', ')}` : 'Nobody is here right now.', 'cyan');
+  api.print(here.length ? `Here now (${here.length}): ${here.join(', ')}` : 'Nobody is in chat right now.', 'cyan');
 }
 
 
