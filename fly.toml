@@ -1,0 +1,42 @@
+# fly.toml app configuration file generated for dis-bbs-punkyroo on 2025-08-26T09:58:08-04:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'dis-bbs-punkyroo'
+primary_region = 'fra'
+
+[build]
+
+[env]
+  DB_PATH = '/data/dis.sqlite3'
+  NODE_ENV = 'production'
+
+[[mounts]]
+  source = 'dis_data'
+  destination = '/data'
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+  [http_service.concurrency]
+    type = 'requests'
+    hard_limit = 50
+    soft_limit = 40
+
+  [[http_service.checks]]
+    interval = '10s'
+    timeout = '2s'
+    grace_period = '15s'
+    method = 'GET'
+    path = '/'
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1

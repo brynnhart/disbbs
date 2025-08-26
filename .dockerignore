@@ -1,0 +1,9 @@
+node_modules
+npm-debug.log
+Dockerfile
+.git
+.gitignore
+fly.toml
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
