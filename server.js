@@ -9,10 +9,14 @@ const Database = require('better-sqlite3');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto'); // NEW: for secure invite codes
 
+const { DoorManager } = require('./doors/manager');
+const guessDoor = require('./doors/guess');
+DoorManager.register(guessDoor);
 
 
 const DB_PATH = process.env.DB_PATH || './dis.sqlite3';
 const db = new Database(DB_PATH);
+
 
 // Pragmas for durability & perf
 db.pragma('journal_mode = WAL');
@@ -56,6 +60,21 @@ CREATE INDEX IF NOT EXISTS idx_invites_expires_at ON invites(expires_at);
 CREATE INDEX IF NOT EXISTS idx_invites_used_at    ON invites(used_at);
 
 
+CREATE TABLE IF NOT EXISTS dm_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  sender_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  recipient_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  body TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER,   -- NULL = never expire
+  read_at INTEGER       -- NULL = unread
+);
+CREATE INDEX IF NOT EXISTS idx_dm_recipient_created ON dm_messages(recipient_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_dm_expires_at ON dm_messages(expires_at);
+CREATE INDEX IF NOT EXISTS idx_dm_read_at ON dm_messages(read_at);
+
+
+
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -70,7 +89,31 @@ CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
 // Seed default retention (in days) if missing (e.g., 7 days)
 const getSetting = db.prepare(`SELECT value FROM settings WHERE key=?`);
 const setSetting = db.prepare(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`);
+const insertDM = db.prepare(`
+  INSERT INTO dm_messages (sender_id, recipient_id, body, created_at, expires_at)
+  VALUES (?, ?, ?, ?, ?)
+`);
+const listDMsForUser = db.prepare(`
+  SELECT m.id, m.body, m.created_at, m.read_at, u.username AS sender
+  FROM dm_messages m
+  LEFT JOIN users u ON u.id = m.sender_id
+  WHERE m.recipient_id = ?
+    AND (m.expires_at IS NULL OR m.expires_at > strftime('%s','now'))
+  ORDER BY (m.read_at IS NULL) DESC, m.created_at DESC
+  LIMIT ?
+`);
+const markAllDMsRead = db.prepare(`
+  UPDATE dm_messages SET read_at = strftime('%s','now')
+  WHERE recipient_id = ? AND read_at IS NULL
+`);
+const sweepExpiredDMs = db.prepare(`
+  DELETE FROM dm_messages WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')
+`);
+
 if (!getSetting.get('chat_retention_days')) setSetting.run('chat_retention_days', String(7));
+if (!getSetting.get('dm_retention_days')) setSetting.run('dm_retention_days', String(14));  // default 14 days
+if (!getSetting.get('dm_max_len')) setSetting.run('dm_max_len', String(160));              // default 160 chars
+
 
 // Seed demo user if not present
 const getUser = db.prepare(`SELECT id FROM users WHERE username = ?`);
@@ -92,7 +135,13 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/ws' });
 
 /* ======================= Shared Chat HUB ======================== */
-const HUB = { chatLog: [], clients: new Set(), online: new Set() };
+const HUB = {
+  chatLog: [],
+  clients: new Set(),
+  online: new Set(),
+  socketsByUser: new Map()   // username -> Set<WebSocket>
+};
+
 
 /* ======================= Utilities (ops) ======================== */
 function sendOps(ws, ops) {
@@ -245,7 +294,10 @@ function splashHandleRaw(text, api, state){
     state.authenticated = true;
     state.username = user.username; // keep canonical case
     HUB.online.add(state.username);
+if (!HUB.socketsByUser.has(state.username)) HUB.socketsByUser.set(state.username, new Set());
+HUB.socketsByUser.get(state.username).add(api.ws);
 broadcastSystem(`${state.username} joined`);
+
 
     state.userId = user.id;
     state.isAdmin = !!user.is_admin;  
@@ -270,6 +322,8 @@ function renderMenu(api, state){
     b.printHTML('<div class="banner"><div class="line"><span class="cyan">▄▄▄</span><span class="magenta"> Dead Internet Society </span><span class="cyan">▄▄▄</span></div><div class="line dim">Command Hub — use slash commands to navigate.</div></div>');
     b.print('Global commands:', 'yellow');
     b.print('  /chat      Enter the Commons Chat', 'cyan');
+    b.print('  /games     See list of available door games', 'cyan');
+    b.print('  /messages  View your direct messages', 'cyan');
     b.print('  /about     About Dead Internet Society', 'cyan');
     b.print('  /rules     Community rules', 'cyan');
     b.print('  /format    Show DIS‑Markdown examples', 'cyan');
@@ -279,6 +333,7 @@ function renderMenu(api, state){
     b.print('  /logout    Sign out', 'cyan');
     b.hr();
     b.print('Tip: You can type these anywhere. /main brings you back here.', 'dim');
+    b.print('Direct messages: /dm <user> <message>, /messages', 'dim');
   });
 }
 
@@ -297,6 +352,10 @@ function renderChat(api, state){
     b.print('== The Commons Chat ==', 'magenta');
     b.print('Topic: One big room to hang out — be kind, be weird.', 'dim'); b.hr();
 
+    const here = usersCurrentlyInChat();
+    b.print(here.length ? `Here now (${here.length}): ${here.join(', ')}` : 'Nobody is here yet — say hi!', 'cyan');
+    b.hr();
+
     const rows = recentMessages.all(100).reverse(); // oldest→newest
     if (rows.length === 0) {
       b.print('No messages yet. Type to chat. /leave to return to menu.', 'dim');
@@ -311,6 +370,7 @@ function renderChat(api, state){
 
     b.hr();
     b.print('Tips: typing sends a message. /leave exits. /main for Command Hub. Try **bold**, _italics_, __underline__, or [cyan]color[/cyan].', 'dim');
+    b.print('DM someone: /dm <user> <message>. View inbox: /messages.', 'dim');
   });
 }
 
@@ -394,6 +454,12 @@ function cmdHelp(api, state){
   api.print('Global slash commands:', 'yellow');
   api.print('  /register  Create an account: /register <user> <pass> <invite>', 'cyan');
   api.print('  /chat      Enter the Commons Chat', 'cyan');
+  api.print('  /here      Show who is currently in the chat', 'cyan');
+  api.print('  /doors     List available doors', 'cyan');
+api.print('  /games     List available games', 'cyan');
+api.print('  /dm        Send a direct message: /dm <user> <message>', 'cyan');
+api.print('  /messages  Show your recent direct messages', 'cyan');
+api.print('  /leave     Leave the current game', 'cyan');
   api.print('  /about     About Dead Internet Society', 'cyan');
   api.print('  /rules     Community rules', 'cyan');
   api.print('  /passwd    Change your password: /passwd <old> <new>', 'cyan');
@@ -432,7 +498,13 @@ function cmdFormat(api){
 }
 function cmdLogout(api, state){
   state.authenticated=false; state.username=null; state.login.step='username'; state.login.tempUser='';
-  if (state.username){ HUB.online.delete(state.username); broadcastSystem(`${state.username} left`); }
+  if (state.username){
+  HUB.online.delete(state.username);
+  const set = HUB.socketsByUser.get(state.username);
+  if (set) { set.delete(api.ws); if (set.size === 0) HUB.socketsByUser.delete(state.username); }
+  broadcastSystem(`${state.username} left`);
+}
+
   api.setInputType('text', 'Username'); routeGo(api, state, 'splash');
 }
 function cmdMain(api, state){ if (requireAuth(api, state)) routeGo(api, state, 'menu'); }
@@ -568,6 +640,101 @@ function cmdPasswd(api, state, args){
 }
 
 
+function cmdGames(api, state){
+  if (!requireAuth(api, state)) return;
+  const list = DoorManager.all();
+  if (!list.length){ api.print('No games installed yet.', 'dim'); return; }
+  api.hr();
+  api.print('Available games:', 'yellow');
+  list.forEach(d => api.print(`  - ${d.id}  (${d.name})`, 'cyan'));
+  api.print('Use /play <id> to enter a game. Example: /play guess', 'dim');
+}
+
+function cmdPlay(api, state, args){
+  if (!requireAuth(api, state)) return;
+  const id = (args[0] || '').toLowerCase();
+  if (!id){ api.print('Usage: /play <door-id>', 'yellow'); return; }
+  DoorManager.enter(api, state, id);
+}
+
+function cmdLeave(api, state){
+  if (state.currentScreen && state.currentScreen.startsWith('door:')) {
+    DoorManager.leave(api, state);
+    renderMenu(api, state); // return to hub
+  } else {
+    // not in a door → behave like "back to hub"
+    cmdMain(api, state);
+  }
+}
+
+
+function cmdDM(api, state, args){
+  if (!requireAuth(api, state)) return;
+  const toUser = (args[0] || '').trim();
+  const text = args.slice(1).join(' ').trim();
+
+  if (!toUser || !text) { api.print('Usage: /dm <user> <message>', 'yellow'); return; }
+
+  const max = dmMaxLen();
+  if (text.length > max) { api.print(`Message too long (max ${max} chars).`, 'red'); return; }
+
+  const rec = findUserByName.get(toUser);
+  if (!rec) { api.print('No such user.', 'red'); return; }
+  if (rec.username.toLowerCase() === (state.username||'').toLowerCase()) {
+    api.print('You cannot DM yourself.', 'yellow'); return;
+  }
+
+  const created = nowEpoch();
+  const ttl = dmRetentionSeconds();
+  const expires = ttl > 0 ? (created + ttl) : null;
+
+  insertDM.run(state.userId || null, rec.id, text, created, expires);
+
+  const ts = new Date(created*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+  const from = state.username || 'anon';
+  const htmlToSender = `[${ts}] <span class="dim">[dm→</span>${escapeHTML(rec.username)}<span class="dim">]</span> ${sanitizeAndFormatDIS(text)}`;
+  const htmlToRcpt   = `[${ts}] <span class="dim">[dm←</span>${escapeHTML(from)}<span class="dim">]</span> ${sanitizeAndFormatDIS(text)}`;
+
+  // Feedback to sender
+  api.printHTML(htmlToSender);
+
+  // Instant deliver if online (non-blocking)
+  deliverDMToUser(rec.username, htmlToRcpt);
+}
+
+
+function cmdMessages(api, state, args){
+  if (!requireAuth(api, state)) return;
+
+  const rows = listDMsForUser.all(state.userId, 50); // last 50
+  const mDays = getSetting.get('dm_retention_days').value;
+  api.hr();
+  api.print('Your Direct Messages (newest first):', 'yellow');
+  api.print('messages kept for only '+mDays+' days', 'red');
+  if (!rows.length){ api.print('No messages.', 'dim'); return; }
+
+  rows.forEach(r => {
+    const ts = new Date(r.created_at*1000).toLocaleString();
+    const from = r.sender || 'anon';
+    const body = sanitizeAndFormatDIS(r.body);
+    const badge = r.read_at ? '' : '<span class="yellow">[unread]</span> ';
+    api.printHTML(`${badge}<span class="dim">${ts}</span> <strong>${escapeHTML(from)}</strong>: ${body}`);
+  });
+
+  // Mark all as read now
+  try { markAllDMsRead.run(state.userId); } catch(e) {}
+}
+
+function cmdHere(api, state){
+  if (!requireAuth(api, state)) return;
+  const here = usersCurrentlyInChat();
+  api.print(here.length ? `Here now (${here.length}): ${here.join(', ')}` : 'Nobody is here right now.', 'cyan');
+}
+
+
+
+
+
 
 
 
@@ -578,6 +745,13 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'clear':      return cmdClear(api), true;
     case 'whoami':     return cmdWhoami(api, state), true;
     case 'who':        return cmdWho(api), true;
+    case 'games':     return cmdGames(api, state), true;
+case 'doors':     return cmdGames(api, state), true; // hidden alias
+case 'dm':        return cmdDM(api, state, args), true;
+case 'messages':  return cmdMessages(api, state, args), true;
+case 'here':      return cmdHere(api, state), true;
+    case 'play':      return cmdPlay(api, state, args), true;
+    case 'leave':     return cmdLeave(api, state), true;
     case 'passwd':     return cmdPasswd(api, state, args), true;
     case 'register':   return cmdRegister(api, state, args), true; // UPDATED
     case 'makeinvite': return cmdMakeInvite(api, state, args), true; // NEW (admin only)
@@ -615,6 +789,33 @@ wss.on('connection', (ws) => {
     if (msg.type === 'input') {
       const text = String(msg.raw || '').trim(); if (!text) return;
 
+      if (state.currentScreen.startsWith('door:')) {
+  const doorId = state.currentScreen.split(':')[1];
+  const door = DoorManager.get(doorId);
+  if (door) {
+    if (msg.type === 'input') {
+      const text = String(msg.raw || '').trim();
+      if (!text) return;
+      if (text.charAt(0) === '/') {
+        const parts = text.slice(1).split(/\s+/);
+        const cmd = (parts[0] || '').toLowerCase();
+        const args = parts.slice(1);
+        // global first
+        if (!handleGlobalCommand(cmd, api, state, args)) {
+          // door-local
+          if (!door.handleCommand || !door.handleCommand(cmd, api, state, args)) {
+            api.print(`Unknown command: /${cmd}`, 'red');
+          }
+        }
+      } else {
+        if (door.handleRaw) door.handleRaw(text, api, state);
+      }
+    }
+  }
+  return; // prevent falling through to normal screen routing
+}
+
+
       if (text.charAt(0) === '/') {
         const parts = text.slice(1).split(/\s+/);
         const cmd = (parts[0] || '').toLowerCase();
@@ -647,8 +848,12 @@ wss.on('connection', (ws) => {
   ws.on('close', ()=> {
   HUB.clients.delete(ws);
   const u = state && state.username;
-  if (u){ HUB.online.delete(u); broadcastSystem(`${u} left`); }
+  if (u){
+    const set = HUB.socketsByUser.get(u);
+    if (set) { set.delete(ws); if (set.size === 0) { HUB.socketsByUser.delete(u); HUB.online.delete(u); broadcastSystem(`${u} left`); } }
+  }
 });
+
   ws.on('error', (err)=> { try { api.print('WS Error: '+(err && err.message ? err.message : err), 'red'); } catch(e){} });
 });
 
@@ -687,6 +892,14 @@ function validateInvite(code) {
   if (row.expires_at && row.expires_at <= nowEpoch()) return { ok:false, reason:'expired' };
   return { ok:true, invite: row };
 }
+
+function deliverDMToUser(username, htmlLine){
+  const set = HUB.socketsByUser.get(username);
+  if (!set || set.size === 0) return false;
+  set.forEach(ws => sendOps(ws, [{ op: 'printHTML', html: htmlLine }]));
+  return true;
+}
+
 
 
 // Users
@@ -755,13 +968,40 @@ const redeemInvite = db.prepare(`
    WHERE code = ? AND used_at IS NULL
 `);
 
+function dmRetentionSeconds() {
+  const row = getSetting.get('dm_retention_days');
+  const days = row ? parseInt(row.value, 10) : 14;
+  return Math.max(0, days) * 86400;
+}
+function dmMaxLen() {
+  const row = getSetting.get('dm_max_len');
+  return row ? Math.max(1, parseInt(row.value, 10)) : 160;
+}
+
+function usersCurrentlyInChat() {
+  const uniq = new Set();
+  HUB.clients.forEach(ws => {
+    const st = ws && ws.__ctx && ws.__ctx.state;
+    if (st && st.currentScreen === 'chat' && st.username) {
+      uniq.add(st.username); // avoids double-counting multiple tabs
+    }
+  });
+  return Array.from(uniq).sort((a,b)=>a.localeCompare(b, 'en', {sensitivity:'base'}));
+}
+
+
+
 function systemLine(t){ return `<span class="dim">* ${escapeHTML(t)}</span>`; }
 function broadcastSystem(t){ broadcastToChat(systemLine(t)); }
 
 
 
 /* ======================= Clean Sweeper ================================ */
-function runSweep() { try { sweepExpired.run(); } catch(e) { /* optional: log */ } }
+function runSweep() {
+  try { sweepExpired.run(); } catch(e) {}
+  try { sweepExpiredDMs.run(); } catch(e) {}
+}
+
 runSweep();
 //setInterval(runSweep, 60 * 1000); // every 60s
 
