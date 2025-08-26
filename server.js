@@ -1004,7 +1004,7 @@ function runSweep() {
 }
 
 runSweep();
-//setInterval(runSweep, 60 * 1000); // every 60s
+setInterval(runSweep, 60 * 1000); // every 60s
 
 
 /* ======================= Graceful shutdown ==================== */
