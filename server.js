@@ -73,6 +73,16 @@ CREATE INDEX IF NOT EXISTS idx_dm_recipient_created ON dm_messages(recipient_id,
 CREATE INDEX IF NOT EXISTS idx_dm_expires_at ON dm_messages(expires_at);
 CREATE INDEX IF NOT EXISTS idx_dm_read_at ON dm_messages(read_at);
 
+CREATE TABLE IF NOT EXISTS suggestions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  body TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER  -- NULL = never expire
+);
+CREATE INDEX IF NOT EXISTS idx_suggestions_expires ON suggestions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_suggestions_created ON suggestions(created_at DESC);
+
 
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -110,9 +120,34 @@ const sweepExpiredDMs = db.prepare(`
   DELETE FROM dm_messages WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')
 `);
 
+const insertSuggestion = db.prepare(`
+  INSERT INTO suggestions (user_id, body, created_at, expires_at)
+  VALUES (?, ?, ?, ?)
+`);
+const listSuggestions = db.prepare(`
+  SELECT s.id, s.body, s.created_at, u.username
+  FROM suggestions s
+  LEFT JOIN users u ON u.id = s.user_id
+  WHERE (s.expires_at IS NULL OR s.expires_at > strftime('%s','now'))
+  ORDER BY s.created_at DESC
+  LIMIT 200
+`);
+const deleteSuggestionById = db.prepare(`DELETE FROM suggestions WHERE id = ?`);
+const sweepExpiredSuggestions = db.prepare(`
+  DELETE FROM suggestions WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')
+`);
+
+
 if (!getSetting.get('chat_retention_days')) setSetting.run('chat_retention_days', String(7));
 if (!getSetting.get('dm_retention_days')) setSetting.run('dm_retention_days', String(14));  // default 14 days
 if (!getSetting.get('dm_max_len')) setSetting.run('dm_max_len', String(160));              // default 160 chars
+if (!getSetting.get('suggestion_retention_days')) setSetting.run('suggestion_retention_days', String(30)); // 30 days
+if (!getSetting.get('suggestion_max_len'))       setSetting.run('suggestion_max_len',       String(300)); // 300 chars
+
+setSetting.run('suggestion_max_len', '400');
+setSetting.run('suggestion_retention_days', '60');
+
+
 
 
 // Seed demo user if not present
@@ -468,6 +503,8 @@ api.print('  /leave     Leave the current game', 'cyan');
   api.print('  /colors    Show color swatches', 'cyan');
   api.print('  /whoami    Show current user', 'cyan');
   api.print('  /who       List users currently online', 'cyan');
+  api.print('  /suggest   Add a suggestion: /suggest <text>', 'cyan');
+api.print('  /suggestions  View all current suggestions', 'cyan');
   api.print('  /main      Return to Command Hub', 'cyan');
   api.print('  /logout    Sign out', 'cyan');
 
@@ -476,6 +513,7 @@ api.print('  /leave     Leave the current game', 'cyan');
   api.print('  /makeinvite [days] [note]   Create a single‑use invite', 'cyan');
   api.print('  /listinvites [unused|used|all]  Show recent invites', 'cyan');
   api.print('  /revokeinvite <code>        Expire an unused invite', 'cyan');
+  api.print('  /removesuggestion <#>  Remove a suggestion (from the current list)', 'cyan');
 }
 
   api.hr();
@@ -732,6 +770,70 @@ function cmdHere(api, state){
   api.print(here.length ? `Here now (${here.length}): ${here.join(', ')}` : 'Nobody is in chat right now.', 'cyan');
 }
 
+function cmdSuggest(api, state, args){
+  if (!requireAuth(api, state)) return;
+  const text = (args || []).join(' ').trim();
+  if (!text){ api.print('Usage: /suggest <your suggestion>', 'yellow'); return; }
+  const max = suggestionMaxLen();
+  if (text.length > max){ api.print(`Suggestion too long (max ${max} chars).`, 'red'); return; }
+
+  const created = nowEpoch();
+  const ttl = suggestionRetentionSeconds();
+  const expires = ttl > 0 ? (created + ttl) : null;
+
+  insertSuggestion.run(state.userId || null, text, created, expires);
+broadcastSystem(`${state.username || 'anon'} added a suggestion.`);
+  api.print('Thanks — suggestion submitted.', 'green');
+}
+
+function cmdSuggestions(api, state){
+  if (!requireAuth(api, state)) return;
+  const rows = listSuggestions.all();
+  setSuggestionListForState(state, rows);
+
+  api.hr();
+  api.print('Suggestion Box (newest first):', 'yellow');
+
+  if (!rows.length){
+    api.print('No suggestions yet. Add one with /suggest <text>.', 'dim');
+    return;
+  }
+
+  rows.forEach((r, i) => {
+    const n = i + 1;
+    const ts = new Date(r.created_at*1000).toLocaleString();
+    const who = r.username || 'anon';
+    const body = sanitizeAndFormatDIS(r.body);
+    api.printHTML(`${n}. <strong>${escapeHTML(who)}</strong> <span class="dim">(${ts})</span>: ${body}`);
+  });
+
+  if (state.isAdmin) {
+    api.print('Admin: remove with /removesuggestion <#>', 'dim');
+  }
+}
+
+
+function cmdRemoveSuggestion(api, state, args){
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin){ api.print('Unknown command.', 'red'); return; } // keep hidden
+
+  const numStr = (args && args[0]) || '';
+  const n = parseInt(numStr, 10);
+  if (Number.isNaN(n) || n < 1){
+    api.print('Usage: /removesuggestion <number>', 'yellow');
+    return;
+  }
+
+  const id = getSuggestionIdByIndex(state, n);
+  if (!id){ api.print('Invalid number. Run /suggestions to refresh the list.', 'red'); return; }
+
+  const changes = deleteSuggestionById.run(id).changes;
+  if (!changes){ api.print('Could not remove (already gone?).', 'yellow'); return; }
+
+  api.print(`Suggestion #${n} removed.`, 'green');
+  // Optional: refresh the list view in-place
+  cmdSuggestions(api, state);
+}
 
 
 
@@ -765,6 +867,10 @@ case 'here':      return cmdHere(api, state), true;
     case 'logout':     return cmdLogout(api, state), true;
     case 'main':       return cmdMain(api, state), true;
     case 'colors':     return cmdColors(api), true;
+    case 'suggest':          return cmdSuggest(api, state, args), true;
+case 'suggestions':      return cmdSuggestions(api, state), true;
+case 'removesuggestion': return cmdRemoveSuggestion(api, state, args), true;
+
     default:           return false;
   }
 }
@@ -996,12 +1102,36 @@ function systemLine(t){ return `<span class="dim">* ${escapeHTML(t)}</span>`; }
 function broadcastSystem(t){ broadcastToChat(systemLine(t)); }
 
 
+function suggestionRetentionSeconds(){
+  const row = getSetting.get('suggestion_retention_days');
+  const days = row ? parseInt(row.value, 10) : 30;
+  return Math.max(0, days) * 86400;
+}
+function suggestionMaxLen(){
+  const row = getSetting.get('suggestion_max_len');
+  return row ? Math.max(1, parseInt(row.value, 10)) : 300;
+}
+
+// Map the *most recent* suggestions list for this session (index -> id)
+function setSuggestionListForState(state, rows){
+  state._suggestIndexMap = rows.map(r => r.id); // [id0, id1, ...] in display order
+}
+function getSuggestionIdByIndex(state, idx){ // idx is 1-based from user
+  if (!state._suggestIndexMap) return null;
+  const i = idx - 1;
+  return (i >= 0 && i < state._suggestIndexMap.length) ? state._suggestIndexMap[i] : null;
+}
+
+
+
 
 /* ======================= Clean Sweeper ================================ */
-function runSweep() {
-  try { sweepExpired.run(); } catch(e) {}
-  try { sweepExpiredDMs.run(); } catch(e) {}
+function runSweep(){
+  try { sweepExpired.run(); } catch(e){}
+  try { sweepExpiredDMs && sweepExpiredDMs.run(); } catch(e){}
+  try { sweepExpiredSuggestions.run(); } catch(e){}
 }
+
 
 runSweep();
 setInterval(runSweep, 60 * 1000); // every 60s
