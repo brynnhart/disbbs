@@ -221,7 +221,7 @@ function splashSVG(){
     '<filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>',
     '</defs>',
     '<rect width="1200" height="400" fill="#000"/>',
-    '<rect x="30" y="30" width="1140" height="540" rx="8" ry="8" fill="none" stroke="url(#g1)" stroke-width="2"/>',
+    '<rect x="30" y="30" width="1140" height="500" rx="8" ry="8" fill="none" stroke="url(#g1)" stroke-width="2"/>',
     '<g filter="url(#glow)" font-family="ui-monospace, Menlo, Consolas, monospace" font-weight="700" text-anchor="middle">',
     '<text x="600" y="260" font-size="84" fill="#f0f">DEAD INTERNET SOCIETY</text>',
     '</g>',
