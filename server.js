@@ -370,6 +370,7 @@ function renderChat(api, state){
 
     b.hr();
     b.print('Tips: typing sends a message. /leave exits. /main for Command Hub. Try **bold**, _italics_, __underline__, or [cyan]color[/cyan].', 'dim');
+    b.print('/here shows current people in chat.', 'dim');
     b.print('DM someone: /dm <user> <message>. View inbox: /messages.', 'dim');
   });
 }
