@@ -69,12 +69,12 @@
   function op_clear(){ term.innerHTML=''; }
 
   function op_print(text, cls){
-    var stick = isNearBottom(term); // check BEFORE append
+    var stick = isNearBottom(term);
     var d = document.createElement('div');
     d.className = 'line' + (cls ? ' ' + cls : '');
     d.textContent = text || '';
     term.appendChild(d);
-    if (stick) scrollToBottom(term); // scroll AFTER append
+    if (stick) scrollToBottom(term);
   }
 
   function op_printHTML(html){
@@ -107,31 +107,35 @@
   });
   input.focus();
 
-  // --- Click/touch anywhere in app → focus input (with sensible guards) ---
+  // ---- CLICK ANYWHERE IN APP -> FOCUS INPUT (after native click finishes) ----
   var appEl = document.querySelector('.app');
 
   function isFocusableTarget(el){
     if (!el) return false;
     if (el === input) return true;
-    if (el.closest('form')) return true;           // don't steal from form controls
+    if (el.closest('form')) return true;      // don't steal from form controls
     if (el.closest('button')) return true;
     if (el.closest('a[href]')) return true;
     if (el.isContentEditable) return true;
     return false;
   }
+
   function clickToFocus(ev){
+    // If click was on something intentionally focusable, skip
     if (isFocusableTarget(ev.target)) return;
 
-    // If user is selecting text, don't yank focus
+    // If the user is selecting text, don't yank focus
     var sel = window.getSelection && window.getSelection();
     if (sel && String(sel).length) return;
 
-    input.focus();
+    // Focus on next tick so it wins over native focus changes
+    setTimeout(function(){ input.focus(); }, 0);
   }
-  appEl.addEventListener('mousedown', clickToFocus);
-  appEl.addEventListener('touchstart', clickToFocus, { passive: true });
 
-  // ESC to refocus, handy if other widgets ever appear
+  // Use 'click' rather than 'mousedown'/'touchstart'
+  appEl.addEventListener('click', clickToFocus);
+
+  // ESC to refocus quickly if you ever add other controls
   document.addEventListener('keydown', function(ev){
     if (ev.key === 'Escape') input.focus();
   });

@@ -219,23 +219,26 @@ function broadcastToChat(htmlLine){
 
 /* ======================= Sanitizer + DIS Markdown ============== */
 const ALLOWED_COLORS = ['red','green','yellow','blue','magenta','cyan','white'];
+
 function escapeHTML(s){
   return String(s)
     .replace(/&/g,'&amp;').replace(/</g,'&lt;')
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
+
 function disUnderline(s){ return s.replace(/__([^_]+)__/g,'<span class="u">$1</span>'); }
 function disBold(s){ return s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>'); }
 function disItalics(s){ return s.replace(/(^|[^_])_([^_\n][^_]*?)_(?!_)/g,'$1<em>$2</em>'); }
 function disDim(s){ return s.replace(/\[dim\]([\s\S]*?)\[\/dim\]/gi,'<span class="dim">$1</span>'); }
+
 function disColors(s){
-  let out = s;
-  for (const c of ALLOWED_COLORS) {
-    const re = new RegExp('\\['+c+'\\]([\\s\\s]*?)\\[\\/'+c+'\\]','gi');
-    out = out.replace(re, '<span class="'+c+'">$1</span>');
-  }
-  return out;
+  // Use [\s\S]*? to match any characters (including newlines) non-greedily
+  return ALLOWED_COLORS.reduce((acc, c) => {
+    const re = new RegExp(`\\[${c}\\]([\\s\\S]*?)\\[\\/${c}\\]`, 'gi');
+    return acc.replace(re, `<span class="${c}">$1</span>`);
+  }, s);
 }
+
 function sanitizeAndFormatDIS(text){
   let out = escapeHTML(text);
   out = disUnderline(out);
@@ -245,6 +248,7 @@ function sanitizeAndFormatDIS(text){
   out = disColors(out);
   return out;
 }
+
 
 /* ======================= SVG Splash ============================ */
 function splashSVG(){
@@ -491,7 +495,6 @@ function cmdHelp(api, state){
   api.print('  /register  Create an account: /register <user> <pass> <invite>', 'cyan');
   api.print('  /chat      Enter the Commons Chat', 'cyan');
   api.print('  /here      Show who is currently in the chat', 'cyan');
-  api.print('  /doors     List available doors', 'cyan');
 api.print('  /games     List available games', 'cyan');
 api.print('  /dm        Send a direct message: /dm <user> <message>', 'cyan');
 api.print('  /messages  Show your recent direct messages', 'cyan');
