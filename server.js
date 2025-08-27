@@ -190,7 +190,12 @@ function makeApi(ws) {
     ws,
     clear(){ _send([{op:'clear'}]); },
     print(t,cls){ _send([{op:'print', text:String(t||''), cls:cls||''}]); },
-    printHTML(h){ _send([{op:'printHTML', html:String(h||'')}]); },
+    printHTML(h, cls){
+      const op = { op:'printHTML', html:String(h||'') };
+      if (cls) op.cls = cls;
+      _send([op]);
+    },
+
     hr(){ _send([{op:'hr'}]); },
     setInputType(type, placeholder){ _send([{op:'setInput', inputType:type, placeholder:placeholder}]); },
     batch(fn){
@@ -198,7 +203,12 @@ function makeApi(ws) {
       const b={
         clear(){ ops.push({op:'clear'}); },
         print(t,cls){ ops.push({op:'print', text:String(t||''), cls:cls||''}); },
-        printHTML(h){ ops.push({op:'printHTML', html:String(h||'')}); },
+        printHTML(h, cls){
+          const op = { op:'printHTML', html:String(h||'') };
+          if (cls) op.cls = cls;
+          ops.push(op);
+        },
+
         hr(){ ops.push({op:'hr'}); },
         setInputType(type, placeholder){ ops.push({op:'setInput', inputType:type, placeholder:placeholder}); }
       };
@@ -206,16 +216,23 @@ function makeApi(ws) {
     }
   };
 }
-function broadcastToChat(htmlLine){
-  HUB.clients.forEach((client)=>{
-    const ctx = client.__ctx;
-    if (!ctx) return;
+function broadcastChatFrom(htmlLine, fromUsername){
+  const from = (fromUsername || '').toLowerCase();
+
+  // Send to everyone in chat…
+  HUB.clients.forEach((client) => {
+    const ctx = client.__ctx; if (!ctx) return;
     const st = ctx.state;
-    if (st && st.currentScreen === 'chat') {
-      sendOps(client, [{op:'printHTML', html: htmlLine}]);
-    }
+    if (!(st && st.currentScreen === 'chat')) return;
+
+    // …but add cls:'me' only for the sender’s sockets
+    const u = (st.username || '').toLowerCase();
+    const isMine = from && u === from;
+
+    sendOps(client, [{ op:'printHTML', html: htmlLine, cls: isMine ? 'me' : undefined }]);
   });
 }
+
 
 /* ======================= Sanitizer + DIS Markdown ============== */
 const ALLOWED_COLORS = ['red','green','yellow','blue','magenta','cyan','white'];
@@ -403,7 +420,11 @@ function renderChat(api, state){
         const ts = new Date(r.created_at*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
         const user = r.username || 'anon';
         const html = `[${ts}] &lt;${escapeHTML(user)}&gt; ${sanitizeAndFormatDIS(r.body)}`;
-        b.printHTML(html);
+
+        // NEW: highlight my own lines
+        const mine = state.username && user &&
+                    state.username.toLowerCase() === user.toLowerCase();
+        b.printHTML(html, mine ? 'me' : undefined);
       });
     }
 
@@ -435,7 +456,8 @@ function chatHandleRaw(text, api, state){
   // Render line (single broadcast path)
   const ts = new Date(created*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
   const html = `[${ts}] &lt;${escapeHTML(user)}&gt; ${sanitizeAndFormatDIS(msgText)}`;
-  broadcastToChat(html);
+  broadcastChatFrom(html, user); // user is state.username above
+
 
   return true;
 }
@@ -539,13 +561,22 @@ function cmdFormat(api){
   api.hr(); api.print('Use these in Chat; everything is sanitized first.', 'dim');
 }
 function cmdLogout(api, state){
-  state.authenticated=false; state.username=null; state.login.step='username'; state.login.tempUser='';
-  if (state.username){
-  HUB.online.delete(state.username);
-  const set = HUB.socketsByUser.get(state.username);
-  if (set) { set.delete(api.ws); if (set.size === 0) HUB.socketsByUser.delete(state.username); }
-  broadcastSystem(`${state.username} left`);
-}
+  const u = state.username;  // capture before clearing
+  state.authenticated = false;
+  state.username = null;
+  state.login.step = 'username';
+  state.login.tempUser = '';
+  if (u){
+    HUB.online.delete(u);
+    const set = HUB.socketsByUser.get(u);
+    if (set) {
+      set.delete(api.ws);
+      if (set.size === 0) {
+        HUB.socketsByUser.delete(u);
+        broadcastSystem(`${u} left`);
+      }
+    }
+  }
 
   api.setInputType('text', 'Username'); routeGo(api, state, 'splash');
 }
@@ -1102,7 +1133,7 @@ function usersCurrentlyInChat() {
 
 
 function systemLine(t){ return `<span class="dim">* ${escapeHTML(t)}</span>`; }
-function broadcastSystem(t){ broadcastToChat(systemLine(t)); }
+function broadcastSystem(t){ broadcastChatFrom(systemLine(t), null); }
 
 
 function suggestionRetentionSeconds(){
