@@ -64,19 +64,17 @@
     threshold = typeof threshold === 'number' ? threshold : 40;
     return (el.scrollHeight - el.scrollTop - el.clientHeight) < threshold;
   }
-  function scrollToBottom(el){
-    el.scrollTop = el.scrollHeight;
-  }
+  function scrollToBottom(el){ el.scrollTop = el.scrollHeight; }
 
   function op_clear(){ term.innerHTML=''; }
 
   function op_print(text, cls){
-    var stick = isNearBottom(term);                // <- check BEFORE append
+    var stick = isNearBottom(term); // check BEFORE append
     var d = document.createElement('div');
     d.className = 'line' + (cls ? ' ' + cls : '');
     d.textContent = text || '';
     term.appendChild(d);
-    if (stick) scrollToBottom(term);               // <- scroll AFTER append
+    if (stick) scrollToBottom(term); // scroll AFTER append
   }
 
   function op_printHTML(html){
@@ -109,9 +107,37 @@
   });
   input.focus();
 
+  // --- Click/touch anywhere in app → focus input (with sensible guards) ---
+  var appEl = document.querySelector('.app');
+
+  function isFocusableTarget(el){
+    if (!el) return false;
+    if (el === input) return true;
+    if (el.closest('form')) return true;           // don't steal from form controls
+    if (el.closest('button')) return true;
+    if (el.closest('a[href]')) return true;
+    if (el.isContentEditable) return true;
+    return false;
+  }
+  function clickToFocus(ev){
+    if (isFocusableTarget(ev.target)) return;
+
+    // If user is selecting text, don't yank focus
+    var sel = window.getSelection && window.getSelection();
+    if (sel && String(sel).length) return;
+
+    input.focus();
+  }
+  appEl.addEventListener('mousedown', clickToFocus);
+  appEl.addEventListener('touchstart', clickToFocus, { passive: true });
+
+  // ESC to refocus, handy if other widgets ever appear
+  document.addEventListener('keydown', function(ev){
+    if (ev.key === 'Escape') input.focus();
+  });
+
   ws.addEventListener('message', function(ev){
-    var msg;
-    try { msg = JSON.parse(ev.data); } catch { return; }
+    var msg; try { msg = JSON.parse(ev.data); } catch { return; }
     if (msg.type === 'ops' && Array.isArray(msg.ops)) {
       msg.ops.forEach(function(op){
         if (op.op === 'clear') op_clear();
@@ -120,8 +146,6 @@
         else if (op.op === 'hr') op_hr();
         else if (op.op === 'setInput') op_setInput(op.inputType, op.placeholder);
       });
-      // Optional: one more nudge if we were near bottom at message start.
-      // (If you want this, compute stickOnce before the loop.)
     }
   });
 
@@ -141,5 +165,6 @@
   });
 })();
 </script>
+
 </body>
 </html>
