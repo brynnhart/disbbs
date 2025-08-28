@@ -137,6 +137,8 @@ const sweepExpiredSuggestions = db.prepare(`
   DELETE FROM suggestions WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')
 `);
 
+try { db.prepare("ALTER TABLE users ADD COLUMN preferred_color TEXT").run(); } catch(_) {}
+
 
 if (!getSetting.get('chat_retention_days')) setSetting.run('chat_retention_days', String(7));
 if (!getSetting.get('dm_retention_days')) setSetting.run('dm_retention_days', String(14));  // default 14 days
@@ -146,6 +148,10 @@ if (!getSetting.get('suggestion_max_len'))       setSetting.run('suggestion_max_
 
 setSetting.run('suggestion_max_len', '400');
 setSetting.run('suggestion_retention_days', '60');
+
+const setUserColor = db.prepare("UPDATE users SET preferred_color = ? WHERE id = ?");
+const getUserColor = db.prepare("SELECT preferred_color FROM users WHERE id = ?");
+
 
 
 
@@ -159,6 +165,8 @@ if (!getUser.get('Punkyroo')) {
     VALUES (?, ?, 1, strftime('%s','now'))
   `).run('Punkyroo', hash);
 }
+
+
 
 
 const PORT = process.env.PORT || 3000;
@@ -347,19 +355,28 @@ function splashHandleRaw(text, api, state){
   if (state.login.step==='password'){
   const user = verifyLogin(state.login.tempUser, text);
   if (user) {
-    state.authenticated = true;
-    state.username = user.username; // keep canonical case
-    HUB.online.add(state.username);
-if (!HUB.socketsByUser.has(state.username)) HUB.socketsByUser.set(state.username, new Set());
-HUB.socketsByUser.get(state.username).add(api.ws);
-broadcastSystem(`${state.username} joined`);
+  state.authenticated = true;
 
+  // Set identifiers first
+  state.userId   = user.id;
+  state.username = user.username; // keep canonical case
+  state.isAdmin  = !!user.is_admin;
 
-    state.userId = user.id;
-    state.isAdmin = !!user.is_admin;  
-    api.setInputType('text', 'Type here… try /help'); api.print('Login successful.', 'green');
-    routeGo(api, state, 'menu');
-  } else {
+  // Load preferred color for this session
+  const rowColor = getUserColor.get(state.userId);
+  state.userColor = rowColor ? rowColor.preferred_color : null;
+
+  // Presence bookkeeping
+  HUB.online.add(state.username);
+  if (!HUB.socketsByUser.has(state.username)) HUB.socketsByUser.set(state.username, new Set());
+  HUB.socketsByUser.get(state.username).add(api.ws);
+  broadcastSystem(`${state.username} joined`);
+
+  // UI + route
+  api.setInputType('text', 'Type here… try /help');
+  api.print('Login successful.', 'green');
+  routeGo(api, state, 'menu');
+} else {
     api.print('Invalid credentials. Try again.', 'red');
     state.login.step='username'; state.login.tempUser='';
     api.print('Enter username:', 'cyan'); api.setInputType('text','Username');
@@ -417,15 +434,20 @@ function renderChat(api, state){
       b.print('No messages yet. Type to chat. /leave to return to menu.', 'dim');
     } else {
       rows.forEach(r => {
-        const ts = new Date(r.created_at*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
-        const user = r.username || 'anon';
-        const html = `[${ts}] &lt;${escapeHTML(user)}&gt; ${sanitizeAndFormatDIS(r.body)}`;
+  const safeBody = sanitizeAndFormatDIS(r.body);
+  const bodyWithColor = r.color
+    ? `<span style="color:${r.color}">${safeBody}</span>`
+    : safeBody;
 
-        // NEW: highlight my own lines
-        const mine = state.username && user &&
-                    state.username.toLowerCase() === user.toLowerCase();
-        b.printHTML(html, mine ? 'me' : undefined);
-      });
+  const ts = new Date(r.created_at*1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  const user = r.username || 'anon';
+  const html = `<span class="dim">[${ts}]</span> <strong>${escapeHTML(user)}</strong>: ${bodyWithColor}`;
+
+  const mine = state.username && user &&
+               state.username.toLowerCase() === user.toLowerCase();
+  b.printHTML(html, mine ? 'me' : undefined);
+});
+
     }
 
     b.hr();
@@ -440,27 +462,32 @@ function chatHandleCommand(cmd, api, state){
   if (cmd==='leave' || cmd==='menu' || cmd==='main'){ routeGo(api, state, 'menu'); return true; }
   return false;
 }
-function chatHandleRaw(text, api, state){
-  if (!requireAuth(api, state)) return true;
-  const msgText = (text||'').trim(); if (!msgText) return true;
+function chatHandleRaw(api, state, text){
+  const safeBody = sanitizeAndFormatDIS(text);
+  const bodyWithColor = state.userColor
+    ? `<span style="color:${state.userColor}">${safeBody}</span>`
+    : safeBody;
 
-  const user = state.username || 'anon';
-  const uid = state.userId || null;
-  const created = nowEpoch();
-  const ttl = retentionSeconds(); // 0 => never expire
-  const expires = ttl > 0 ? (created + ttl) : null;
+  const ts = nowEpoch();
+  const stamp = new Date(ts*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  const html = `<span class="dim">[${stamp}]</span> <strong>${escapeHTML(state.username)}</strong>: ${bodyWithColor}`;
 
-  // Persist
-  insertMessage.run(uid, msgText, created, expires);
+  // Compute retention-based expiry
+  const ttl = retentionSeconds();                 // days → seconds (your helper)
+  const expires = ttl > 0 ? (ts + ttl) : null;
 
-  // Render line (single broadcast path)
-  const ts = new Date(created*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
-  const html = `[${ts}] &lt;${escapeHTML(user)}&gt; ${sanitizeAndFormatDIS(msgText)}`;
-  broadcastChatFrom(html, user); // user is state.username above
+  // Save to DB (correct statement + all params)
+  insertMessage.run(state.userId || null, text, ts, expires);
 
+  // In-memory log for quick replay
+  HUB.chatLog.push({ html, from: state.username, color: state.userColor, created_at: ts });
+  if (HUB.chatLog.length > 500) HUB.chatLog.shift();
 
-  return true;
+  // Broadcast ('.me' class only to sender is already handled in broadcastChatFrom)
+  broadcastChatFrom(html, state.username);
 }
+
+
 
 
 /* ======================= Screen: About ========================= */
@@ -526,6 +553,9 @@ api.print('  /leave     Leave the current game', 'cyan');
   api.print('  /passwd    Change your password: /passwd <old> <new>', 'cyan');
   api.print('  /format    Show DIS‑Markdown examples', 'cyan');
   api.print('  /colors    Show color swatches', 'cyan');
+  api.print('  /setcolor <hex|name>  Set your chat color (e.g., #19c3c3 or cyan)', 'cyan');
+api.print('  /color                Show your current color', 'cyan');
+api.print('  /colorreset           Clear your color', 'cyan');
   api.print('  /whoami    Show current user', 'cyan');
   api.print('  /who       List users currently online', 'cyan');
   api.print('  /suggest   Add a suggestion: /suggest <text>', 'cyan');
@@ -869,6 +899,41 @@ function cmdRemoveSuggestion(api, state, args){
   cmdSuggestions(api, state);
 }
 
+function cmdSetColor(api, state, args){
+  if (!requireAuth(api, state)) return;
+  const raw = (args||[]).join(' ').trim();
+  if (!raw) {
+    api.print('Usage: /setcolor <hex|name>', 'yellow');
+    api.print('Examples: /setcolor #19c3c3  or  /setcolor cyan', 'dim');
+    return;
+  }
+  const res = parseUserColor(raw);
+  if (!res.ok) {
+    if (res.reason === 'dark') api.print('That color is too dark for a black background. Pick something brighter.', 'red');
+    else api.print('Invalid color. Use a hex like #A1B2C3 or a name like cyan, red, magenta…', 'red');
+    return;
+  }
+  setUserColor.run(res.hex, state.userId);
+  state.userColor = res.hex; // cache for this session
+  api.print(`Color set to ${res.hex}.`, 'green');
+  // Optional preview:
+  api.printHTML(`Preview: <span style="color:${res.hex}">this is your chat color</span>`);
+}
+
+function cmdColor(api, state){
+  if (!requireAuth(api, state)) return;
+  const row = getUserColor.get(state.userId);
+  const hex = row && row.preferred_color;
+  if (!hex) { api.print('You have no color set. Use /setcolor <hex|name>.', 'yellow'); return; }
+  api.printHTML(`Your color: <strong>${hex}</strong> — <span style="color:${hex}">preview text</span>`);
+}
+
+function cmdColorReset(api, state){
+  if (!requireAuth(api, state)) return;
+  setUserColor.run(null, state.userId);
+  state.userColor = null;
+  api.print('Color reset. You now use the default theme color.', 'green');
+}
 
 
 
@@ -887,6 +952,9 @@ case 'doors':     return cmdGames(api, state), true; // hidden alias
 case 'dm':        return cmdDM(api, state, args), true;
 case 'messages':  return cmdMessages(api, state, args), true;
 case 'here':      return cmdHere(api, state), true;
+case 'setcolor':    return cmdSetColor(api, state, args), true;
+case 'color':       return cmdColor(api, state), true;
+case 'colorreset':  return cmdColorReset(api, state), true;
     case 'play':      return cmdPlay(api, state, args), true;
     case 'leave':     return cmdLeave(api, state), true;
     case 'passwd':     return cmdPasswd(api, state, args), true;
@@ -1084,7 +1152,7 @@ const insertMessage = db.prepare(`
   INSERT INTO messages(user_id, body, created_at, expires_at) VALUES (?, ?, ?, ?)
 `);
 const recentMessages = db.prepare(`
-  SELECT m.id, m.body, m.created_at, u.username
+  SELECT m.id, m.body, m.created_at, u.username,u.preferred_color AS color 
   FROM messages m
   LEFT JOIN users u ON u.id = m.user_id
   WHERE (m.expires_at IS NULL OR m.expires_at > strftime('%s','now'))
@@ -1155,6 +1223,52 @@ function getSuggestionIdByIndex(state, idx){ // idx is 1-based from user
   const i = idx - 1;
   return (i >= 0 && i < state._suggestIndexMap.length) ? state._suggestIndexMap[i] : null;
 }
+
+// --- User color helpers ---
+const NAMED_COLORS = {
+  red:'#FF4545', green:'#2FD44F', yellow:'#E3C600', blue:'#3AA0FF',
+  magenta:'#CC66FF', cyan:'#19C3C3', white:'#FFFFFF', gray:'#B0B0B0', orange:'#FFA500',
+  purple:'#A64CE6', pink:'#FF77AA', lime:'#B6FF00'
+};
+
+function normalizeHex(s){
+  if (!s) return null;
+  s = s.trim().toLowerCase();
+  if (s in NAMED_COLORS) return NAMED_COLORS[s];
+  // #rgb or #rrggbb
+  const m3 = s.match(/^#?([0-9a-f]{3})$/i);
+  if (m3) {
+    const r = m3[1]; return ('#' + r[0]+r[0] + r[1]+r[1] + r[2]+r[2]).toUpperCase();
+  }
+  const m6 = s.match(/^#?([0-9a-f]{6})$/i);
+  if (m6) return ('#' + m6[1]).toUpperCase();
+  return null;
+}
+
+function relLuminance(hex){
+  // hex "#RRGGBB" -> WCAG relative luminance
+  const r = parseInt(hex.slice(1,3),16)/255;
+  const g = parseInt(hex.slice(3,5),16)/255;
+  const b = parseInt(hex.slice(5,7),16)/255;
+  const f = v => (v <= 0.03928 ? v/12.92 : Math.pow((v+0.055)/1.055, 2.4));
+  const R = f(r), G = f(g), B = f(b);
+  return 0.2126*R + 0.7152*G + 0.0722*B;
+}
+
+function isReadableOnBlack(hex){
+  // Contrast against black (L=0). Ratio = (Ltext + 0.05) / 0.05.
+  // Require >= 4.5:1 for good readability on black.
+  // => Ltext >= 0.175
+  return relLuminance(hex) >= 0.175;
+}
+
+function parseUserColor(input){
+  const hex = normalizeHex(input);
+  if (!hex) return { ok:false, reason:'invalid' };
+  if (!isReadableOnBlack(hex)) return { ok:false, reason:'dark' };
+  return { ok:true, hex };
+}
+
 
 
 
