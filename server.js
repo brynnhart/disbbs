@@ -241,6 +241,33 @@ function sanitizeAndFormatDIS(text){
   return out;
 }
 
+// --- Visible-length helpers for DIS display names ---
+const COLOR_TAGS = ['dim', ...ALLOWED_COLORS];
+
+// Remove DIS-markup while keeping the inner text, to measure what will show.
+function stripDISFormatting(s){
+  if (!s) return '';
+  // Remove opening/closing color/dim tags but keep content
+  COLOR_TAGS.forEach(tag => {
+    const open  = new RegExp(`\\[${tag}\\]`, 'gi');
+    const close = new RegExp(`\\[\\/${tag}\\]`, 'gi');
+    s = s.replace(open, '').replace(close, '');
+  });
+  // **bold** -> bold
+  s = s.replace(/\*\*([^*]+)\*\*/g, '$1');
+  // __underline__ -> underline
+  s = s.replace(/__([^_]+)__/g, '$1');
+  // _italics_ -> italics  (matches your renderer)
+  s = s.replace(/(^|[^_])_([^_\n][^_]*?)_(?!_)/g, '$1$2');
+  // Drop any stray [tag] or [/tag] remnants
+  s = s.replace(/\[(?:\/)?[a-z]+\]/gi, '');
+  return s;
+}
+
+function visibleLengthDIS(s){
+  return stripDISFormatting(String(s)).length;
+}
+
 // ======================= SVG Splash =======================
 function splashSVG(){
   return [
@@ -601,13 +628,26 @@ const getUserDisplay = db.prepare(`SELECT display_name FROM users WHERE id = ?`)
 function cmdSetDisplay(api, state, args){
   if (!requireAuth(api, state)) return;
   const raw = (args||[]).join(' ').trim();
-  if (!raw){ api.print('Usage: /setdisplay <name>', 'yellow'); return; }
-  if (raw.length > 40){ api.print('Display name too long (max 40 chars).', 'red'); return; }
+  if (!raw){
+    api.print('Usage: /setdisplay <name>', 'yellow');
+    return;
+  }
+
+  const maxVisible = 40;
+  const visibleLen = visibleLengthDIS(raw);
+
+  if (visibleLen > maxVisible){
+    api.print(`Display name too long when rendered (max ${maxVisible} visible characters).`, 'red');
+    api.print(`Yours is ${visibleLen}. Formatting markers don’t count toward the limit.`, 'dim');
+    return;
+  }
+
   setUserDisplay.run(raw, state.userId);
   state.displayName = raw;
   api.print('Display name updated.', 'green');
-  api.printHTML(`Preview: ${sanitizeAndFormatDIS(raw)}`);
+  api.printHTML(`Preview: ${sanitizeAndFormatDIS(raw)} <span class="dim">(${visibleLen}/${maxVisible})</span>`);
 }
+
 function cmdDisplay(api, state){
   if (!requireAuth(api, state)) return;
   const dn = state.displayName || state.username;
