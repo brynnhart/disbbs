@@ -21,7 +21,7 @@ db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 db.pragma('foreign_keys = ON');
 
-// Migrations (idempotent)
+// ======================= Migrations (idempotent) =======================
 db.exec(`
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
@@ -91,12 +91,15 @@ CREATE INDEX IF NOT EXISTS idx_messages_expires_at ON messages(expires_at);
 CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
 `);
 
-// --- migration: add preferred_color to users (safe if already exists)
+// --- existing migration: add preferred_color to users (safe if already exists)
 try { db.prepare('ALTER TABLE users ADD COLUMN preferred_color TEXT').run(); } catch(_) {}
+// --- NEW migration: add display_name to users (safe if already exists)
+try { db.prepare('ALTER TABLE users ADD COLUMN display_name TEXT').run(); } catch(_) {}
 
-// Seed settings
+// ======================= Prepared statements / settings =======================
 const getSetting = db.prepare(`SELECT value FROM settings WHERE key=?`);
 const setSetting = db.prepare(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`);
+
 const insertDM = db.prepare(`
   INSERT INTO dm_messages (sender_id, recipient_id, body, created_at, expires_at)
   VALUES (?, ?, ?, ?, ?)
@@ -131,13 +134,13 @@ const listSuggestions = db.prepare(`
 const deleteSuggestionById = db.prepare(`DELETE FROM suggestions WHERE id = ?`);
 const sweepExpiredSuggestions = db.prepare(`DELETE FROM suggestions WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')`);
 
-if (!getSetting.get('chat_retention_days')) setSetting.run('chat_retention_days', String(7));
-if (!getSetting.get('dm_retention_days')) setSetting.run('dm_retention_days', String(14));
-if (!getSetting.get('dm_max_len')) setSetting.run('dm_max_len', String(160));
-if (!getSetting.get('suggestion_retention_days')) setSetting.run('suggestion_retention_days', String(60));
-if (!getSetting.get('suggestion_max_len')) setSetting.run('suggestion_max_len', String(400));
+if (!getSetting.get('chat_retention_days'))        setSetting.run('chat_retention_days', String(7));
+if (!getSetting.get('dm_retention_days'))          setSetting.run('dm_retention_days', String(14));
+if (!getSetting.get('dm_max_len'))                 setSetting.run('dm_max_len', String(160));
+if (!getSetting.get('suggestion_retention_days'))  setSetting.run('suggestion_retention_days', String(60));
+if (!getSetting.get('suggestion_max_len'))         setSetting.run('suggestion_max_len', String(400));
 
-// Seed demo admin
+// Seed demo admin if missing
 const getUser = db.prepare(`SELECT id FROM users WHERE username = ?`);
 if (!getUser.get('Punkyroo')) {
   const hash = bcrypt.hashSync('password', 10);
@@ -149,13 +152,13 @@ if (!getUser.get('Punkyroo')) {
 
 const PORT = process.env.PORT || 3000;
 
-/* ======================= Express + Static ======================= */
+// ======================= Express + Static =======================
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/ws' });
 
-/* ======================= Shared Chat HUB ======================== */
+// ======================= Shared Chat HUB =======================
 const HUB = {
   chatLog: [],
   clients: new Set(),
@@ -163,7 +166,7 @@ const HUB = {
   socketsByUser: new Map()   // username -> Set<WebSocket>
 };
 
-/* ======================= Utilities (ops) ======================== */
+// ======================= Utilities (ops) =======================
 function sendOps(ws, ops) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'ops', ops }));
@@ -211,7 +214,7 @@ function broadcastChatFrom(htmlLine, fromUsername){
   });
 }
 
-/* ======================= Sanitizer + DIS Markdown ============== */
+// ======================= Sanitizer + DIS Markdown =======================
 const ALLOWED_COLORS = ['red','green','yellow','blue','magenta','cyan','white'];
 function escapeHTML(s){
   return String(s)
@@ -238,7 +241,7 @@ function sanitizeAndFormatDIS(text){
   return out;
 }
 
-/* ======================= SVG Splash ============================ */
+// ======================= SVG Splash =======================
 function splashSVG(){
   return [
     '<div class="svg-splash-wrap">',
@@ -256,12 +259,39 @@ function splashSVG(){
     '<text x="600" y="320" font-size="20" fill="#E6E6E6" opacity="0.9">no feeds • no infinite scroll • just people</text>',
     '<text x="600" y="352" font-size="16" fill="#19C3C3" opacity="0.9">punk-built • human-scale • honest connection</text>',
     '</g>',
+
+    // Pride flag (left)
+    '<g aria-label="Pride flag" transform="translate(360,490)">',
+    '<rect x="0" y="0" width="96" height="30" rx="4" ry="4" fill="none" stroke="#222" stroke-width="1"/>',
+    '<rect x="0" y="0"  width="96" height="5" fill="#E40303"/>',
+    '<rect x="0" y="5" width="96" height="5" fill="#FF8C00"/>',
+    '<rect x="0" y="10" width="96" height="5" fill="#FFED00"/>',
+    '<rect x="0" y="15" width="96" height="5" fill="#008026"/>',
+    '<rect x="0" y="20" width="96" height="5" fill="#004DFF"/>',
+    '<rect x="0" y="25" width="96" height="5" fill="#750787"/>',
+    '</g>',
+
+    // Welcome text
+    '<g font-family="ui-monospace, Menlo, Consolas, monospace" text-anchor="middle" aria-label="Welcome message">',
+    '<text x="600" y="510" font-size="13" fill="#E6E6E6">You are loved.  You are welcome</text>',
+    '</g>',
+
+    // Trans flag (right)
+    '<g aria-label="Transgender flag" transform="translate(744,490)">',
+    '<rect x="0" y="0" width="96" height="30" rx="4" ry="4" fill="none" stroke="#222" stroke-width="1"/>',
+    '<rect x="0" y="0"  width="96" height="6" fill="#5BCEFA"/>',
+    '<rect x="0" y="6" width="96" height="6" fill="#F5A9B8"/>',
+    '<rect x="0" y="12" width="96" height="6" fill="#FFFFFF"/>',
+    '<rect x="0" y="18" width="96" height="6" fill="#F5A9B8"/>',
+    '<rect x="0" y="24" width="96" height="6" fill="#5BCEFA"/>',
+    '</g>',
+
     '</svg>',
     '</div>'
   ].join('');
 }
 
-/* ======================= State / Router ======================== */
+// ======================= State / Router =======================
 function makeInitialState(){
   return {
     authenticated:false,
@@ -270,7 +300,8 @@ function makeInitialState(){
     login:{ step:'username', tempUser:'' },
     userId:null,
     isAdmin:false,
-    userColor:null
+    userColor:null,
+    displayName:null
   };
 }
 function routeGo(api, state, name){
@@ -294,7 +325,7 @@ function requireAuth(api, state){
   return true;
 }
 
-/* ======================= Screen: Splash ======================== */
+// ======================= Screen: Splash (login/register) =======================
 function renderSplash(api, state){
   api.batch(b=>{
     b.clear();
@@ -320,14 +351,19 @@ function splashHandleRaw(text, api, state){
     const user = verifyLogin(state.login.tempUser, text);
     if (user) {
       state.authenticated = true;
+
       // identifiers first
       state.userId   = user.id;
       state.username = user.username; // canonical case
       state.isAdmin  = !!user.is_admin;
-      // load preferred color for session
+
+      // load preferred color & display name for session
       const rc = getUserColor.get(state.userId);
       state.userColor = rc ? rc.preferred_color : null;
+      const dnRow = getUserDisplay.get(state.userId);
+      state.displayName = dnRow && dnRow.display_name ? dnRow.display_name : state.username;
 
+      // presence
       HUB.online.add(state.username);
       if (!HUB.socketsByUser.has(state.username)) HUB.socketsByUser.set(state.username, new Set());
       HUB.socketsByUser.get(state.username).add(api.ws);
@@ -346,7 +382,7 @@ function splashHandleRaw(text, api, state){
   return true;
 }
 
-/* ======================= Screen: Menu ========================== */
+// ======================= Screen: Menu =======================
 function renderMenu(api, state){
   if (!requireAuth(api, state)) return;
   api.batch(b=>{
@@ -363,6 +399,9 @@ function renderMenu(api, state){
     b.print('  /setcolor  Set your chat color', 'cyan');
     b.print('  /color     Show your chat color', 'cyan');
     b.print('  /colorreset Reset your chat color', 'cyan');
+    b.print('  /setdisplay <name>  Set your display name (markdown allowed)', 'cyan');
+    b.print('  /display            Show your display name', 'cyan');
+    b.print('  /displayreset       Reset display name to your username', 'cyan');
     b.print('  /whoami    Show current user', 'cyan');
     b.print('  /help      Show all commands', 'cyan');
     b.print('  /logout    Sign out', 'cyan');
@@ -377,7 +416,7 @@ function menuHandleRaw(text, api, state){
   return true;
 }
 
-/* ======================= Screen: Chat ========================== */
+// ======================= Screen: Chat =======================
 function renderChat(api, state){
   if (!requireAuth(api, state)) return;
   api.batch(b=>{
@@ -395,11 +434,12 @@ function renderChat(api, state){
     } else {
       rows.forEach(r => {
         const ts = new Date(r.created_at*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
-        const user = r.username || 'anon';
+        const disp = r.display_name || r.username || 'anon';
         const safeBody = sanitizeAndFormatDIS(r.body);
         const bodyWithColor = r.color ? `<span style="color:${r.color}">${safeBody}</span>` : safeBody;
-        const html = `[${ts}] &lt;${escapeHTML(user)}&gt; ${bodyWithColor}`;
-        const mine = state.username && user && state.username.toLowerCase() === user.toLowerCase();
+        const html = `[${ts}] &lt;${sanitizeAndFormatDIS(disp)}&gt; ${bodyWithColor}`;
+        const mine = state.username && r.username &&
+                     state.username.toLowerCase() === r.username.toLowerCase();
         b.printHTML(html, mine ? 'me' : undefined);
       });
     }
@@ -419,7 +459,6 @@ function chatHandleRaw(text, api, state){
   if (!requireAuth(api, state)) return true;
   const msgText = (text||'').trim(); if (!msgText) return true;
 
-  const user = state.username || 'anon';
   const uid = state.userId || null;
   const created = nowEpoch();
   const ttl = retentionSeconds(); // 0 => never expire
@@ -428,17 +467,19 @@ function chatHandleRaw(text, api, state){
   // Persist plain body
   insertMessage.run(uid, msgText, created, expires);
 
-  // Render line using session color (body only)
+  // Render line using session color (body only) and DISPLAY NAME for the tag
   const ts = new Date(created*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
   const safeBody = sanitizeAndFormatDIS(msgText);
   const bodyWithColor = state.userColor ? `<span style="color:${state.userColor}">${safeBody}</span>` : safeBody;
-  const html = `[${ts}] &lt;${escapeHTML(user)}&gt; ${bodyWithColor}`;
+  const disp = state.displayName || state.username || 'anon';
+  const html = `[${ts}] &lt;${sanitizeAndFormatDIS(disp)}&gt; ${bodyWithColor}`;
 
-  broadcastChatFrom(html, user);
+  // Broadcast; use login name for '.me' determination
+  broadcastChatFrom(html, state.username);
   return true;
 }
 
-/* ======================= Screen: About ========================= */
+// ======================= Screen: About =======================
 function renderAbout(api, state){
   if (!requireAuth(api, state)) return;
   api.batch(b=>{
@@ -446,8 +487,9 @@ function renderAbout(api, state){
     b.print('== About Dead Internet Society ==', 'magenta'); b.hr();
     b.print('Dead Internet Society is a punk-style middle finger to the modern feed.', 'white');
     b.print('No engagement farming. No surveillance. No dopamine casinos. No algorithm gods.', 'white');
-    b.print('It is small, hand-rolled, and human-scale — a cozy return to simplicity,', 'white');
-    b.print('honesty, and connection. Think ANSI glow, door games, and weird little rooms.', 'white'); b.hr();
+    b.print('It is small, hand-rolled, and human-scale.  A cozy return to simplicity,', 'white');
+    b.print('honesty, and connection. Think ANSI glow, door games, and weird little rooms.', 'white');
+    b.hr();
     b.print('Design principles:', 'yellow');
     b.print('• Human first: rooms over feeds, presence over metrics.', 'cyan');
     b.print('• Anti-algorithm: no ranking engines shaping your mind.', 'cyan');
@@ -462,12 +504,14 @@ function renderAbout(api, state){
 function aboutHandleCommand(cmd, api, state){ if (cmd==='menu'||cmd==='main'){ routeGo(api, state, 'menu'); return true; } return false; }
 function aboutHandleRaw(text, api){ api.print('Use /main to return to the Command Hub.', 'dim'); return true; }
 
-/* ======================= Screen: Rules ========================= */
+// ======================= Screen: Rules =======================
 function renderRules(api, state){
   if (!requireAuth(api, state)) return;
   api.batch(b=>{
     b.clear();
     b.print('== Rules of the Dead Internet Society ==', 'magenta'); b.hr();
+    b.print('Our primary goal is to keep a small, positive community.  We strive to be the EXACT opposite of toxic social media.  Bigotry, Homophobia, Transphobia, Mysogyny, Anti-intellectualism and any other outright hateful, toxic, negative, corrosive actions are commentary will NOT be tolerated.', 'white');
+    b.print('Breaking any rule will result in an immediate and perminant ban. No appeals.', 'red');
     b.print('1) No harassment or bigotry. Zero tolerance for targeted abuse.', 'white');
     b.print('2) No doxxing. Keep personal info personal. Ask before sharing.', 'white');
     b.print('3) No spam or growth-hacking. This is not a funnel.', 'white');
@@ -475,8 +519,7 @@ function renderRules(api, state){
     b.print('5) Mark sensitive content. Consent and context matter.', 'white');
     b.print('6) Keep it human-scale. Quality over volume. Touch grass as needed.', 'white');
     b.print('7) Build don’t extract. Share tools, credit work, cite sources.', 'white');
-    b.print('8) Mods are gardeners. Expect empathy, clarity, and firm lines on harm.', 'white');
-    b.print('9) Data minimalism. Don’t post anything you wouldn’t paint on a wall.', 'white');
+    b.print('9) Don’t post anything you wouldn’t paint on a wall.', 'white');
     b.print('10) Have fun. Make weird. Help each other.', 'white'); b.hr();
     b.print('Navigation: /main for Command Hub.', 'dim');
   });
@@ -484,8 +527,7 @@ function renderRules(api, state){
 function rulesHandleCommand(cmd, api, state){ if (cmd==='menu'||cmd==='main'){ routeGo(api, state, 'menu'); return true; } return false; }
 function rulesHandleRaw(text, api){ api.print('Use /main to return to the Command Hub.', 'dim'); return true; }
 
-/* ======================= Color Preferences ===================== */
-// Safe named colors (expand as desired)
+// ======================= Color Preferences (unchanged) =======================
 const NAMED_COLORS = {
   red:'#FF4545', green:'#2FD44F', yellow:'#E3C600', blue:'#3AA0FF',
   magenta:'#CC66FF', cyan:'#19C3C3', white:'#FFFFFF', gray:'#B0B0B0',
@@ -516,11 +558,9 @@ function parseUserColor(input){
   if (!isReadableOnBlack(hex)) return { ok:false, reason:'dark' };
   return { ok:true, hex };
 }
-// Statements
 const setUserColor = db.prepare(`UPDATE users SET preferred_color = ? WHERE id = ?`);
 const getUserColor = db.prepare(`SELECT preferred_color FROM users WHERE id = ?`);
 
-// Commands
 function cmdSetColor(api, state, args){
   if (!requireAuth(api, state)) return;
   const raw = (args||[]).join(' ').trim();
@@ -554,7 +594,33 @@ function cmdColorReset(api, state){
   api.print('Color reset. You now use the default theme color.', 'green');
 }
 
-/* ======================= Global Commands ======================= */
+// ======================= Display Name (NEW) =======================
+const setUserDisplay = db.prepare(`UPDATE users SET display_name = ? WHERE id = ?`);
+const getUserDisplay = db.prepare(`SELECT display_name FROM users WHERE id = ?`);
+
+function cmdSetDisplay(api, state, args){
+  if (!requireAuth(api, state)) return;
+  const raw = (args||[]).join(' ').trim();
+  if (!raw){ api.print('Usage: /setdisplay <name>', 'yellow'); return; }
+  if (raw.length > 40){ api.print('Display name too long (max 40 chars).', 'red'); return; }
+  setUserDisplay.run(raw, state.userId);
+  state.displayName = raw;
+  api.print('Display name updated.', 'green');
+  api.printHTML(`Preview: ${sanitizeAndFormatDIS(raw)}`);
+}
+function cmdDisplay(api, state){
+  if (!requireAuth(api, state)) return;
+  const dn = state.displayName || state.username;
+  api.printHTML(`Your display name: ${sanitizeAndFormatDIS(dn)}`);
+}
+function cmdDisplayReset(api, state){
+  if (!requireAuth(api, state)) return;
+  setUserDisplay.run(null, state.userId);
+  state.displayName = state.username;
+  api.print('Display name reset to your username.', 'green');
+}
+
+// ======================= Global Commands =======================
 function cmdHelp(api, state){
   api.hr();
   api.print('Global slash commands:', 'yellow');
@@ -573,6 +639,9 @@ function cmdHelp(api, state){
   api.print('  /setcolor  Set your chat color', 'cyan');
   api.print('  /color     Show your current color', 'cyan');
   api.print('  /colorreset Reset your chat color', 'cyan');
+  api.print('  /setdisplay <name>  Set your display name (markdown allowed)', 'cyan');
+  api.print('  /display            Show your display name', 'cyan');
+  api.print('  /displayreset       Reset display name to your username', 'cyan');
   api.print('  /whoami    Show current user', 'cyan');
   api.print('  /who       List users currently online', 'cyan');
   api.print('  /suggest   Add a suggestion: /suggest <text>', 'cyan');
@@ -613,6 +682,7 @@ function cmdLogout(api, state){
   state.login.tempUser = '';
   state.userId = null;
   state.userColor = null;
+  state.displayName = null;
   if (u){
     HUB.online.delete(u);
     const set = HUB.socketsByUser.get(u);
@@ -752,9 +822,9 @@ function cmdDM(api, state, args){
   const expires = ttl > 0 ? (created + ttl) : null;
   insertDM.run(state.userId || null, rec.id, text, created, expires);
   const ts = new Date(created*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
-  const from = state.username || 'anon';
+  const from = state.displayName || state.username || 'anon';
   const htmlToSender = `[${ts}] <span class="dim">[dm→</span>${escapeHTML(rec.username)}<span class="dim">]</span> ${sanitizeAndFormatDIS(text)}`;
-  const htmlToRcpt   = `[${ts}] <span class="dim">[dm←</span>${escapeHTML(from)}<span class="dim">]</span> ${sanitizeAndFormatDIS(text)}`;
+  const htmlToRcpt   = `[${ts}] <span class="dim">[dm←</span>${sanitizeAndFormatDIS(from)}<span class="dim">]</span> ${sanitizeAndFormatDIS(text)}`;
   api.printHTML(htmlToSender);
   deliverDMToUser(rec.username, htmlToRcpt);
 }
@@ -826,7 +896,7 @@ function cmdRemoveSuggestion(api, state, args){
   cmdSuggestions(api, state);
 }
 
-/* ======================= Command Router ======================== */
+// ======================= Command Router =======================
 function handleGlobalCommand(cmd, api, state, args){
   switch(cmd){
     case 'help':         return cmdHelp(api, state), true;
@@ -855,6 +925,9 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'setcolor':     return cmdSetColor(api, state, args), true;
     case 'color':        return cmdColor(api, state), true;
     case 'colorreset':   return cmdColorReset(api, state), true;
+    case 'setdisplay':   return cmdSetDisplay(api, state, args), true;
+    case 'display':      return cmdDisplay(api, state), true;
+    case 'displayreset': return cmdDisplayReset(api, state), true;
     case 'suggest':      return cmdSuggest(api, state, args), true;
     case 'suggestions':  return cmdSuggestions(api, state), true;
     case 'removesuggestion': return cmdRemoveSuggestion(api, state, args), true;
@@ -862,7 +935,7 @@ function handleGlobalCommand(cmd, api, state, args){
   }
 }
 
-/* ======================= WS Lifecycle ========================== */
+// ======================= WS Lifecycle =======================
 wss.on('connection', (ws) => {
   HUB.clients.add(ws);
   const state = makeInitialState();
@@ -938,7 +1011,7 @@ wss.on('connection', (ws) => {
   ws.on('error', (err)=> { try { api.print('WS Error: '+(err && err.message ? err.message : err), 'red'); } catch(e){} });
 });
 
-/* ======================= Helper Functions ====================== */
+// ======================= Helper Functions =======================
 function nowEpoch() { return Math.floor(Date.now()/1000); }
 function retentionSeconds() {
   const row = getSetting.get('chat_retention_days');
@@ -1007,7 +1080,7 @@ const insertMessage = db.prepare(`
   INSERT INTO messages(user_id, body, created_at, expires_at) VALUES (?, ?, ?, ?)
 `);
 const recentMessages = db.prepare(`
-  SELECT m.id, m.body, m.created_at, u.username, u.preferred_color AS color
+  SELECT m.id, m.body, m.created_at, u.username, u.display_name, u.preferred_color AS color
   FROM messages m
   LEFT JOIN users u ON u.id = m.user_id
   WHERE (m.expires_at IS NULL OR m.expires_at > strftime('%s','now'))
@@ -1065,7 +1138,7 @@ function getSuggestionIdByIndex(state, idx){
   return (i >= 0 && i < state._suggestIndexMap.length) ? state._suggestIndexMap[i] : null;
 }
 
-/* ======================= Clean Sweeper ========================= */
+// ======================= Clean Sweeper =======================
 function runSweep(){
   try { sweepExpired.run(); } catch(e){}
   try { sweepExpiredDMs && sweepExpiredDMs.run(); } catch(e){}
@@ -1074,11 +1147,11 @@ function runSweep(){
 runSweep();
 setInterval(runSweep, 60 * 1000);
 
-/* ======================= Graceful shutdown ==================== */
+// ======================= Graceful shutdown =======================
 process.on('SIGINT', () => { try { db.close(); } finally { process.exit(0); } });
 process.on('SIGTERM', () => { try { db.close(); } finally { process.exit(0); } });
 
-/* ======================= Start ================================ */
+// ======================= Start =======================
 server.listen(PORT, () => {
   console.log('DIS BBS listening on http://localhost:'+PORT);
 });
