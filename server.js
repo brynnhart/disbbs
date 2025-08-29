@@ -680,6 +680,7 @@ function renderBoard(api, state){
     b.print('Open a topic: /topic <id>', 'cyan');
     b.print('Start new: /newtopic <title>', 'cyan');
     b.print('Leave: /main', 'dim');
+    b.setInputType('text', 'Use /topic <id> or /newtopic <title>');
   });
   state.currentScreen = 'board';
 }
@@ -727,11 +728,13 @@ function openTopic(api, state, topicId){
       });
     }
     b.hr();
-    b.print('Reply here with: /reply <text>', 'cyan');
-    b.print('Back to list: /board', 'dim');
+    b.print('Type to reply. Commands: /board (back), /main (menu).', 'dim');
+    b.setInputType('text', 'Type to reply… /board to go back');
   });
 }
 
+
+//  TODO:   I removed the /reply command from the list of commands... I leave this functionality for the moment... if people don't is the /reply command this function can be released
 function topicHandleCommand(cmd, api, state, args){
   if (!requireAuth(api, state)) return true;
   if (cmd === 'board'){ renderBoard(api, state); return true; }
@@ -765,7 +768,43 @@ function topicHandleCommand(cmd, api, state, args){
   }
   return false;
 }
-function topicHandleRaw(text, api){ api.print('Use /reply <text> to post.', 'dim'); return true; }
+function topicHandleRaw(text, api, state){
+  if (!requireAuth(api, state)) return true;
+  const raw = String(text || '').trim();
+  if (!raw) return true;
+
+  // If user typed a slash-command, let the global/command router handle it.
+  if (raw.charAt(0) === '/') {
+    api.print('Use /board to go back, or just type to reply.', 'dim');
+    return true;
+  }
+
+  if (!state.currentTopicId){
+    api.print('No topic open.', 'red');
+    return true;
+  }
+
+  // Enforce visible-length limit (DIS markup doesn't count)
+  const maxLen = +(getSetting.get('board_reply_max_len')?.value || 600);
+  const visible = visibleLengthDIS(raw); // you already have this helper
+  if (visible > maxLen){
+    api.print(`Reply too long (max ${maxLen} visible chars).`, 'red');
+    return true;
+  }
+
+  // Persist the reply, bump topic, re-render
+  const ts = nowEpoch();
+  insertComment.run(state.currentTopicId, state.userId || null, raw, ts);
+
+  const days = +(getSetting.get('board_inactive_days')?.value || 30);
+  const expires = ts + days*86400;
+  updateTopicBump.run(ts, expires, state.currentTopicId);
+
+  // Repaint topic so the new comment shows
+  openTopic(api, state, state.currentTopicId);
+  return true;
+}
+
 
 
 // ======================= Color Preferences (unchanged) =======================
@@ -1276,6 +1315,10 @@ wss.on('connection', (ws) => {
         return;
       }
 
+      if (state.currentScreen === 'topic') {
+        return topicHandleRaw(text, api, state);
+      }
+
       if (text.charAt(0) === '/') {
         const parts = text.slice(1).split(/\s+/);
         const cmd = (parts[0] || '').toLowerCase();
@@ -1287,7 +1330,7 @@ wss.on('connection', (ws) => {
   || (state.currentScreen === 'about'  && aboutHandleCommand(cmd, api, state))
   || (state.currentScreen === 'rules'  && rulesHandleCommand(cmd, api, state))
   || (state.currentScreen === 'board'  && boardHandleCommand(cmd, api, state, args))
-  || (state.currentScreen === 'topic'  && topicHandleCommand(cmd, api, state, args))
+  || (state.currentScreen === 'topic'  && topicHandleCommand(cmd, api, state, args)) 
   || (state.currentScreen === 'menu'   && (cmd==='help'? (cmdHelp(api), true): false));
 
           if (!handled){
