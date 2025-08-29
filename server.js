@@ -604,7 +604,7 @@ function renderMenu(api, state){
   api.batch(b=>{
     b.clear();
     b.printHTML('<div class="banner"><div class="line"><span class="cyan">▄▄▄</span><span class="magenta"> Dead Internet Society </span><span class="cyan">▄▄▄</span></div><div class="line dim">Command Hub — use slash commands to navigate.</div></div>');
-    b.print('Global commands:', 'yellow');
+    b.print('Main Menu:', 'yellow');
     b.print('  /chat            Enter the Commons Chat', 'cyan');
     b.print('  /board           Bulletin board', 'cyan');
     b.print('  /news            Fark-like news links', 'cyan');
@@ -615,6 +615,7 @@ function renderMenu(api, state){
     b.print('  /logout          Sign out', 'cyan');
     b.hr();
     b.print('Tip: You can type these anywhere. /main returns here.', 'dim');
+    b.print('For a full list of commands use /help command.', 'dim');
   });
 }
 function menuHandleRaw(text, api){ api.print('Use slash commands here. Try /chat, /board, /news or /help.', 'dim'); return true; }
