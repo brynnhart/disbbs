@@ -13,8 +13,13 @@ const { DoorManager } = require('./doors/manager');
 const guessDoor = require('./doors/guess');
 DoorManager.register(guessDoor);
 
+const lordDoor = require('./doors/lord');   // <— LORD
+DoorManager.register(lordDoor);             // <- NEW
+
 const DB_PATH = process.env.DB_PATH || './dis.sqlite3';
 const db = new Database(DB_PATH);
+
+module.exports.__db = db;
 
 // Pragmas for durability & perf
 db.pragma('journal_mode = WAL');
@@ -90,6 +95,15 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_expires_at ON messages(expires_at);
 CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
 `);
+
+// Run LORD’s schema migration exactly once at boot:
+if (lordDoor && typeof lordDoor.migrate === 'function') {
+  lordDoor.migrate(db);
+}
+
+// Now register LORD so /games lists it and /play lord works:
+DoorManager.register(lordDoor);
+
 
 // --- existing migration: add preferred_color to users (safe if already exists)
 try { db.prepare('ALTER TABLE users ADD COLUMN preferred_color TEXT').run(); } catch(_) {}
@@ -826,13 +840,22 @@ function cmdPasswd(api, state, args){
 }
 function cmdGames(api, state){
   if (!requireAuth(api, state)) return;
-  const list = DoorManager.all();
-  if (!list.length){ api.print('No games installed yet.', 'dim'); return; }
   api.hr();
-  api.print('Available games:', 'yellow');
-  list.forEach(d => api.print(`  - ${d.id}  (${d.name})`, 'cyan'));
-  api.print('Use /play <id> to enter a game. Example: /play guess', 'dim');
+  api.print('Available games', 'yellow');
+  // Each item is: id, title, description, how to start
+  const games = [
+    { id: 'lord',  title: 'Legend of the Redux Dragon', desc: 'Daily forest runs, duels, and tavern mischief.', start: '/play lord' },
+    { id: 'guess', title: 'Guess The Number',           desc: 'Simple demo door for testing.',                  start: '/play guess' }
+  ];
+  games.forEach(g => {
+    api.print(`• ${g.title}  [id: ${g.id}]`, 'cyan');
+    api.print(`  ${g.desc}`, 'dim');
+    api.print(`  Start: ${g.start}`, 'green');
+  });
+  api.hr();
+  api.print('Use /play <id> to launch a game (e.g., /play lord). /leave exits a game.', 'dim');
 }
+
 function cmdPlay(api, state, args){
   if (!requireAuth(api, state)) return;
   const id = (args[0] || '').toLowerCase();
