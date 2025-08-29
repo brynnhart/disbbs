@@ -558,6 +558,46 @@ function splashHandleRaw(text, api, state){
   return true;
 }
 
+/* ======================= Help ======================= */
+function cmdHelp(api, state){
+  api.hr();
+  api.print('Global slash commands:', 'yellow');
+  api.print('  /register  Create an account: /register <user> <pass> <invite>', 'cyan');
+  api.print('  /chat      Enter the Commons Chat', 'cyan');
+  api.print('  /here      Show who is currently in the chat', 'cyan');
+  api.print('  /games     List available games', 'cyan');
+  api.print('  /dm        Send a direct message: /dm <user> <message>', 'cyan');
+  api.print('  /messages  Show your recent direct messages', 'cyan');
+  api.print('  /leave     Leave the current game', 'cyan');
+  api.print('  /about     About Dead Internet Society', 'cyan');
+  api.print('  /rules     Community rules', 'cyan');
+  api.print('  /passwd    Change your password: /passwd <old> <new>', 'cyan');
+  api.print('  /format    Show DIS-Markdown examples', 'cyan');
+  api.print('  /colors    Show color swatches', 'cyan');
+  api.print('  /setcolor  Set your chat color', 'cyan');
+  api.print('  /color     Show your current color', 'cyan');
+  api.print('  /colorreset Reset your chat color', 'cyan');
+  api.print('  /setdisplay <name>  Set your display name (markdown allowed)', 'cyan');
+  api.print('  /display            Show your display name', 'cyan');
+  api.print('  /displayreset       Reset display name to your username', 'cyan');
+  api.print('  /whoami    Show current user', 'cyan');
+  api.print('  /who       List users currently online', 'cyan');
+  api.print('  /suggest   Add a suggestion: /suggest <text>', 'cyan');
+  api.print('  /suggestions  View all current suggestions', 'cyan');
+  api.print('  /main      Return to Command Hub', 'cyan');
+  api.print('  /logout    Sign out', 'cyan');
+
+  if (state && state.isAdmin){
+    api.hr(); api.print('Admin:', 'yellow');
+    api.print('  /makeinvite [days] [note]   Create a single-use invite', 'cyan');
+    api.print('  /listinvites [unused|used|all]  Show recent invites', 'cyan');
+    api.print('  /revokeinvite <code>        Expire an unused invite', 'cyan');
+    api.print('  /removesuggestion <#>  Remove a suggestion (from the current list)', 'cyan');
+  }
+  api.hr();
+  api.print('DIS-Markdown: **bold**, _italics_, __underline__, [dim]…[/dim], and color tags like [cyan]…[/cyan].', 'dim');
+}
+
 /* ======================= Menu ======================= */
 function renderMenu(api, state){
   if (!requireAuth(api, state)) return;
@@ -572,15 +612,6 @@ function renderMenu(api, state){
     b.print('  /messages        View your direct messages', 'cyan');
     b.print('  /about           About DIS', 'cyan');
     b.print('  /rules           Community rules', 'cyan');
-    b.print('  /format          Show DIS-Markdown examples', 'cyan');
-    b.print('  /colors          Show color swatches', 'cyan');
-    b.print('  /setcolor        Set your chat color', 'cyan');
-    b.print('  /color           Show your chat color', 'cyan');
-    b.print('  /colorreset      Reset your chat color', 'cyan');
-    b.print('  /setdisplay <n>  Set your display name (markdown allowed)', 'cyan');
-    b.print('  /display         Show your display name', 'cyan');
-    b.print('  /displayreset    Reset display name to username', 'cyan');
-    b.print('  /whoami          Show current user', 'cyan');
     b.print('  /logout          Sign out', 'cyan');
     b.hr();
     b.print('Tip: You can type these anywhere. /main returns here.', 'dim');
@@ -600,7 +631,7 @@ function renderChat(api, state){
     b.print(here.length ? `Here now (${here.length}): ${here.join(', ')}` : 'Nobody is here yet — say hi!', 'cyan');
     b.hr();
 
-    const rows = recentMessages.all(100).reverse();
+    const rows = recentMessages.all().reverse();
     if (rows.length === 0) {
       b.print('No messages yet. Type to chat. /leave to return.', 'dim');
     } else {
@@ -671,6 +702,34 @@ function renderRules(api, state){
 }
 function aboutHandleCommand(cmd, api){ if (cmd==='menu'||cmd==='main'){ routeGo(api, {}, 'menu'); return true; } return false; }
 function rulesHandleCommand(cmd, api){ if (cmd==='menu'||cmd==='main'){ routeGo(api, {}, 'menu'); return true; } return false; }
+
+function cmdWho(api){
+  const list = Array.from(HUB.online);
+  api.print(list.length ? `Online: ${list.join(', ')}` : 'Nobody online', 'cyan');
+}
+
+function cmdHere(api, state){
+  if (!requireAuth(api, state)) return;
+  const here = usersCurrentlyInChat();
+  api.print(here.length ? `Here now (${here.length}): ${here.join(', ')}` : 'Nobody is in chat right now.', 'cyan');
+}
+
+function cmdColors(api){
+  api.print('█ RED','red'); api.print('█ GREEN','green'); api.print('█ YELLOW','yellow');
+  api.print('█ BLUE','blue'); api.print('█ MAGENTA','magenta'); api.print('█ CYAN','cyan'); api.print('█ WHITE','white');
+}
+
+function cmdFormat(api){
+  api.hr();
+  api.print('DIS-Markdown examples (sanitized & rendered):', 'yellow');
+  ['**Bold** and _italics_ and __underline__.',
+   'Mixing: **bold and _italic_** plus [cyan]color[/cyan] and [dim]dim[/dim].',
+   'Colors: [red]red[/red] [green]green[/green] [yellow]yellow[/yellow] [blue]blue[/blue] [magenta]magenta[/magenta] [cyan]cyan[/cyan] [white]white[/white]',
+   'Safety: <script>alert(1)</script> will be escaped.'
+  ].forEach(ex => api.printHTML(sanitizeAndFormatDIS(ex)));
+  api.hr(); api.print('Use these in Chat; everything is sanitized first.', 'dim');
+}
+
 
 /* ======================= Board (List + Topic) ======================= */
 function renderBoard(api, state){
@@ -1103,6 +1162,18 @@ function cmdInvite(api, state, args){
   api.print(`Invite code: ${code} (expires in 30 days)`, 'green');
 }
 
+function cmdPasswd(api, state, args){
+  if (!requireAuth(api, state)) return;
+  const [oldp, newp] = args || [];
+  if (!oldp || !newp){ api.print('Usage: /passwd <old> <new>', 'yellow'); return; }
+  if (newp.length < 6){ api.print('New password must be at least 6 characters.', 'yellow'); return; }
+  const u = findUserByName.get(state.username);
+  if (!u || !bcrypt.compareSync(oldp, u.password_hash)){ api.print('Old password incorrect.', 'red'); return; }
+  const hash = bcrypt.hashSync(newp, 10);
+  db.prepare(`UPDATE users SET password_hash = ? WHERE id = ?`).run(hash, u.id);
+  api.print('Password updated.', 'green');
+}
+
 /* ======================= Global command router ======================= */
 function handleGlobalCommand(cmd, api, state, args){
   switch(cmd){
@@ -1148,8 +1219,13 @@ function handleGlobalCommand(cmd, api, state, args){
 
     /* Misc */
     case 'whoami':       api.print(`You are ${state.username}${state.isAdmin?' (admin)':''}`); return true;
+    case 'who':          return cmdWho(api), true;
+    case 'format':       return cmdFormat(api), true;
+    case 'here':         return cmdHere(api, state), true;
     case 'logout':       doLogout(api, state); return true;
-    case 'help':         renderMenu(api, state); return true;
+    case 'colors':       return cmdColors(api), true;
+    case 'help':         cmdHelp(api, state); return true;
+    case 'passwd':       return cmdPasswd(api, state, args), true;
   }
   return false;
 }
