@@ -85,6 +85,27 @@ CREATE TABLE IF NOT EXISTS suggestions (
 CREATE INDEX IF NOT EXISTS idx_suggestions_expires ON suggestions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_suggestions_created ON suggestions(created_at DESC);
 
+CREATE TABLE IF NOT EXISTS board_topics (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  title             TEXT NOT NULL,
+  creator_id        INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at        INTEGER NOT NULL,
+  last_commented_at INTEGER NOT NULL,
+  expires_at        INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_board_topics_last  ON board_topics(last_commented_at);
+CREATE INDEX IF NOT EXISTS idx_board_topics_exp   ON board_topics(expires_at);
+
+CREATE TABLE IF NOT EXISTS board_comments (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  topic_id    INTEGER NOT NULL REFERENCES board_topics(id) ON DELETE CASCADE,
+  user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  body        TEXT NOT NULL,
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_board_comments_topic_created ON board_comments(topic_id, created_at);
+
+
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -148,11 +169,69 @@ const listSuggestions = db.prepare(`
 const deleteSuggestionById = db.prepare(`DELETE FROM suggestions WHERE id = ?`);
 const sweepExpiredSuggestions = db.prepare(`DELETE FROM suggestions WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')`);
 
+// -------- Board statements
+const insertTopic = db.prepare(`
+  INSERT INTO board_topics (title, creator_id, created_at, last_commented_at, expires_at)
+  VALUES (?, ?, ?, ?, ?)
+`);
+const deleteTopicById = db.prepare(`DELETE FROM board_topics WHERE id = ?`);
+
+const selectTopicsList = db.prepare(`
+  SELECT t.id, t.title, t.created_at, t.last_commented_at,
+         COUNT(c.id) AS comments
+  FROM board_topics t
+  LEFT JOIN board_comments c ON c.topic_id = t.id
+  WHERE (t.expires_at IS NULL OR t.expires_at > strftime('%s','now'))
+  GROUP BY t.id
+  ORDER BY t.last_commented_at DESC
+  LIMIT ?
+`);
+
+const selectTopic = db.prepare(`
+  SELECT t.id, t.title, u.username AS creator
+  FROM board_topics t
+  LEFT JOIN users u ON u.id = t.creator_id
+  WHERE t.id = ?
+    AND (t.expires_at IS NULL OR t.expires_at > strftime('%s','now'))
+`);
+
+const selectCommentsForTopic = db.prepare(`
+  SELECT c.id, c.body, c.created_at, u.username, u.display_name, u.preferred_color
+  FROM board_comments c
+  LEFT JOIN users u ON u.id = c.user_id
+  WHERE c.topic_id = ?
+  ORDER BY c.created_at ASC
+  LIMIT 500
+`);
+
+const insertComment = db.prepare(`
+  INSERT INTO board_comments (topic_id, user_id, body, created_at)
+  VALUES (?, ?, ?, ?)
+`);
+
+const updateTopicBump = db.prepare(`
+  UPDATE board_topics
+     SET last_commented_at = ?, expires_at = ?
+   WHERE id = ?
+`);
+
+const sweepExpiredTopics = db.prepare(`
+  DELETE FROM board_topics
+  WHERE expires_at IS NOT NULL
+    AND expires_at <= strftime('%s','now')
+`);
+
+
 if (!getSetting.get('chat_retention_days'))        setSetting.run('chat_retention_days', String(7));
 if (!getSetting.get('dm_retention_days'))          setSetting.run('dm_retention_days', String(14));
 if (!getSetting.get('dm_max_len'))                 setSetting.run('dm_max_len', String(160));
 if (!getSetting.get('suggestion_retention_days'))  setSetting.run('suggestion_retention_days', String(60));
 if (!getSetting.get('suggestion_max_len'))         setSetting.run('suggestion_max_len', String(400));
+if (!getSetting.get('board_inactive_days'))    setSetting.run('board_inactive_days', String(30));
+if (!getSetting.get('board_title_max_len'))    setSetting.run('board_title_max_len', String(120));   // visible chars after formatting
+if (!getSetting.get('board_reply_max_len'))    setSetting.run('board_reply_max_len', String(600));   // visible chars after formatting
+if (!getSetting.get('board_list_limit'))       setSetting.run('board_list_limit', String(100));
+
 
 // Seed demo admin if missing
 const getUser = db.prepare(`SELECT id FROM users WHERE username = ?`);
@@ -278,9 +357,17 @@ function stripDISFormatting(s){
   return s;
 }
 
-function visibleLengthDIS(s){
-  return stripDISFormatting(String(s)).length;
+// Compute visible length (approx) by stripping DIS tags / simple markdown
+function stripDIS(s){
+  // strip [color]...[/color] and [dim]...[/dim]
+  s = s.replace(/\[(red|green|yellow|blue|magenta|cyan|white|dim)\]([\s\S]*?)\[\/\1\]/gi, '$2');
+  // strip basic markdown markers
+  s = s.replace(/\*\*([^*]+)\*\*/g, '$1');     // bold
+  s = s.replace(/__([^_]+)__/g, '$1');         // underline
+  s = s.replace(/(^|[^_])_([^_\n][^_]*?)_(?!_)/g, '$1$2'); // italics
+  return s;
 }
+function visibleLengthDIS(s){ return stripDIS(String(s||'')).length; }
 
 // ======================= SVG Splash =======================
 function splashSVG(){
@@ -431,6 +518,7 @@ function renderMenu(api, state){
     b.printHTML('<div class="banner"><div class="line"><span class="cyan">▄▄▄</span><span class="magenta"> Dead Internet Society </span><span class="cyan">▄▄▄</span></div><div class="line dim">Command Hub — use slash commands to navigate.</div></div>');
     b.print('Global commands:', 'yellow');
     b.print('  /chat      Enter the Commons Chat', 'cyan');
+    b.print('  /board      Enter the Commons Chat', 'cyan');
     b.print('  /games     See list of available door games', 'cyan');
     b.print('  /messages  View your direct messages', 'cyan');
     b.print('  /about     About Dead Internet Society', 'cyan');
@@ -568,6 +656,118 @@ function renderRules(api, state){
 function rulesHandleCommand(cmd, api, state){ if (cmd==='menu'||cmd==='main'){ routeGo(api, state, 'menu'); return true; } return false; }
 function rulesHandleRaw(text, api){ api.print('Use /main to return to the Command Hub.', 'dim'); return true; }
 
+/* ======================= Screen: Board ========================== */
+function renderBoard(api, state){
+  if (!requireAuth(api, state)) return;
+  const limit = +(getSetting.get('board_list_limit')?.value || 100);
+  const rows = selectTopicsList.all(limit);
+
+  api.batch(b=>{
+    b.clear();
+    b.print('== Message Board ==', 'magenta');
+    b.hr();
+    if (rows.length === 0){
+      b.print('No topics yet. Start one with /newtopic <title>.', 'dim');
+    } else {
+      b.print('Topics (most recently active first):', 'yellow');
+      rows.forEach(r=>{
+        const when = new Date(r.last_commented_at*1000).toLocaleString();
+        const safeTitle = sanitizeAndFormatDIS(r.title);
+        b.printHTML(`${r.id}. ${safeTitle}  <span class="dim">(${r.comments} repl${r.comments === 1 ? 'y' : 'ies'}, active ${escapeHTML(when)})</span>`);
+      });
+    }
+    b.hr();
+    b.print('Open a topic: /topic <id>', 'cyan');
+    b.print('Start new: /newtopic <title>', 'cyan');
+    b.print('Leave: /main', 'dim');
+  });
+  state.currentScreen = 'board';
+}
+
+function boardHandleCommand(cmd, api, state, args){
+  if (!requireAuth(api, state)) return true;
+  if (cmd === 'main' || cmd === 'menu'){ routeGo(api, state, 'menu'); return true; }
+  if (cmd === 'topic'){
+    const id = parseInt(args[0], 10);
+    if (!id){ api.print('Usage: /topic <id>', 'yellow'); return true; }
+    return openTopic(api, state, id), true;
+  }
+  return false;
+}
+function boardHandleRaw(text, api, state){
+  if (!requireAuth(api, state)) return true;
+  api.print('Use /topic <id> to open, or /newtopic <title>.', 'dim');
+  return true;
+}
+
+
+/* ======================= Screen: Topic ========================== */
+function openTopic(api, state, topicId){
+  const t = selectTopic.get(topicId);
+  if (!t){ api.print('No such topic (maybe expired).', 'red'); return; }
+  state.currentScreen = 'topic';
+  state.currentTopicId = topicId;
+
+  const comments = selectCommentsForTopic.all(topicId);
+
+  api.batch(b=>{
+    b.clear();
+    b.printHTML(`== Topic #${t.id}: ${sanitizeAndFormatDIS(t.title)} ==`, 'magenta');
+    b.hr();
+    if (comments.length === 0){
+      b.print('No replies yet. Be first with /reply <text>.', 'dim');
+    } else {
+      comments.forEach(c=>{
+        const ts = new Date(c.created_at*1000).toLocaleString();
+        const authorRaw = (c.display_name && c.display_name.trim()) ? c.display_name : (c.username || 'anon');
+        const author = sanitizeAndFormatDIS(authorRaw);
+        const body = sanitizeAndFormatDIS(c.body);
+        const coloredBody = c.preferred_color ? `<span style="color:${c.preferred_color}">${body}</span>` : body;
+        b.printHTML(`[${escapeHTML(ts)}] &lt;${author}&gt; ${coloredBody}`);
+      });
+    }
+    b.hr();
+    b.print('Reply here with: /reply <text>', 'cyan');
+    b.print('Back to list: /board', 'dim');
+  });
+}
+
+function topicHandleCommand(cmd, api, state, args){
+  if (!requireAuth(api, state)) return true;
+  if (cmd === 'board'){ renderBoard(api, state); return true; }
+  if (cmd === 'main' || cmd === 'menu'){ routeGo(api, state, 'menu'); return true; }
+  if (cmd === 'reply'){
+    const raw = (args||[]).join(' ').trim();
+    if (!state.currentTopicId){ api.print('No topic open.', 'red'); return true; }
+    if (!raw){ api.print('Usage: /reply <text>', 'yellow'); return true; }
+
+    // length check on visible chars (strip DIS tags crudely)
+    const maxLen = +(getSetting.get('board_reply_max_len')?.value || 600);
+    const visible = visibleLengthDIS(raw);
+    if (visible > maxLen){
+      api.print(`Reply too long (max ${maxLen} visible chars).`, 'red');
+      return true;
+    }
+
+    const t = selectTopic.get(state.currentTopicId);
+    if (!t){ api.print('Topic expired or missing.', 'red'); return true; }
+
+    const ts = nowEpoch();
+    insertComment.run(state.currentTopicId, state.userId || null, raw, ts);
+
+    // bump topic & extend expiry window
+    const days = +(getSetting.get('board_inactive_days')?.value || 30);
+    const expires = ts + days*86400;
+    updateTopicBump.run(ts, expires, state.currentTopicId);
+
+    openTopic(api, state, state.currentTopicId);
+    return true;
+  }
+  return false;
+}
+function topicHandleRaw(text, api){ api.print('Use /reply <text> to post.', 'dim'); return true; }
+
+
 // ======================= Color Preferences (unchanged) =======================
 const NAMED_COLORS = {
   red:'#FF4545', green:'#2FD44F', yellow:'#E3C600', blue:'#3AA0FF',
@@ -680,6 +880,7 @@ function cmdHelp(api, state){
   api.print('Global slash commands:', 'yellow');
   api.print('  /register  Create an account: /register <user> <pass> <invite>', 'cyan');
   api.print('  /chat      Enter the Commons Chat', 'cyan');
+  api.print('  /board     Enter the Bulletin Board', 'cyan');
   api.print('  /here      Show who is currently in the chat', 'cyan');
   api.print('  /games     List available games', 'cyan');
   api.print('  /dm        Send a direct message: /dm <user> <message>', 'cyan');
@@ -959,6 +1160,41 @@ function cmdRemoveSuggestion(api, state, args){
   cmdSuggestions(api, state);
 }
 
+function cmdNewTopic(api, state, args){
+  if (!requireAuth(api, state)) return;
+  const raw = (args||[]).join(' ').trim();
+  if (!raw){ api.print('Usage: /newtopic <title>', 'yellow'); return; }
+
+  const maxLen = +(getSetting.get('board_title_max_len')?.value || 120);
+  const visible = visibleLengthDIS(raw);
+  if (visible > maxLen){
+    api.print(`Title too long (max ${maxLen} visible chars).`, 'red'); return;
+  }
+
+  const ts = nowEpoch();
+  const days = +(getSetting.get('board_inactive_days')?.value || 30);
+  const expires = ts + days*86400;
+
+  insertTopic.run(raw, state.userId || null, ts, ts, expires);
+  api.print('Topic created.', 'green');
+  renderBoard(api, state);
+}
+
+function cmdRemoveTopic(api, state, args){
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin){ api.print('Admin only.', 'red'); return; }
+  const id = parseInt(args[0], 10);
+  if (!id){ api.print('Usage: /removetopic <id>', 'yellow'); return; }
+  deleteTopicById.run(id);
+  api.print(`Removed topic #${id}.`, 'green');
+  if (state.currentScreen === 'topic' && state.currentTopicId === id){
+    renderBoard(api, state);
+  } else {
+    // if they’re elsewhere, no-op; /board will reflect
+  }
+}
+
+
 // ======================= Command Router =======================
 function handleGlobalCommand(cmd, api, state, args){
   switch(cmd){
@@ -968,6 +1204,11 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'who':          return cmdWho(api), true;
     case 'games':
     case 'doors':        return cmdGames(api, state), true;
+    case 'board':      return renderBoard(api, state), true;
+case 'topic':      return (args.length ? (openTopic(api, state, parseInt(args[0],10)||0), true) : (api.print('Usage: /topic <id>', 'yellow'), true));
+case 'newtopic':   return cmdNewTopic(api, state, args), true;
+case 'removetopic':return cmdRemoveTopic(api, state, args), true;
+
     case 'dm':           return cmdDM(api, state, args), true;
     case 'messages':     return cmdMessages(api, state, args), true;
     case 'here':         return cmdHere(api, state), true;
@@ -1040,11 +1281,15 @@ wss.on('connection', (ws) => {
         const cmd = (parts[0] || '').toLowerCase();
         const args = parts.slice(1);
         if (!handleGlobalCommand(cmd, api, state, args)) {
-          const handled = (state.currentScreen === 'splash' && splashHandleCommand(cmd, api))
-                       || (state.currentScreen === 'chat'   && chatHandleCommand(cmd, api, state))
-                       || (state.currentScreen === 'about'  && aboutHandleCommand(cmd, api, state))
-                       || (state.currentScreen === 'rules'  && rulesHandleCommand(cmd, api, state))
-                       || (state.currentScreen === 'menu'   && (cmd==='help'? (cmdHelp(api, state), true): false));
+          const handled =
+     (state.currentScreen === 'splash' && splashHandleCommand(cmd, api))
+  || (state.currentScreen === 'chat'   && chatHandleCommand(cmd, api, state))
+  || (state.currentScreen === 'about'  && aboutHandleCommand(cmd, api, state))
+  || (state.currentScreen === 'rules'  && rulesHandleCommand(cmd, api, state))
+  || (state.currentScreen === 'board'  && boardHandleCommand(cmd, api, state, args))
+  || (state.currentScreen === 'topic'  && topicHandleCommand(cmd, api, state, args))
+  || (state.currentScreen === 'menu'   && (cmd==='help'? (cmdHelp(api), true): false));
+
           if (!handled){
             api.print(`Unknown command: /${cmd}`, 'red'); api.print('Try /help.', 'dim');
           }
@@ -1202,13 +1447,25 @@ function getSuggestionIdByIndex(state, idx){
 }
 
 // ======================= Clean Sweeper =======================
+function runBoardSweep(){
+  // If last_commented_at is older than N days, we delete (comments cascade).
+  const days = +(getSetting.get('board_inactive_days')?.value || 30);
+  const cutoff = nowEpoch() - days*86400;
+  // we set expires_at when bumping/commenting; this sweep removes it once past now
+  sweepExpiredTopics.run();
+}
+
 function runSweep(){
   try { sweepExpired.run(); } catch(e){}
   try { sweepExpiredDMs && sweepExpiredDMs.run(); } catch(e){}
   try { sweepExpiredSuggestions.run(); } catch(e){}
 }
 runSweep();
-setInterval(runSweep, 60 * 1000);
+setInterval(()=>{
+  try { sweepExpiredDMs.run(); } catch{}
+  try { sweepExpiredSuggestions.run(); } catch{}
+  try { runBoardSweep(); } catch{}
+}, 10 * 60 * 1000);
 
 // ======================= Graceful shutdown =======================
 process.on('SIGINT', () => { try { db.close(); } finally { process.exit(0); } });
