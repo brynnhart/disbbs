@@ -462,6 +462,33 @@ function splashSVG(){
     '<text x="600" y="320" font-size="20" fill="#E6E6E6" opacity="0.9">no feeds • no infinite scroll • just people</text>',
     '<text x="600" y="352" font-size="16" fill="#19C3C3" opacity="0.9">punk-built • human-scale • honest connection</text>',
     '</g>',
+
+    // Pride flag (left)
+    '<g aria-label="Pride flag" transform="translate(360,490)">',
+    '<rect x="0" y="0" width="96" height="30" rx="4" ry="4" fill="none" stroke="#222" stroke-width="1"/>',
+    '<rect x="0" y="0"  width="96" height="5" fill="#E40303"/>',
+    '<rect x="0" y="5" width="96" height="5" fill="#FF8C00"/>',
+    '<rect x="0" y="10" width="96" height="5" fill="#FFED00"/>',
+    '<rect x="0" y="15" width="96" height="5" fill="#008026"/>',
+    '<rect x="0" y="20" width="96" height="5" fill="#004DFF"/>',
+    '<rect x="0" y="25" width="96" height="5" fill="#750787"/>',
+    '</g>',
+
+    // Welcome text
+    '<g font-family="ui-monospace, Menlo, Consolas, monospace" text-anchor="middle" aria-label="Welcome message">',
+    '<text x="600" y="510" font-size="13" fill="#E6E6E6">You are loved.  You are welcome</text>',
+    '</g>',
+
+    // Trans flag (right)
+    '<g aria-label="Transgender flag" transform="translate(744,490)">',
+    '<rect x="0" y="0" width="96" height="30" rx="4" ry="4" fill="none" stroke="#222" stroke-width="1"/>',
+    '<rect x="0" y="0"  width="96" height="6" fill="#5BCEFA"/>',
+    '<rect x="0" y="6" width="96" height="6" fill="#F5A9B8"/>',
+    '<rect x="0" y="12" width="96" height="6" fill="#FFFFFF"/>',
+    '<rect x="0" y="18" width="96" height="6" fill="#F5A9B8"/>',
+    '<rect x="0" y="24" width="96" height="6" fill="#5BCEFA"/>',
+    '</g>',
+
     '</svg>',
     '</div>'
   ].join('');
@@ -736,68 +763,59 @@ function cmdFormat(api){
 function renderBoard(api, state){
   if (!requireAuth(api, state)) return;
   const limit = +(getSetting.get('board_list_limit')?.value || 100);
-  const rows = selectTopicsList.all(limit); // returns topics newest-bumped first
-
-  // Build a 1-based mapping for selection later
-  state.boardIndexMap = rows.map(r => r.id); // [realId0, realId1, ...]
+  const rows = selectTopicsList.all(limit);
 
   api.batch(b=>{
     b.clear();
-    b.print('== Bulletin Board ==', 'magenta'); b.hr();
-
+    b.print('== Message Board ==', 'magenta'); b.hr();
     if (rows.length === 0){
       b.print('No topics yet. Start one with /newtopic <title>.', 'dim');
     } else {
       b.print('Topics (most recently active first):', 'yellow');
-      rows.forEach((r, i)=>{
-        const num = i + 1; // 1-based display number
+      rows.forEach(r=>{
+        const when = new Date(r.last_commented_at*1000).toLocaleString();
         const safeTitle = sanitizeAndFormatDIS(r.title);
-        const replyWord = (r.comments === 1 ? 'reply' : 'replies');
-        b.printHTML(`${num}. ${safeTitle}  <span class="dim">(${r.comments} ${replyWord})</span>`);
+        b.printHTML(`${r.id}. ${safeTitle}  <span class="dim">(${r.comments} repl${r.comments === 1 ? 'y' : 'ies'}, active ${escapeHTML(when)})</span>`);
       });
     }
-
     b.hr();
-    b.print('Open: /topic <#>    New: /newtopic <title>    Remove (admin): /removetopic <#>', 'cyan');
-    b.setInputType('text', 'Use /topic <#> to view; type to reply inside a topic');
+    b.print('Open: /topic <id>   Start: /newtopic <title>   Back: /main', 'cyan');
+    b.setInputType('text', 'Use /topic <id> or /newtopic <title>');
   });
 
-  state.currentScreen = 'board:list';
+  state.currentScreen = 'board';
   state.currentTopicId = null;
 }
-function openTopic(api, state, indexNumber){
-  if (!requireAuth(api, state)) return;
-  const map = state.boardIndexMap || [];
-  const idx = (indexNumber|0) - 1;
-  const realId = (idx >= 0 && idx < map.length) ? map[idx] : null;
-  if (!realId){ api.print('No such topic number.', 'red'); return; }
+function openTopic(api, state, topicId){
+  const t = selectTopic.get(topicId);
+  if (!t){ api.print('No such topic (maybe expired).', 'red'); return; }
+  state.currentScreen = 'topic';
+  state.currentTopicId = topicId;
 
-  const topic = selectTopic.get(realId);
-  if (!topic){ api.print('Topic not found (maybe expired).', 'red'); return; }
+  const comments = selectCommentsForTopic.all(topicId);
+  const posterRaw = (t.display_name && t.display_name.trim()) ? t.display_name : (t.creator || 'anon');
+  const poster = sanitizeAndFormatDIS(posterRaw);
 
-  const comments = selectCommentsForTopic.all(realId);
   api.batch(b=>{
     b.clear();
-    b.printHTML(`Topic: ${sanitizeAndFormatDIS(topic.title)}`, 'magenta'); b.hr();
-    if (!comments.length){
+    b.printHTML(`== Topic #${t.id}: ${sanitizeAndFormatDIS(t.title)} ==`, 'magenta');
+    b.printHTML(`<span class="dim">by &lt;${poster}&gt;</span>`); b.hr();
+    if (comments.length === 0){
       b.print('No replies yet. Type to reply.', 'dim');
     } else {
       comments.forEach(c=>{
-        const whoRaw = (c.display_name && c.display_name.trim()) ? c.display_name : (c.username || 'anon');
-        const who = sanitizeAndFormatDIS(whoRaw);
-        const when = new Date(c.created_at*1000).toLocaleString();
+        const ts = new Date(c.created_at*1000).toLocaleString();
+        const authorRaw = (c.display_name && c.display_name.trim()) ? c.display_name : (c.username || 'anon');
+        const author = sanitizeAndFormatDIS(authorRaw);
         const body = sanitizeAndFormatDIS(c.body);
         const coloredBody = c.preferred_color ? `<span style="color:${c.preferred_color}">${body}</span>` : body;
-        b.printHTML(`&lt;${who}&gt; ${coloredBody}  <span class="dim">(${when})</span>`);
+        b.printHTML(`[${escapeHTML(ts)}] &lt;${author}&gt; ${coloredBody}`);
       });
     }
     b.hr();
-    b.print('Type to reply.  Commands: /board (back)  /removetopic <#> (admin)', 'cyan');
-    b.setInputType('text', 'Type your reply…');
+    b.print('Type to reply. Commands: /board (back), /main', 'dim');
+    b.setInputType('text', 'Type to reply… /board to go back');
   });
-
-  state.currentScreen = 'board:topic';
-  state.currentTopicId = realId;
 }
 function boardHandleCommand(cmd, api, state, args){
   if (!requireAuth(api, state)) return true;
@@ -855,34 +873,12 @@ function cmdNewTopic(api, state, args){
 function cmdRemoveTopic(api, state, args){
   if (!requireAuth(api, state)) return;
   if (!state.isAdmin){ api.print('Admin only.', 'red'); return; }
-
-  // Accept a list number by default; fall back to raw ID if that fails
-  const raw = (args && args[0]) ? args[0] : '';
-  let realId = null;
-
-  const n = parseInt(raw, 10);
-  if (Number.isFinite(n) && n > 0 && state.boardIndexMap && state.boardIndexMap.length){
-    const idx = n - 1;
-    if (idx >= 0 && idx < state.boardIndexMap.length){
-      realId = state.boardIndexMap[idx];
-    }
-  }
-  if (!realId){
-    // try as direct DB id
-    const asId = parseInt(raw, 10);
-    if (Number.isFinite(asId) && asId > 0) realId = asId;
-  }
-
-  if (!realId){ api.print('Usage: /removetopic <# from list or raw id>', 'yellow'); return; }
-  deleteTopicById.run(realId);
-  api.print(`Removed topic.`, 'green');
-
-  // If they were viewing this topic, go back to list
-  if (state.currentScreen === 'board:topic' && state.currentTopicId === realId){
+  const id = parseInt(args[0], 10);
+  if (!id){ api.print('Usage: /removetopic <id>', 'yellow'); return; }
+  deleteTopicById.run(id);
+  api.print(`Removed topic #${id}.`, 'green');
+  if (state.currentScreen === 'topic' && state.currentTopicId === id){
     renderBoard(api, state);
-  } else {
-    // refresh list if they’re on it
-    if (state.currentScreen === 'board:list') renderBoard(api, state);
   }
 }
 
@@ -901,37 +897,62 @@ function truncateUrl(u, max){ if (!u) return ''; return u.length<=max ? u : (u.s
 function renderNewsList(api, state){
   if (!requireAuth(api, state)) return;
   const limit = +(getSetting.get('news_list_limit')?.value || 150);
-  const rows = selectNewsList.all(limit); // newest-active first
-
-  // Build 1-based index -> real id mapping
-  state.newsIndexMap = rows.map(r => r.id);
-
+  const rows = selectNewsList.all(limit);
   api.batch(b=>{
     b.clear();
     b.print('== DIS News ==', 'magenta'); b.hr();
-
     if (!rows.length){
       b.print('No news yet. Add one with /addnews <headline> <url> <tag>.', 'dim');
     } else {
       b.print('Recent links (most recently active first):', 'yellow');
-      rows.forEach((r, i)=>{
-        const num = i + 1;
+      rows.forEach(r=>{
         const posterRaw = (r.display_name && r.display_name.trim()) ? r.display_name : (r.username || 'anon');
         const poster = sanitizeAndFormatDIS(posterRaw);
         const safeTitle = sanitizeAndFormatDIS(r.title);
         const urlShown = truncateUrl(r.url, 80);
-        b.printHTML(`${num}. ${safeTitle}`);
+        b.printHTML(`${r.id}. ${safeTitle}`);
         b.printHTML(`   <span class="dim">${escapeHTML(urlShown)}</span>  <span class="cyan">[${escapeHTML(r.tag)}]</span>  by &lt;${poster}&gt;  <span class="dim">(${r.comments} comments)</span>`);
       });
     }
-
     b.hr();
-    b.print('Open: /news <#>    Add: /addnews <headline> <url> <tag>    Remove (admin): /removenews <#>', 'cyan');
-    b.setInputType('text', 'Use /news <#> or /addnews <headline> <url> <tag>');
+    b.print('Open: /news <id>    Add: /addnews <headline> <url> <tag>    Remove (admin): /removenews <id>', 'cyan');
+    b.print('Tags: ' + NEWS_TAGS.join(', '), 'dim');
+    b.setInputType('text', 'Use /news <id> or /addnews <headline> <url> <tag>');
   });
-
   state.currentScreen = 'news:list';
   state.currentNewsId = null;
+}
+function openNewsItem(api, state, id){
+  const p = selectNewsPost.get(id);
+  if (!p){ api.print('No such news item (maybe expired).', 'red'); return; }
+  state.currentScreen = 'news:item';
+  state.currentNewsId = id;
+
+  const comments = selectNewsComments.all(id);
+  const posterRaw = (p.display_name && p.display_name.trim()) ? p.display_name : (p.username || 'anon');
+  const poster = sanitizeAndFormatDIS(posterRaw);
+
+  api.batch(b=>{
+    b.clear();
+    b.printHTML(`== [${escapeHTML(p.tag)}] ${sanitizeAndFormatDIS(p.title)} ==`, 'magenta');
+    b.printHTML(`<span class="dim">${escapeHTML(p.url)}</span>  by &lt;${poster}&gt;`);
+    b.hr();
+    if (!comments.length){
+      b.print('No comments yet. Type to comment.', 'dim');
+    } else {
+      comments.forEach(c=>{
+        const ts = new Date(c.created_at*1000).toLocaleString();
+        const authorRaw = (c.display_name && c.display_name.trim()) ? c.display_name : (c.username || 'anon');
+        const author = sanitizeAndFormatDIS(authorRaw);
+        const body = sanitizeAndFormatDIS(c.body);
+        const colored = c.preferred_color ? `<span style="color:${c.preferred_color}">${body}</span>` : body;
+        b.printHTML(`[${escapeHTML(ts)}] &lt;${author}&gt; ${colored}`);
+      });
+    }
+    b.hr();
+    b.print('Type to comment. Commands: /news (back), /main', 'dim');
+    b.setInputType('text', 'Type to comment… /news to go back');
+  });
 }
 function newsListHandleCommand(cmd, api, state, args){
   if (!requireAuth(api, state)) return true;
@@ -986,72 +1007,14 @@ function cmdAddNews(api, state, args){
 function cmdRemoveNews(api, state, args){
   if (!requireAuth(api, state)) return;
   if (!state.isAdmin){ api.print('Admin only.', 'red'); return; }
-
-  const raw = (args && args[0]) ? args[0] : '';
-  let realId = null;
-
-  const n = parseInt(raw, 10);
-  if (Number.isFinite(n) && n > 0 && state.newsIndexMap && state.newsIndexMap.length){
-    const idx = n - 1;
-    if (idx >= 0 && idx < state.newsIndexMap.length){
-      realId = state.newsIndexMap[idx];
-    }
-  }
-  if (!realId){
-    const asId = parseInt(raw, 10);
-    if (Number.isFinite(asId) && asId > 0) realId = asId;
-  }
-
-  if (!realId){ api.print('Usage: /removenews <# from list or raw id>', 'yellow'); return; }
-  deleteNewsById.run(realId);
-  api.print(`Removed news item.`, 'green');
-
-  if (state.currentScreen === 'news:item' && state.currentNewsId === realId){
+  const id = parseInt(args[0], 10);
+  if (!id){ api.print('Usage: /removenews <id>', 'yellow'); return; }
+  deleteNewsById.run(id);
+  api.print(`Removed news #${id}.`, 'green');
+  if (state.currentScreen && state.currentScreen.startsWith('news') && state.currentNewsId === id){
     renderNewsList(api, state);
-  } else {
-    if (state.currentScreen === 'news:list') renderNewsList(api, state);
   }
 }
-
-function openNewsItem(api, state, indexNumber){
-  const map = state.newsIndexMap || [];
-  const idx = (indexNumber|0) - 1;
-  const realId = (idx >= 0 && idx < map.length) ? map[idx] : null;
-  if (!realId){ api.print('No such news number.', 'red'); return; }
-
-  const p = selectNewsPost.get(realId);
-  if (!p){ api.print('No such news item (maybe expired).', 'red'); return; }
-
-  state.currentScreen = 'news:item';
-  state.currentNewsId = realId;
-
-  const comments = selectNewsComments.all(realId);
-  const posterRaw = (p.display_name && p.display_name.trim()) ? p.display_name : (p.username || 'anon');
-  const poster = sanitizeAndFormatDIS(posterRaw);
-
-  api.batch(b=>{
-    b.clear();
-    b.printHTML(sanitizeAndFormatDIS(p.title), 'magenta'); b.hr();
-    b.printHTML(`<span class="dim">${escapeHTML(p.url)}</span>  <span class="cyan">[${escapeHTML(p.tag)}]</span>  by &lt;${poster}&gt;`);
-    b.hr();
-    if (!comments.length){
-      b.print('No comments yet. Type to comment.', 'dim');
-    } else {
-      comments.forEach(c=>{
-        const whoRaw = (c.display_name && c.display_name.trim()) ? c.display_name : (c.username || 'anon');
-        const who = sanitizeAndFormatDIS(whoRaw);
-        const when = new Date(c.created_at*1000).toLocaleString();
-        const body = sanitizeAndFormatDIS(c.body);
-        const coloredBody = c.preferred_color ? `<span style="color:${c.preferred_color}">${body}</span>` : body;
-        b.printHTML(`&lt;${who}&gt; ${coloredBody}  <span class="dim">(${when})</span>`);
-      });
-    }
-    b.hr();
-    b.print('Type to comment.  Commands: /news (back)  /removenews <#> (admin)', 'cyan');
-    b.setInputType('text', 'Type your comment…');
-  });
-}
-
 
 /* ======================= Colors + Display Name ======================= */
 function cmdSetColor(api, state, args){
