@@ -55,17 +55,17 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL
 );
 
-/* Invites (single-use) */
 CREATE TABLE IF NOT EXISTS invites (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   code TEXT NOT NULL UNIQUE,
   created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at INTEGER NOT NULL,
-  expires_at INTEGER,
+  expires_at INTEGER,              -- NULL = no expiry
   used_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-  used_at INTEGER,
+  used_at INTEGER,                 -- NULL = unused
   note TEXT
 );
+
 CREATE INDEX IF NOT EXISTS idx_invites_code       ON invites(code);
 CREATE INDEX IF NOT EXISTS idx_invites_expires_at ON invites(expires_at);
 CREATE INDEX IF NOT EXISTS idx_invites_used_at    ON invites(used_at);
@@ -191,12 +191,21 @@ const clearUserDisplay = db.prepare(`UPDATE users SET display_name = NULL WHERE 
 /* Invites */
 const insertInvite = db.prepare(`
   INSERT INTO invites (code, created_by, created_at, expires_at, note)
-  VALUES (?, ?, ?, ?, ?)
+  VALUES (?, ?, strftime('%s','now'), ?, ?)
 `);
-const useInvite = db.prepare(`
-  UPDATE invites SET used_by=?, used_at=? WHERE code=? AND used_at IS NULL
+
+const getInvite = db.prepare(`
+  SELECT * FROM invites WHERE code = ?
 `);
-const getInvite = db.prepare(`SELECT * FROM invites WHERE code = ?`);
+
+
+const redeemInvite = db.prepare(`
+  UPDATE invites
+     SET used_by = ?, used_at = strftime('%s','now')
+   WHERE code = ? AND used_at IS NULL
+`);
+
+
 const sweepExpiredInvites = db.prepare(`DELETE FROM invites WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')`);
 
 /* DMs */
@@ -1069,6 +1078,55 @@ function cmdDisplayReset(api, state){
   api.print('Display name reset to username.', 'green');
 }
 
+function cmdMakeInvite(api, state, args){
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
+  let days = 7, note = '';
+  if (args && args.length) {
+    const maybe = parseInt(args[0], 10);
+    if (!Number.isNaN(maybe) && maybe >= 0) { days = maybe; note = args.slice(1).join(' ').trim(); }
+    else { note = args.join(' ').trim(); }
+  }
+  const out = createInvite({ creatorId: state.userId, days, note });
+  if (!out.ok) { api.print('Failed to create invite.', 'red'); return; }
+  const expiresLine = out.expires_at ? new Date(out.expires_at*1000).toLocaleString() : 'never';
+  api.print('Invite created:', 'green');
+  api.print(`  Code: ${out.code}`, 'cyan');
+  api.print(`  Expires: ${expiresLine}`, 'cyan');
+  if (note) api.print(`  Note: ${note}`, 'cyan');
+  api.print('Share this code privately. It can be used only once.', 'dim');
+}
+function cmdWho(api){
+  const list = Array.from(HUB.online);
+  api.print(list.length ? `Online: ${list.join(', ')}` : 'Nobody online', 'cyan');
+}
+
+function cmdListInvites(api, state, args){
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin){ api.print('Unknown command.', 'red'); return; } // hidden to non-admins
+  const mode = (args[0]||'unused').toLowerCase(); // unused|used|all
+  let where = 'used_at IS NULL'; if (mode==='used') where='used_at IS NOT NULL'; else if (mode==='all') where='1=1';
+  const rows = db.prepare(`SELECT code, created_at, expires_at, used_at, note FROM invites WHERE ${where} ORDER BY created_at DESC LIMIT 50`).all();
+  if (!rows.length){ api.print('No invites found.', 'dim'); return; }
+  api.hr(); api.print(`Invites (${mode}):`, 'yellow');
+  rows.forEach(r=>{
+    const exp = r.expires_at ? new Date(r.expires_at*1000).toLocaleString() : 'never';
+    const used = r.used_at ? new Date(r.used_at*1000).toLocaleString() : '—';
+    api.print(`• ${r.code}  exp:${exp}  used:${used}  ${r.note?'- '+r.note:''}`, r.used_at?'dim':'cyan');
+  });
+}
+
+function cmdRevokeInvite(api, state, args){
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin){ api.print('Unknown command.', 'red'); return; }
+  const code = (args[0]||'').trim(); if (!code){ api.print('Usage: /revokeinvite <code>', 'yellow'); return; }
+  const row = getInvite.get(code);
+  if (!row){ api.print('No such invite.', 'red'); return; }
+  if (row.used_at){ api.print('Invite already used; cannot revoke.', 'yellow'); return; }
+  db.prepare(`UPDATE invites SET expires_at = strftime('%s','now') WHERE code = ? AND used_at IS NULL`).run(code);
+  api.print('Invite revoked.', 'green');
+}
+
 /* ======================= DMs, Suggestions, Invites (brevity) ======================= */
 function cmdDM(api, state, args){
   if (!requireAuth(api, state)) return;
@@ -1157,37 +1215,55 @@ function cmdPlay(api, state, args){
 
 /* ======================= Splash: Register & Invites ======================= */
 function cmdRegister(api, state, args){
-  const atSplash = !state?.authenticated;
-  if (!atSplash && !state.isAdmin && !state.username){
-    api.print('You must be logged out or admin to register others.', 'red'); return;
+  const [username, password, inviteCode] = args || [];
+
+  if (!username || !password || !inviteCode) {
+    api.print('Usage: /register <username> <password> <invite>', 'yellow');
+    return;
   }
-  const [user, pass, inviteCode] = args || [];
-  if (!user || !pass || !inviteCode){ api.print('Usage: /register <user> <pass> <invite>', 'yellow'); return; }
+  if (password.length < 6) {
+    api.print('Password must be at least 6 characters.', 'yellow');
+    return;
+  }
 
-  const inv = getInvite.get(inviteCode);
-  if (!inv){ api.print('Invalid invite code.', 'red'); return; }
-  if (inv.used_at){ api.print('Invite already used.', 'red'); return; }
-  if (inv.expires_at && inv.expires_at <= nowEpoch()){ api.print('Invite expired.', 'red'); return; }
+  // 1) validate invite
+  const vi = validateInvite(inviteCode);
+  if (!vi.ok) {
+    const why = vi.reason === 'no_such' ? 'Invite not found.'
+              : vi.reason === 'used'    ? 'Invite already used.'
+              : vi.reason === 'expired' ? 'Invite expired.'
+              : 'Invalid invite.';
+    api.print(why, 'red');
+    return;
+  }
 
-  if (getUserIdByName.get(user)){ api.print('Username already exists.', 'red'); return; }
+  // 2) create the account (re-use your existing createUser)
+  const res = createUser(username, password);
+  if (!res.ok) {
+    api.print('That username is taken.', 'red');
+    return;
+  }
 
-  const hash = bcrypt.hashSync(pass, 10);
-  const now = nowEpoch();
-  createUserStmt.run(user, hash, 0, now);
-  const newUser = getUserByName.get(user);
-  useInvite.run(newUser.id, now, inviteCode);
+  // 3) redeem invite (single-use)
+  try {
+    const newUser = findUserByName.get(username);
+    const changed = redeemInvite.run(newUser.id, inviteCode).changes;
+    if (!changed) {
+      api.print('Invite could not be redeemed (race condition). Try another.', 'red');
+      // Rollback user creation here only if you want strict semantics.
+      return;
+    }
+  } catch(e) {
+    api.print('Invite redemption failed. Try another code.', 'red');
+    return;
+  }
 
-  api.print('Registration complete. You can now login with your credentials.', 'green');
-}
-function cmdInvite(api, state, args){
-  if (!requireAuth(api, state)) return;
-  if (!state.isAdmin){ api.print('Admin only.', 'red'); return; }
-  const note = (args||[]).join(' ').trim() || null;
-  const code = generateInviteCode();
-  const now = nowEpoch();
-  const expires = now + 30*86400; // 30 days
-  insertInvite.run(code, state.userId, now, expires, note);
-  api.print(`Invite code: ${code} (expires in 30 days)`, 'green');
+  // 4) success messages differ based on session state
+  if (state && state.authenticated) {
+    api.print(`Account created: ${username}. You remain logged in as ${state.username}.`, 'green');
+  } else {
+    api.print('Account created. Please log in with your new credentials.', 'green');
+  }
 }
 
 function cmdPasswd(api, state, args){
@@ -1242,7 +1318,9 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'displayreset': cmdDisplayReset(api, state); return true;
 
     /* Invites + Register */
-    case 'invite':       cmdInvite(api, state, args); return true;
+     case 'makeinvite':   return cmdMakeInvite(api, state, args), true;
+    case 'listinvites':  return cmdListInvites(api, state, args), true;
+   case 'revokeinvite': return cmdRevokeInvite(api, state, args), true;
     case 'register':     cmdRegister(api, state, args); return true;
 
     /* Misc */
@@ -1388,6 +1466,65 @@ function defSetting(key, val){
 }
 function generateInviteCode(){
   return crypto.randomBytes(6).toString('base64url'); // ~8 chars URL-safe
+}
+
+function createInvite({ creatorId, days, note }) {
+  const expires_at = (typeof days === 'number' && days > 0) ? (nowEpoch() + days*86400) : null;
+  const code = makeInviteCode();
+  try {
+    insertInvite.run(code, creatorId || null, expires_at, note || null);
+    return { ok:true, code, expires_at };
+  } catch (e) {
+    return { ok:false, err: e && e.message ? e.message : String(e) };
+  }
+}
+
+function makeInviteCode() {
+  // 20 bytes (160 bits) → 40 hex chars → group for readability
+  const hex = crypto.randomBytes(20).toString('hex').toUpperCase(); // e.g. 'A1B2...'
+  return hex.match(/.{1,4}/g).join('-'); // 'A1B2-...-...'
+}
+
+function validateInvite(code) {
+  const row = getInvite.get(code);
+  if (!row) return { ok:false, reason:'no_such' };
+  if (row.used_at) return { ok:false, reason:'used' };
+  if (row.expires_at && row.expires_at <= nowEpoch()) return { ok:false, reason:'expired' };
+  return { ok:true, invite: row };
+}
+
+const findUserByName = db.prepare(`SELECT * FROM users WHERE username = ?`);
+function verifyLogin(username, password) {
+  const u = findUserByName.get(username);
+  if (!u) return null;
+  if (!bcrypt.compareSync(password, u.password_hash)) return null;
+  db.prepare(`UPDATE users SET last_login_at = ? WHERE id = ?`).run(nowEpoch(), u.id);
+  return u;
+}
+// Create a new user account (usernames are UNIQUE COLLATE NOCASE in schema)
+// Returns { ok:true, id } on success; { ok:false, reason:'exists' } if taken.
+function createUser(username, password, opts = {}) {
+  const existing = findUserByName.get(username);
+  if (existing) return { ok: false, reason: 'exists' };
+
+  const isAdmin = opts.isAdmin ? 1 : 0; // default non-admin
+  const hash = bcrypt.hashSync(password, 10);
+
+  try {
+    db.prepare(`
+      INSERT INTO users (username, password_hash, is_admin, created_at)
+      VALUES (?, ?, ?, strftime('%s','now'))
+    `).run(username, hash, isAdmin);
+
+    const row = db.prepare(`SELECT id FROM users WHERE username = ?`).get(username);
+    return { ok: true, id: row.id };
+  } catch (e) {
+    // If some other constraint hits
+    if ((e && e.message || '').toLowerCase().includes('unique')) {
+      return { ok:false, reason:'exists' };
+    }
+    throw e;
+  }
 }
 
 /* ======================= Start ======================= */
