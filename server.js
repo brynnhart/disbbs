@@ -173,6 +173,18 @@ CREATE TABLE IF NOT EXISTS casino_ledger (
 
 CREATE INDEX IF NOT EXISTS idx_casino_ledger_user_created ON casino_ledger(user_id, created_at DESC);
 
+/* Admin Chat (private, admins-only) */
+CREATE TABLE IF NOT EXISTS admin_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  body TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_admin_messages_expires_at ON admin_messages(expires_at);
+CREATE INDEX IF NOT EXISTS idx_admin_messages_created_at ON admin_messages(created_at);
+
+
 `);
 
 /* ======================= Prepared statements / settings ======================= */
@@ -196,6 +208,8 @@ defSetting('news_inactive_days', 30);
 defSetting('news_title_max_len', 120);
 defSetting('news_reply_max_len', 600);
 defSetting('news_list_limit', 150);
+defSetting('admin_chat_retention_days', 7);
+
 
 /* Users + auth */
 const getUserByName = db.prepare(`SELECT * FROM users WHERE username = ?`);
@@ -399,6 +413,26 @@ const topBalances    = db.prepare(`
   ORDER BY bal DESC, u.username ASC
   LIMIT 5
 `);
+
+
+/* Admin Chat */
+const insertAdminMessage = db.prepare(`
+  INSERT INTO admin_messages (user_id, body, created_at, expires_at)
+  VALUES (?, ?, ?, ?)
+`);
+const recentAdminMessages = db.prepare(`
+  SELECT m.id, m.body, m.created_at,
+         u.username, u.display_name, u.preferred_color AS color
+    FROM admin_messages m
+    LEFT JOIN users u ON u.id = m.user_id
+   WHERE (m.expires_at IS NULL OR m.expires_at > strftime('%s','now'))
+   ORDER BY m.created_at DESC
+   LIMIT 200
+`);
+const sweepExpiredAdminMessages = db.prepare(`
+  DELETE FROM admin_messages WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')
+`);
+
 
 
 /* ======================= Seed admin ======================= */
@@ -708,6 +742,8 @@ api.print('  /slots ?     Show the payout table', 'cyan');
     api.print('  /listinvites [unused|used|all]  Show recent invites', 'cyan');
     api.print('  /revokeinvite <code>        Expire an unused invite', 'cyan');
     api.print('  /removesuggestion <#>  Remove a suggestion (from the current list)', 'cyan');
+    api.print('  /adminchat   Admin live room (private)', 'cyan');
+
   }
   api.hr();
   api.print('DIS-Markdown: **bold**, _italics_, __underline__, [dim]…[/dim], and color tags like [cyan]…[/cyan].', 'dim');
@@ -1432,6 +1468,11 @@ function handleGlobalCommand(cmd, api, state, args){
     /* Casino */
 case 'casino':  cmdCasino(api, state); return true;
 case 'slots':   cmdSlots(api, state, args); return true;
+case 'adminchat':
+  if (state.isAdmin) renderAdminChat(api, state);
+  else api.print('Unknown command.', 'red'); // keep it hidden
+  return true;
+
   }
   return false;
 }
@@ -1474,6 +1515,7 @@ wss.on('connection', (ws) => {
         const handled =
              (state.currentScreen === 'splash'    && splashHandleCommand(cmd, api))
           || (state.currentScreen === 'chat'      && chatHandleCommand(cmd, api, state, args))
+          || (state.currentScreen === 'adminchat' && adminChatHandleCommand(cmd, api, state, args))
           || (state.currentScreen === 'about'     && aboutHandleCommand(cmd, api, state, args))
           || (state.currentScreen === 'rules'     && rulesHandleCommand(cmd, api, state, args))
           || (state.currentScreen === 'board'     && boardHandleCommand(cmd, api, state, args))
@@ -1490,6 +1532,8 @@ wss.on('connection', (ws) => {
       // 2) Raw text (no slash) → screen-specific handlers
       if (state.currentScreen === 'splash') { splashHandleRaw(trimmed, api, state); return; } // username/password flow
       if (state.currentScreen === 'chat')   { chatHandleRaw(trimmed, api, state);   return; }
+      if (state.currentScreen === 'adminchat') { adminChatHandleRaw(trimmed, api, state); return; }
+
       if (state.currentScreen === 'board')  { api.print('Use /topic <id> or /newtopic <title>.', 'dim'); return; }
       if (state.currentScreen === 'topic')  { topicHandleRaw(trimmed, api, state);  return; }
       if (state.currentScreen === 'news:item') { newsItemHandleRaw(trimmed, api, state); return; }
@@ -1529,9 +1573,11 @@ function runChatSweep(){ try { sweepExpiredMessages.run(); } catch {} }
 function runDMSweep(){ try { sweepExpiredDMs.run(); } catch {} }
 function runInviteSweep(){ try { sweepExpiredInvites.run(); } catch {} }
 function runSuggestionSweep(){ try { sweepExpiredSuggestions.run(); } catch {} }
+function runAdminChatSweep(){ try { sweepExpiredAdminMessages.run(); } catch {} }
+
 
 setInterval(()=>{
-  runChatSweep(); runDMSweep(); runInviteSweep(); runSuggestionSweep(); runBoardSweep(); runNewsSweep();
+  runChatSweep(); runDMSweep(); runInviteSweep(); runSuggestionSweep(); runBoardSweep(); runNewsSweep(); runAdminChatSweep();
 }, 10 * 60 * 1000);
 
 /* ======================= Doors boot (optional) ======================= */
@@ -1827,6 +1873,99 @@ function printSlotsRules(api){
   api.print('Notes: ☻ is wild for 3-of-a-kind only; it does not count toward the cherry pair.', 'dim');
   api.hr();
 }
+
+
+function retentionSecondsAdmin(){
+  const days = +(getSetting.get('admin_chat_retention_days')?.value || 7);
+  return days > 0 ? days*86400 : 0;
+}
+
+function usersCurrentlyInAdminChat(){
+  const arr = [];
+  HUB.clients.forEach(ws=>{
+    const st = ws.__ctx?.state;
+    if (st && st.currentScreen === 'adminchat' && st.username && st.isAdmin) arr.push(st.username);
+  });
+  return arr.sort((a,b)=>a.localeCompare(b));
+}
+
+function broadcastAdminChatFrom(htmlLine, fromUsername){
+  const from = (fromUsername || '').toLowerCase();
+  HUB.clients.forEach((client) => {
+    const st = client.__ctx?.state; if (!st) return;
+    if (!st.isAdmin) return;
+    if (st.currentScreen !== 'adminchat') return;
+    const u = (st.username || '').toLowerCase();
+    const isMine = from && u === from;
+    sendOps(client, [{ op:'printHTML', html: htmlLine, cls: isMine ? 'me' : undefined }]);
+  });
+}
+
+
+/* ======================= Admin Chat (admins only) ======================= */
+function renderAdminChat(api, state){
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin){ api.print('Unknown command.', 'red'); return; } // keep it discreet
+
+  api.batch(b=>{
+    b.clear();
+    b.print('== Admin Ops Chat ==', 'magenta');
+    b.print('Private room for sysops / moderators.', 'dim'); b.hr();
+
+    const here = usersCurrentlyInAdminChat();
+    b.print(here.length ? `Here now (${here.length}): ${here.join(', ')}` : 'No admins here yet — say hi!', 'cyan');
+    b.hr();
+
+    const rows = recentAdminMessages.all().reverse();
+    if (!rows.length){
+      b.print('No messages yet. Type to chat. /leave returns to menu.', 'dim');
+    } else {
+      rows.forEach(r=>{
+        const ts = new Date(r.created_at*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+        const disp = r.display_name || r.username || 'anon';
+        const safeBody = sanitizeAndFormatDIS(r.body);
+        const bodyWithColor = r.color ? `<span style="color:${r.color}">${safeBody}</span>` : safeBody;
+        const html = `[${ts}] &lt;${sanitizeAndFormatDIS(disp)}&gt; ${bodyWithColor}`;
+        const mine = state.username && r.username && state.username.toLowerCase() === r.username.toLowerCase();
+        b.printHTML(html, mine ? 'me' : undefined);
+      });
+    }
+
+    b.hr();
+    b.print('Type to chat. /leave exits. Markdown + colors allowed.', 'dim');
+  });
+
+  state.currentScreen = 'adminchat';
+}
+
+function adminChatHandleCommand(cmd, api, state){
+  if (!requireAuth(api, state)) return true;
+  if (!state.isAdmin){ api.print('Unknown command.', 'red'); return true; }
+  if (cmd === 'leave' || cmd === 'menu' || cmd === 'main'){ routeGo(api, state, 'menu'); return true; }
+  if (cmd === 'here'){ api.print('Here: ' + usersCurrentlyInAdminChat().join(', '), 'cyan'); return true; }
+  return false;
+}
+
+function adminChatHandleRaw(text, api, state){
+  if (!requireAuth(api, state)) return true;
+  if (!state.isAdmin){ api.print('Unknown command.', 'red'); return true; }
+  const msgText = (text||'').trim(); if (!msgText) return true;
+
+  const uid = state.userId || null;
+  const created = nowEpoch();
+  const ttl = retentionSecondsAdmin(); const expires = ttl > 0 ? (created + ttl) : null;
+  insertAdminMessage.run(uid, msgText, created, expires);
+
+  const ts = new Date(created*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+  const disp = state.displayName || state.username || 'anon';
+  const safeBody = sanitizeAndFormatDIS(msgText);
+  const bodyWithColor = state.userColor ? `<span style="color:${state.userColor}">${safeBody}</span>` : safeBody;
+  const html = `[${ts}] &lt;${sanitizeAndFormatDIS(disp)}&gt; ${bodyWithColor}`;
+  broadcastAdminChatFrom(html, state.username || '');
+  return true;
+}
+
+
 
 
 /* ======================= Start ======================= */
