@@ -1,62 +1,147 @@
 // doors/manager.js
-// Tiny door registry + per-connection session router
+// A tiny, tolerant, singleton Door Manager for DIS
 
-const sessions = new WeakMap(); // ws -> { id, data }
-const doors = new Map();        // id -> door module
-let db = null;
-let helpers = {};
+(function(){
+  const KEY = '__DIS_DOOR_MANAGER__';
+  const G = (globalThis || global);
 
-/** call this once from server.js after DB exists */
-function init(_db, _helpers={}) {
-  db = _db;
-  helpers = _helpers;
-}
+  if (G[KEY]) {
+    // If already created (because server.js has multiple imports), export the same instance.
+    module.exports = { DoorManager: G[KEY] };
+    return;
+  }
 
-/** door: { id, name, newSession?, render?, onRaw?, onCommand?, commands? } */
-function register(door) {
-  if (!door?.id) throw new Error('Door must have an id');
-  // Attach db + helpers so doors don’t import server.js
-  Object.assign(door, { db, helpers });
-  doors.set(door.id, door);
-}
+  // ────────────────────────────────────────────────────────────────────────────
+  // Registry + sessions
+  const registry = new Map();          // id -> { id, name, create(api,state,meta) }
+  const sessions = new WeakMap();      // ws -> { id, inst }
 
-function list() {
-  return Array.from(doors.values()).map(d => ({ id: d.id, name: d.name || d.id }));
-}
+  function normId(x){ return String(x||'').trim().toLowerCase(); }
 
-function get(id) { return doors.get(id); }
-
-/** Enter a door; door.render should draw the initial screen */
-function enter(id, api, state, args=[]) {
-  const door = doors.get(id);
-  if (!door) { api.print('No such door', 'red'); return; }
-  state.currentScreen = `door:${id}`;
-  const sess = { id, data: (door.newSession ? door.newSession(state) : {}) };
-  sessions.set(api.ws, sess);
-  if (door.render) door.render(api, state, sess.data, args);
-}
-
-/** Dispatch raw text or slash commands to a door */
-function dispatch(id, kind, datum, api, state, args) {
-  const door = doors.get(id);
-  if (!door) return false;
-  const sess = sessions.get(api.ws) || { id, data: {} };
-  if (kind === 'raw' && door.onRaw) return !!door.onRaw(datum, api, state, sess.data);
-  if (kind === 'command' && door.onCommand) return !!door.onCommand(datum, api, state, args, sess.data);
-  return false;
-}
-
-/** Optional: expose door-defined commands to the global router */
-function getGlobalCommands() {
-  const map = new Map();
-  doors.forEach(d => {
-    if (d.commands) {
-      Object.entries(d.commands).forEach(([cmd, handler]) => {
-        map.set(cmd, (api, state, args) => handler(api, state, args, sessions.get(api.ws)?.data));
-      });
+  function normalizeDoor(doorOrId, maybeFactory, maybeMeta){
+    // 1) register('id', factoryFn, { name })
+    if (typeof doorOrId === 'string' && typeof maybeFactory === 'function') {
+      const id = normId(doorOrId);
+      const name = (maybeMeta && (maybeMeta.name || maybeMeta.title)) || doorOrId;
+      const meta = { id, name };
+      const create = (api, state) => maybeFactory(api, state, meta);
+      return { id, name, create };
     }
-  });
-  return map;
-}
 
-module.exports = { init, register, list, get, enter, dispatch, getGlobalCommands };
+    // 2) register(objectDoor)
+    //    Shapes:
+    //      { id:'tinyquest', name:'TinyQuest', create(api,state,meta){...} }
+    //      { meta:{ id:'tinyquest', name:'TinyQuest' }, create(...) {...} }
+    //      or even a plain factory function (just in case)
+    if (typeof doorOrId === 'function') {
+      // Treat as factory but we need an id; last resort name from function
+      const fn = doorOrId;
+      const id = normId(maybeMeta?.id || fn.name || 'door');
+      const name = maybeMeta?.name || id;
+      const meta = { id, name };
+      const create = (api, state) => fn(api, state, meta);
+      return { id, name, create };
+    }
+
+    const d = doorOrId || {};
+    const id = normId(d.id || d.meta?.id);
+    const name = d.name || d.meta?.name || (id || 'door');
+    const create = (typeof d.create === 'function')
+      ? (api, state) => d.create(api, state, { id, name })
+      : (() => { throw new Error('Door object missing create(api,state,meta)'); });
+
+    if (!id) throw new Error('Door missing id');
+    return { id, name, create };
+  }
+
+  function list(){
+    // stable order
+    return [...registry.values()].map(r => ({ id: r.id, name: r.name })).sort((a,b)=>a.id.localeCompare(b.id));
+  }
+
+  function register(doorOrId, maybeFactory, maybeMeta){
+    const rec = normalizeDoor(doorOrId, maybeFactory, maybeMeta);
+    registry.set(rec.id, rec);
+    return rec.id;
+  }
+
+  function enter(id, api, state){
+    const ws = api && api.ws;
+    const key = normId(id);
+    const rec = registry.get(key);
+    if (!rec) throw new Error(`No such door: ${id}`);
+
+    // create instance for this connection
+    const inst = rec.create(api, state, { id: rec.id, name: rec.name });
+    sessions.set(ws, { id: rec.id, inst });
+    // allow the door to print its banner/prompt
+    if (typeof inst.enter === 'function') inst.enter(api, state);
+    return true;
+  }
+
+  function leave(api, state){
+    const ws = api && api.ws;
+    const sess = ws && sessions.get(ws);
+    if (!sess) return false;
+    try { sess.inst && typeof sess.inst.leave === 'function' && sess.inst.leave(api, state); }
+    finally { sessions.delete(ws); }
+    return true;
+  }
+
+  function current(ws){
+    const sess = sessions.get(ws);
+    return sess ? sess.id : null;
+  }
+
+  // Two dispatch styles supported by your server:
+  //  A) dispatch(id, 'raw'|'command', payload, api, state, args)
+  //  B) handleRaw(text, api, state) / handleCommand(cmd, args, api, state)
+  function dispatch(id, kind, payload, api, state, extra){
+    const ws = api && api.ws;
+    const sess = ws && sessions.get(ws);
+    if (!sess || normId(id) !== normId(sess.id)) return false;
+
+    if (kind === 'raw') {
+      if (typeof sess.inst.handleRaw === 'function') return !!sess.inst.handleRaw(payload, api, state);
+      return false;
+    }
+    if (kind === 'command') {
+      const cmd = String(payload || '').toLowerCase();
+      if (cmd === 'leave') { leave(api, state); return 'leave'; }
+      if (typeof sess.inst.handleCommand === 'function') return !!sess.inst.handleCommand(cmd, extra, api, state);
+      return false;
+    }
+    return false;
+  }
+
+  function handleRaw(text, api, state){
+    const ws = api && api.ws;
+    const sess = ws && sessions.get(ws);
+    if (!sess) return false;
+    if (typeof sess.inst.handleRaw === 'function') return !!sess.inst.handleRaw(text, api, state);
+    return false;
+  }
+
+  function handleCommand(cmd, args, api, state){
+    const ws = api && api.ws;
+    const sess = ws && sessions.get(ws);
+    if (!sess) return false;
+    if (String(cmd).toLowerCase() === 'leave') { leave(api, state); return 'leave'; }
+    if (typeof sess.inst.handleCommand === 'function') return !!sess.inst.handleCommand(cmd, args, api, state);
+    return false;
+  }
+
+  const manager = {
+    // core
+    register, list, enter, leave,
+    // routing helpers used by your server
+    dispatch, handleRaw, handleCommand, current,
+    // tiny debug
+    _debug(){ return { registry: list() }; }
+  };
+
+  // Freeze + cache globally so all imports get the same instance.
+  Object.freeze(manager);
+  G[KEY] = manager;
+  module.exports = { DoorManager: manager };
+})();

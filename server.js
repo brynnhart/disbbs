@@ -9,13 +9,18 @@ const Database = require('better-sqlite3');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto'); // invites
 
+
 // Doors (optional; safe if missing on disk)
-let DoorManager, guessDoor, lordDoor;
+let DoorManager, tinyquestDoor;
 try {
-  ({ DoorManager } = require('./doors/manager'));
-  guessDoor = require('./doors/guess');
-  lordDoor = require('./doors/lord');
-} catch (_) {}
+  const DM = require('./doors/manager');     // our singleton module above
+  DoorManager = DM?.DoorManager || DM;
+  tinyquestDoor = require('./doors/tinyquest'); // factory or object, both OK
+} catch (e) {
+  console.error('Doors load failed:', e && e.message ? e.message : e);
+}
+
+
 
 const DB_PATH = process.env.DB_PATH || './dis.sqlite3';
 const PORT = process.env.PORT || 3000;
@@ -414,32 +419,50 @@ function sendOps(ws, ops){
     ws.send(JSON.stringify({ type: 'ops', ops }));
   }
 }
+
 function makeApi(ws){
   function _send(ops){ sendOps(ws, ops); }
   return {
     ws,
-    clear(){ _send([{op:'clear'}]); },
-    print(t,cls){ _send([{op:'print', text:String(t||''), cls:cls||''}]); },
-    printHTML(h,cls){
-      const op = {op:'printHTML', html:String(h||'')};
+
+    // Basic output ops
+    clear(){ _send([{ op:'clear' }]); },
+    print(t, cls){ _send([{ op:'print', text:String(t||''), cls:cls||'' }]); },
+    printHTML(h, cls){
+      const op = { op:'printHTML', html:String(h||'') };
       if (cls) op.cls = cls;
       _send([op]);
     },
-    hr(){ _send([{op:'hr'}]); },
-    setInputType(type, placeholder){ _send([{op:'setInput', inputType:type, placeholder}]); },
+    hr(){ _send([{ op:'hr' }]); },
+
+    // Input/Prompt controls
+    setInputType(type, placeholder){ _send([{ op:'setInput', inputType:type, placeholder }]); },
+    setPrompt(prefix){ _send([{ op:'setPrompt', prefix:String(prefix||'DIS>') }]); },
+
+    // Batched ops (same API as above, but buffered)
     batch(fn){
-      const ops=[];
-      const b={
-        clear(){ ops.push({op:'clear'}); },
-        print(t,cls){ ops.push({op:'print', text:String(t||''), cls:cls||''}); },
-        printHTML(h,cls){ const op={op:'printHTML', html:String(h||'')}; if (cls) op.cls=cls; ops.push(op); },
-        hr(){ ops.push({op:'hr'}); },
-        setInputType(type, placeholder){ ops.push({op:'setInput', inputType:type, placeholder}); }
+      const ops = [];
+      const b = {
+        clear(){ ops.push({ op:'clear' }); },
+        print(t, cls){ ops.push({ op:'print', text:String(t||''), cls:cls||'' }); },
+        printHTML(h, cls){
+          const op = { op:'printHTML', html:String(h||'') };
+          if (cls) op.cls = cls;
+          ops.push(op);
+        },
+        hr(){ ops.push({ op:'hr' }); },
+
+        // Match the top-level API inside batch too:
+        setInputType(type, placeholder){ ops.push({ op:'setInput', inputType:type, placeholder }); },
+        setPrompt(prefix){ ops.push({ op:'setPrompt', prefix:String(prefix||'DIS>') }); }
       };
-      fn(b); _send(ops);
+      fn(b);
+      _send(ops);
     }
   };
 }
+
+
 function broadcastSystem(line){
   HUB.clients.forEach(ws => sendOps(ws, [{op:'print', text:line, cls:'dim'}]));
 }
@@ -581,6 +604,7 @@ function requireAuth(api, state){
   }
   return true;
 }
+
 
 /* ======================= Splash (login/register) ======================= */
 function renderSplash(api, state){
@@ -1249,25 +1273,39 @@ function cmdRemoveSuggestion(api, state, args){
 
 /* ======================= Doors (Games) ======================= */
 function listDoors(){ return DoorManager?.list?.() || []; }
+
 function cmdGames(api, state){
   if (!requireAuth(api, state)) return;
   const doors = listDoors();
   api.batch(b=>{
     b.clear(); b.print('== Door Games ==','magenta'); b.hr();
     if (!doors.length){ b.print('No doors installed.', 'dim'); }
-    else doors.forEach(d=> b.print(`${d.id} — ${d.name||d.id}`));
+    else doors.forEach(m => b.print(`${m.id} — ${m.name || m.id}`));
     b.hr(); b.print('Play with /play <door>', 'cyan');
   });
 }
+
 function cmdPlay(api, state, args){
   if (!requireAuth(api, state)) return;
-  const id = (args[0]||'').trim().toLowerCase();
-  if (!id){ api.print('Usage: /play <door>', 'yellow'); return; }
-  const door = DoorManager?.get?.(id);
-  if (!door){ api.print('No such door.', 'red'); return; }
-  state.currentScreen = `door:${id}`;
-  (DoorManager.enter)(id, api, state, []); // manager handles rendering + routing
+  const want = String((args[0]||'').trim().toLowerCase());
+  if (!want){ api.print('Usage: /play <door>', 'yellow'); return; }
+
+  const doors = listDoors();
+  const match = doors.find(d => String(d.id).toLowerCase() === want);
+  if (!match){
+    api.print('No such door.', 'red');
+    if (doors.length) api.print(`Available: ${doors.map(d=>d.id).join(', ')}`, 'dim');
+    return;
+  }
+
+  state.currentScreen = `door:${match.id}`;
+  try {
+    DoorManager.enter(match.id, api, state, []);
+  } catch (e) {
+    api.print(`Failed to enter door: ${e && e.message ? e.message : String(e)}`, 'red');
+  }
 }
+
 
 /* ======================= Splash: Register & Invites ======================= */
 function cmdRegister(api, state, args){
@@ -1399,55 +1437,65 @@ case 'slots':   cmdSlots(api, state, args); return true;
 }
 
 /* ======================= WS handling ======================= */
-wss.on('connection', (ws)=>{
+// ┌───────────────────────────────────────────────────────────────────────┐
+// │ WEBSOCKET CONNECTION: input routing with containerized game/door mode │
+/* ======================= WS handling ======================= */
+wss.on('connection', (ws) => {
   HUB.clients.add(ws);
   const api = makeApi(ws);
   const state = makeInitialState();
   ws.__ctx = { state };
 
-  ws.on('message', (data)=>{
+  ws.on('message', (data) => {
     let msg; try { msg = JSON.parse(String(data)); } catch { return; }
-    if (msg.type === 'init'){
+
+    // Client boot
+    if (msg.type === 'init') {
       routeGo(api, state, 'splash');
       return;
     }
-    if (msg.type === 'input'){
-      const text = String(msg.raw||'');
+
+    // Console input
+    if (msg.type === 'input') {
+      const text = String(msg.raw || '');
       const trimmed = text.trim();
       if (!trimmed) return;
 
-      // Slash commands first
-      if (trimmed.startsWith('/')){
+      // 1) Slash commands
+      if (trimmed.startsWith('/')) {
         const parts = trimmed.slice(1).split(/\s+/);
-        const cmd = (parts[0]||'').toLowerCase();
+        const cmd = (parts[0] || '').toLowerCase();
         const args = parts.slice(1);
+
+        // Global commands first (includes /register)
         if (handleGlobalCommand(cmd, api, state, args)) return;
 
-        // Delegate to screen-local command handlers
-        let handled =
-           (state.currentScreen === 'splash'    && splashHandleCommand(cmd, api))
-        || (state.currentScreen === 'chat'      && chatHandleCommand(cmd, api, state, args))
-        || (state.currentScreen === 'about'     && aboutHandleCommand(cmd, api, state, args))
-        || (state.currentScreen === 'rules'     && rulesHandleCommand(cmd, api, state, args))
-        || (state.currentScreen === 'board'     && boardHandleCommand(cmd, api, state, args))
-        || (state.currentScreen === 'topic'     && topicHandleCommand(cmd, api, state, args))
-        || (state.currentScreen === 'news:list' && newsListHandleCommand(cmd, api, state, args))
-        || (state.currentScreen?.startsWith('door:') && DoorManager?.dispatch?.(state.currentScreen.split(':')[1], 'command', cmd, api, state, args))
-        || false;
+        // Screen-local slash commands
+        const handled =
+             (state.currentScreen === 'splash'    && splashHandleCommand(cmd, api))
+          || (state.currentScreen === 'chat'      && chatHandleCommand(cmd, api, state, args))
+          || (state.currentScreen === 'about'     && aboutHandleCommand(cmd, api, state, args))
+          || (state.currentScreen === 'rules'     && rulesHandleCommand(cmd, api, state, args))
+          || (state.currentScreen === 'board'     && boardHandleCommand(cmd, api, state, args))
+          || (state.currentScreen === 'topic'     && topicHandleCommand(cmd, api, state, args))
+          || (state.currentScreen === 'news:list' && newsListHandleCommand(cmd, api, state, args))
+          || (state.currentScreen?.startsWith('door:')
+              && DoorManager?.dispatch?.(state.currentScreen.split(':')[1], 'command', cmd, api, state, args))
+          || false;
 
         if (!handled) api.print(`Unknown command: /${cmd}`, 'red');
         return;
       }
 
-      // Raw text (screen-specific)
-      if (state.currentScreen === 'splash'){ splashHandleRaw(trimmed, api, state); return; }
-      if (state.currentScreen === 'chat'){   chatHandleRaw(trimmed, api, state); return; }
-      if (state.currentScreen === 'board'){  api.print('Use /topic <id> or /newtopic <title>.', 'dim'); return; }
-      if (state.currentScreen === 'topic'){  topicHandleRaw(trimmed, api, state); return; }
-      if (state.currentScreen === 'news:item'){ newsItemHandleRaw(trimmed, api, state); return; }
+      // 2) Raw text (no slash) → screen-specific handlers
+      if (state.currentScreen === 'splash') { splashHandleRaw(trimmed, api, state); return; } // username/password flow
+      if (state.currentScreen === 'chat')   { chatHandleRaw(trimmed, api, state);   return; }
+      if (state.currentScreen === 'board')  { api.print('Use /topic <id> or /newtopic <title>.', 'dim'); return; }
+      if (state.currentScreen === 'topic')  { topicHandleRaw(trimmed, api, state);  return; }
+      if (state.currentScreen === 'news:item') { newsItemHandleRaw(trimmed, api, state); return; }
 
-      // Doors: pass raw to door
-      if (state.currentScreen?.startsWith('door:')){
+      // Doors: pass raw input through to the active door/game
+      if (state.currentScreen?.startsWith('door:')) {
         DoorManager?.dispatch?.(state.currentScreen.split(':')[1], 'raw', trimmed, api, state);
         return;
       }
@@ -1457,16 +1505,22 @@ wss.on('connection', (ws)=>{
     }
   });
 
-  ws.on('close', ()=>{
+  ws.on('close', () => {
     HUB.clients.delete(ws);
     const u = ws.__ctx?.state?.username;
-    if (u){
+    if (u) {
       const set = HUB.socketsByUser.get(u);
-      if (set){ set.delete(ws); if (set.size===0){ HUB.socketsByUser.delete(u); HUB.online.delete(u); } }
+      if (set) {
+        set.delete(ws);
+        if (set.size === 0) { HUB.socketsByUser.delete(u); HUB.online.delete(u); }
+      }
       broadcastSystem(`${u} left`);
     }
   });
 });
+
+// └───────────────────────────────────────────────────────────────────────┘
+
 
 /* ======================= Sweepers ======================= */
 function runBoardSweep(){ try { sweepExpiredTopics.run(); } catch {} }
@@ -1481,13 +1535,24 @@ setInterval(()=>{
 }, 10 * 60 * 1000);
 
 /* ======================= Doors boot (optional) ======================= */
-if (DoorManager){
-  DoorManager.register && guessDoor && DoorManager.register(guessDoor);
-  if (lordDoor){
-    try { lordDoor.migrate && lordDoor.migrate(db); } catch(e){ console.error('LORD migrate:', e.message); }
-    DoorManager.register && DoorManager.register(lordDoor);
+if (DoorManager && typeof DoorManager.register === 'function') {
+  try {
+    if (tinyquestDoor) {
+      if (typeof tinyquestDoor === 'function') {
+        DoorManager.register('tinyquest', tinyquestDoor, { name: 'TinyQuest' });
+      } else {
+        DoorManager.register(tinyquestDoor); // expects { id:'tinyquest', name:'TinyQuest', create(...) }
+      }
+    }
+    const listed = DoorManager.list ? DoorManager.list() : [];
+    console.log('[doors] registered:', listed.map(d => d.id).join(', ') || '(none)');
+  } catch (e) {
+    console.error('TinyQuest register failed:', e && e.message ? e.message : e);
   }
 }
+
+
+
 
 /* ======================= Helpers ======================= */
 function nowEpoch(){ return Math.floor(Date.now()/1000); }

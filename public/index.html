@@ -63,17 +63,15 @@
   var term  = document.getElementById('terminal');
   var form  = document.getElementById('cmdForm');
   var input = document.getElementById('cmdInput');
+  var promptEl = document.querySelector('.prompt');   // <— prompt label
 
   // --- Autoscroll helpers ---
-  function isNearBottom(el, threshold){
-    threshold = typeof threshold === 'number' ? threshold : 40;
-    return (el.scrollHeight - el.scrollTop - el.clientHeight) < threshold;
-  }
+  function isNearBottom(el, threshold){ threshold = typeof threshold === 'number' ? threshold : 40;
+    return (el.scrollHeight - el.scrollTop - el.clientHeight) < threshold; }
   function scrollToBottom(el){ el.scrollTop = el.scrollHeight; }
 
   // --- Render ops ---
   function op_clear(){ term.innerHTML = ''; }
-
   function op_print(text, cls){
     var stick = isNearBottom(term);
     var d = document.createElement('div');
@@ -82,7 +80,6 @@
     term.appendChild(d);
     if (stick) scrollToBottom(term);
   }
-
   function op_printHTML(html, cls){
     var stick = isNearBottom(term);
     var d = document.createElement('div');
@@ -91,18 +88,19 @@
     term.appendChild(d);
     if (stick) scrollToBottom(term);
   }
-
   function op_hr(){
     var stick = isNearBottom(term);
-    var d = document.createElement('div');
-    d.className = 'rule';
+    var d = document.createElement('div'); d.className = 'rule';
     term.appendChild(d);
     if (stick) scrollToBottom(term);
   }
-
   function op_setInput(type, placeholder){
     try { if (type && input.type !== type) input.type = type; } catch(e){}
     if (typeof placeholder !== 'undefined') input.placeholder = placeholder;
+  }
+  function op_setPrompt(prefix){
+    if (!promptEl) return;
+    promptEl.textContent = String(prefix || 'DIS>');
   }
 
   // --- WebSocket ---
@@ -123,6 +121,7 @@
         else if (op.op === 'printHTML') op_printHTML(op.html, op.cls);
         else if (op.op === 'hr') op_hr();
         else if (op.op === 'setInput') op_setInput(op.inputType, op.placeholder);
+        else if (op.op === 'setPrompt') op_setPrompt(op.prefix);
       });
     }
   });
@@ -142,9 +141,8 @@
     input.focus();
   });
 
-  // --- Click anywhere in the app -> refocus input (after native click finishes) ---
+  // Click anywhere to refocus input (unless interacting with a control)
   var appEl = document.querySelector('.app');
-
   function isFocusableTarget(el){
     if (!el) return false;
     if (el === input) return true;
@@ -154,14 +152,12 @@
     if (el.isContentEditable) return true;
     return false;
   }
-
   function clickToFocus(ev){
     if (isFocusableTarget(ev.target)) return;
     var sel = window.getSelection && window.getSelection();
     if (sel && String(sel).length) return;
     setTimeout(function(){ input.focus(); }, 0);
   }
-
   appEl.addEventListener('click', clickToFocus);
 
   // ESC quickly refocuses prompt
@@ -170,6 +166,7 @@
   });
 })();
 </script>
+
 
 
 </body>
