@@ -20,10 +20,12 @@ module.exports = {
       api.setInputType && api.setInputType('text', 'try: take coin | go east');
     }
 
-    function leave() {
-      api.setPrompt && api.setPrompt('DIS>');
-      api.batch(b => { b.print('Leaving TinyQuest. Returning to DIS…', 'dim'); });
+    function leave(){
+        api.setPrompt && api.setPrompt('DIS>');
+        api.setInputType && api.setInputType('text', 'type /help for commands'); // ← reset the hint
+        api.batch(b=>{ b.print('Leaving TinyQuest. Returning to DIS…', 'dim'); });
     }
+
 
     function render() {
       if (room === 'start') {

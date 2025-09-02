@@ -1477,93 +1477,100 @@ case 'adminchat':
   return false;
 }
 
-/* ======================= WS handling ======================= */
-// ┌───────────────────────────────────────────────────────────────────────┐
-// │ WEBSOCKET CONNECTION: input routing with containerized game/door mode │
-/* ======================= WS handling ======================= */
+/* ======================= WS handling (containerized doors) ======================= */
 wss.on('connection', (ws) => {
   HUB.clients.add(ws);
   const api = makeApi(ws);
   const state = makeInitialState();
   ws.__ctx = { state };
 
-  ws.on('message', (data) => {
-    let msg; try { msg = JSON.parse(String(data)); } catch { return; }
+  // Optional default prompt
+  api.setPrompt && api.setPrompt('DIS>');
+  api.setInputType && api.setInputType('text', 'type /help for commands');
 
-    // Client boot
+  ws.on('message', (data, isBinary) => {
+    if (isBinary) return;
+
+    // Parse once
+    let msg; try { msg = JSON.parse(String(data)); } catch { return; }
+    if (!msg || typeof msg !== 'object') return;
+
+    // Initial handshake
     if (msg.type === 'init') {
-      routeGo(api, state, 'splash');
+      routeGo(api, state, 'splash'); // or 'menu'
       return;
     }
 
-    // Console input
-    if (msg.type === 'input') {
-      const text = String(msg.raw || '');
-      const trimmed = text.trim();
-      if (!trimmed) return;
+    if (msg.type !== 'input') return;
+    const raw = String(msg.raw || '').trim();
+    if (!raw) return;
 
-      // 1) Slash commands
-      if (trimmed.startsWith('/')) {
-        const parts = trimmed.slice(1).split(/\s+/);
-        const cmd = (parts[0] || '').toLowerCase();
-        const args = parts.slice(1);
+    const inDoor = !!(state.currentScreen && state.currentScreen.startsWith('door:'));
+    const doorId = inDoor ? state.currentScreen.slice(5) : null;
 
-        // Global commands first (includes /register)
-        if (handleGlobalCommand(cmd, api, state, args)) return;
+    // Slash commands
+    if (raw.startsWith('/')) {
+      const [head, ...rest] = raw.slice(1).split(/\s+/);
+      const cmd = head.toLowerCase();
+      const args = rest;
 
-        // Screen-local slash commands
-        const handled =
-             (state.currentScreen === 'splash'    && splashHandleCommand(cmd, api))
-          || (state.currentScreen === 'chat'      && chatHandleCommand(cmd, api, state, args))
-          || (state.currentScreen === 'adminchat' && adminChatHandleCommand(cmd, api, state, args))
-          || (state.currentScreen === 'about'     && aboutHandleCommand(cmd, api, state, args))
-          || (state.currentScreen === 'rules'     && rulesHandleCommand(cmd, api, state, args))
-          || (state.currentScreen === 'board'     && boardHandleCommand(cmd, api, state, args))
-          || (state.currentScreen === 'topic'     && topicHandleCommand(cmd, api, state, args))
-          || (state.currentScreen === 'news:list' && newsListHandleCommand(cmd, api, state, args))
-          || (state.currentScreen?.startsWith('door:')
-              && DoorManager?.dispatch?.(state.currentScreen.split(':')[1], 'command', cmd, api, state, args))
-          || false;
+      if (inDoor) {
+        // Doors capture ALL slash commands; only /leave returns to BBS
+        // inside: if (inDoor && raw.startsWith('/')) { ... }
+        const handled = DoorManager?.dispatch?.(doorId, 'command', cmd, api, state, args);
+        if (handled === 'leave') {
+          try { DoorManager?.leave?.(api, state); } catch {}
+          resetBBSUI(api, state);          // ← reset prompt + placeholder here
+          routeGo(api, state, 'menu');
+          return;
+        }
 
-        if (!handled) api.print(`Unknown command: /${cmd}`, 'red');
+        if (handled) return;
+        api.print('You are inside a game. Use /leave to return to the BBS.', 'yellow');
         return;
       }
 
-      // 2) Raw text (no slash) → screen-specific handlers
-      if (state.currentScreen === 'splash') { splashHandleRaw(trimmed, api, state); return; } // username/password flow
-      if (state.currentScreen === 'chat')   { chatHandleRaw(trimmed, api, state);   return; }
-      if (state.currentScreen === 'adminchat') { adminChatHandleRaw(trimmed, api, state); return; }
+      // Not in a door → normal global routing first (includes /chat, /board, etc.)
+      if (handleGlobalCommand && handleGlobalCommand(cmd, api, state, args)) return;
 
-      if (state.currentScreen === 'board')  { api.print('Use /topic <id> or /newtopic <title>.', 'dim'); return; }
-      if (state.currentScreen === 'topic')  { topicHandleRaw(trimmed, api, state);  return; }
-      if (state.currentScreen === 'news:item') { newsItemHandleRaw(trimmed, api, state); return; }
+      // Screen-local slash handlers (optional)
+      const localHandled =
+           (state.currentScreen === 'splash'    && splashHandleCommand && splashHandleCommand(cmd, api, state, args))
+        || (state.currentScreen === 'chat'      && chatHandleCommand && chatHandleCommand(cmd, api, state, args))
+        || (state.currentScreen === 'adminchat' && adminChatHandleCommand && adminChatHandleCommand(cmd, api, state, args))
+        || (state.currentScreen === 'topic'     && topicHandleCommand && topicHandleCommand(cmd, api, state, args))
+        || false;
+      if (localHandled) return;
 
-      // Doors: pass raw input through to the active door/game
-      if (state.currentScreen?.startsWith('door:')) {
-        DoorManager?.dispatch?.(state.currentScreen.split(':')[1], 'raw', trimmed, api, state);
-        return;
-      }
-
-      // Fallback
-      api.print('Use /help for commands.', 'dim');
+      api.print(`Unknown command: /${cmd}`, 'red');
+      return;
     }
+
+    // Raw input (no slash)
+    if (inDoor) {
+      const consumed = DoorManager?.dispatch?.(doorId, 'raw', raw, api, state);
+      if (consumed) return;
+      api.print('Game did not accept input. Use /leave to exit.', 'yellow');
+      return;
+    }
+
+    // Raw input outside a door → route by current screen
+    if (state.currentScreen === 'splash') { splashHandleRaw && splashHandleRaw(raw, api, state); return; }
+    if (state.currentScreen === 'chat')   { chatHandleRaw && chatHandleRaw(raw, api, state);   return; }
+    if (state.currentScreen === 'adminchat') { adminChatHandleRaw && adminChatHandleRaw(raw, api, state); return; }
+    if (state.currentScreen === 'topic')  { topicHandleRaw && topicHandleRaw(raw, api, state); return; }
+
+    api.print('Use /help for commands.', 'dim');
   });
 
   ws.on('close', () => {
     HUB.clients.delete(ws);
-    const u = ws.__ctx?.state?.username;
-    if (u) {
-      const set = HUB.socketsByUser.get(u);
-      if (set) {
-        set.delete(ws);
-        if (set.size === 0) { HUB.socketsByUser.delete(u); HUB.online.delete(u); }
-      }
-      broadcastSystem(`${u} left`);
-    }
+    try { DoorManager?.leave?.(api, state); } catch {}
+    // (your existing user cleanup can go here)
   });
-});
 
-// └───────────────────────────────────────────────────────────────────────┘
+  ws.on('error', (err) => console.error('WS error:', err));
+});
 
 
 /* ======================= Sweepers ======================= */
@@ -1601,6 +1608,12 @@ if (DoorManager && typeof DoorManager.register === 'function') {
 
 
 /* ======================= Helpers ======================= */
+function resetBBSUI(api, state, placeholder){
+  if (api.setPrompt) api.setPrompt('DIS>');
+  if (api.setInputType) api.setInputType('text', placeholder || 'type /help for commands');
+}
+
+
 function nowEpoch(){ return Math.floor(Date.now()/1000); }
 function retentionSeconds(){
   const days = +(getSetting.get('chat_retention_days')?.value || 7);
