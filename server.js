@@ -11,11 +11,13 @@ const crypto = require('crypto'); // invites
 
 
 // Doors (optional; safe if missing on disk)
-let DoorManager, tinyquestDoor;
+let DoorManager, tinyquestDoor, lordDoor, casinoDoor;
 try {
   const DM = require('./doors/manager');     // our singleton module above
   DoorManager = DM?.DoorManager || DM;
-  tinyquestDoor = require('./doors/tinyquest'); // factory or object, both OK
+  tinyquestDoor = require('./doors/tinyquest'); // factory or object, 
+  lordDoor = require('./doors/lord');
+  casinoDoor = require('./doors/casino');
 } catch (e) {
   console.error('Doors load failed:', e && e.message ? e.message : e);
 }
@@ -155,23 +157,6 @@ CREATE TABLE IF NOT EXISTS news_comments (
 );
 CREATE INDEX IF NOT EXISTS idx_news_comments_post_created ON news_comments(post_id, created_at);
 
-/* Casino (integer-only chrome) */
-CREATE TABLE IF NOT EXISTS casino_wallets (
-  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-  balance INTEGER NOT NULL DEFAULT 0,          -- whole chrome
-  last_daily_ymd TEXT                          -- YYYY-MM-DD of last daily grant
-);
-
-CREATE TABLE IF NOT EXISTS casino_ledger (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  change INTEGER NOT NULL,                     -- +/- whole chrome
-  reason TEXT NOT NULL,                        -- 'daily','slots_bet','slots_win', etc.
-  meta TEXT,
-  created_at INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_casino_ledger_user_created ON casino_ledger(user_id, created_at DESC);
 
 /* Admin Chat (private, admins-only) */
 CREATE TABLE IF NOT EXISTS admin_messages (
@@ -391,28 +376,6 @@ const sweepExpiredNews = db.prepare(`
   WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')
 `);
 
-/* Casino: prepared statements */
-const getWallet    = db.prepare(`SELECT user_id, balance, last_daily_ymd FROM casino_wallets WHERE user_id=?`);
-const upsertWallet = db.prepare(`
-  INSERT INTO casino_wallets (user_id, balance, last_daily_ymd)
-  VALUES (?, ?, ?)
-  ON CONFLICT(user_id) DO UPDATE SET
-    balance=excluded.balance,
-    last_daily_ymd=excluded.last_daily_ymd
-`);
-const setWalletDaily = db.prepare(`UPDATE casino_wallets SET last_daily_ymd=? WHERE user_id=?`);
-const setWalletBal   = db.prepare(`UPDATE casino_wallets SET balance=? WHERE user_id=?`);
-const insertLedger   = db.prepare(`
-  INSERT INTO casino_ledger (user_id, change, reason, meta, created_at)
-  VALUES (?, ?, ?, ?, ?)
-`);
-const topBalances    = db.prepare(`
-  SELECT u.username, COALESCE(w.balance,0) AS bal
-  FROM users u
-  LEFT JOIN casino_wallets w ON w.user_id = u.id
-  ORDER BY bal DESC, u.username ASC
-  LIMIT 5
-`);
 
 
 /* Admin Chat */
@@ -685,13 +648,7 @@ function splashHandleRaw(text, api, state){
       api.setInputType('text', 'Type here… try /help');
       api.print('Login successful.', 'green');
 
-      // Daily chrome grant (once per calendar day)
-      const daily = grantDailyIfNeeded(state.userId);
-      if (daily.granted){
-        api.print(`Daily bonus credited: ${fmtChrome(CHROME_DAILY)}.`, 'green');
-      }
-      api.print(`Casino balance: ${fmtChrome(getBalance(state.userId))}`, 'cyan');
-
+    
 
       routeGo(api, state, 'menu');
     } else {
@@ -717,7 +674,6 @@ function cmdHelp(api, state){
   api.print('  /leave     Leave the current game', 'cyan');
   api.print('  /about     About Dead Internet Society', 'cyan');
   api.print('  /rules     Community rules', 'cyan');
-  api.print('  /casino    Casino splash, leaderboard, and game list', 'cyan');
  api.print('  /slots <bet>   Spin the slots', 'cyan');
 api.print('  /slots ?     Show the payout table', 'cyan');
   api.print('  /passwd    Change your password: /passwd <old> <new>', 'cyan');
@@ -759,7 +715,6 @@ function renderMenu(api, state){
     b.print('  /chat            Enter the Commons Chat', 'cyan');
     b.print('  /board           Bulletin board', 'cyan');
     b.print('  /news            Fark-like news links', 'cyan');
-    b.print('  /casino          Daily chrome & slots', 'cyan');
     b.print('  /games           List door games', 'cyan');
     b.print('  /messages        View your direct messages', 'cyan');
     b.print('  /about           About DIS', 'cyan');
@@ -1465,9 +1420,6 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'help':         cmdHelp(api, state); return true;
     case 'passwd':       return cmdPasswd(api, state, args), true;
 
-    /* Casino */
-case 'casino':  cmdCasino(api, state); return true;
-case 'slots':   cmdSlots(api, state, args); return true;
 case 'adminchat':
   if (state.isAdmin) renderAdminChat(api, state);
   else api.print('Unknown command.', 'red'); // keep it hidden
@@ -1603,6 +1555,32 @@ if (DoorManager && typeof DoorManager.register === 'function') {
     console.log('[doors] registered:', listed.map(d => d.id).join(', ') || '(none)');
   } catch (e) {
     console.error('TinyQuest register failed:', e && e.message ? e.message : e);
+  }
+  try {
+    if (lordDoor) {
+      if (typeof lordDoor === 'function') {
+        DoorManager.register('LORD', lordDoor, { name: 'Legend of the Redux Dragon' });
+      } else {
+        DoorManager.register(lordDoor); // expects { id:'tinyquest', name:'TinyQuest', create(...) }
+      }
+    }
+    const listed = DoorManager.list ? DoorManager.list() : [];
+    console.log('[doors] registered:', listed.map(d => d.id).join(', ') || '(none)');
+  } catch (e) {
+    console.error('Legend of the Redux Dragon register failed:', e && e.message ? e.message : e);
+  }
+  try {
+    if (casinoDoor) {
+      if (typeof casinoDoor === 'function') {
+        DoorManager.register('LORD', casinoDoor, { name: 'Casino' });
+      } else {
+        DoorManager.register(casinoDoor); // expects { id:'tinyquest', name:'TinyQuest', create(...) }
+      }
+    }
+    const listed = DoorManager.list ? DoorManager.list() : [];
+    console.log('[doors] registered:', listed.map(d => d.id).join(', ') || '(none)');
+  } catch (e) {
+    console.error('Casino register failed:', e && e.message ? e.message : e);
   }
 }
 
