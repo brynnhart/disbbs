@@ -241,6 +241,7 @@ defSetting('news_reply_max_len', 600);
 defSetting('news_list_limit', 150);
 defSetting('admin_chat_retention_days', 7);
 defSetting('about_max_len', 600);
+defSetting('users_page_size', 20);
 
 
 /* Users + auth */
@@ -477,6 +478,17 @@ const listUsersBasic = db.prepare(`
   FROM users
   ORDER BY username COLLATE NOCASE ASC
 `);
+
+
+/* Users listing */
+const countUsers = db.prepare(`SELECT COUNT(1) AS n FROM users`);
+const listUsersPage = db.prepare(`
+  SELECT username, display_name, last_login_at
+    FROM users
+ORDER BY username COLLATE NOCASE ASC
+   LIMIT ? OFFSET ?
+`);
+
 
 
 
@@ -775,7 +787,8 @@ api.print('  /slots ?     Show the payout table', 'cyan');
   api.print('  /displayreset       Reset display name to your username', 'cyan');
   api.print('  /whoami    Show current user', 'cyan');
   api.print('  /who       List users currently online', 'cyan');
-  api.print('  /users [online]  List users (username, display name, last login, status)', 'cyan');
+  api.print('  /users [page]  List members (username, display, last login, online)', 'cyan');
+
 
   api.print('  /suggest   Add a suggestion: /suggest <text>', 'cyan');
   api.print('  /suggestions  View all current suggestions', 'cyan');
@@ -1494,72 +1507,51 @@ function cmdRemoveSuggestion(api, state, args){
 function cmdUsers(api, state, args){
   if (!requireAuth(api, state)) return;
 
-  // Optional: support "/users online" to filter
-  const filter = (args && args[0]) ? String(args[0]).toLowerCase() : '';
+  // parse page number (default 1)
+  let page = parseInt((args && args[0]) || '1', 10);
+  if (Number.isNaN(page) || page < 1) page = 1;
 
-  // Helper to check online status by canonical username
-  function isOnline(username){
-    const set = HUB.socketsByUser.get(username);
-    return !!(set && set.size);
-  }
+  const per = +(getSetting.get('users_page_size')?.value || 20);
+  const total = (countUsers.get()?.n) || 0;
+  const pages = Math.max(1, Math.ceil(total / per));
+  if (page > pages) page = pages;
 
-  const rows = listUsersBasic.all();
-
-  // Tally
-  let onlineCount = 0;
-  const items = rows.map(r => {
-    const online = isOnline(r.username);
-    if (online) onlineCount++;
-
-    // Format display name with your DIS-markdown sanitizer
-    const display = r.display_name ? sanitizeAndFormatDIS(r.display_name) : '<span class="dim">—</span>';
-
-    // Times
-    const joined = r.created_at ? new Date(r.created_at * 1000).toLocaleString() : '—';
-    const last   = r.last_login_at ? new Date(r.last_login_at * 1000).toLocaleString() : '—';
-
-    // Icon + status text
-    const statusDot = online ? '<span class="green">●</span>' : '<span class="dim">○</span>';
-    const statusTxt = online ? '<span class="green">online</span>' : '<span class="dim">offline</span>';
-
-    return { r, online, display, joined, last, statusDot, statusTxt };
-  });
-
-  // Optional filter
-  const view = (filter === 'online')
-    ? items.filter(i => i.online)
-    : items;
+  const offset = (page - 1) * per;
+  const rows = listUsersPage.all(per, offset);
 
   api.hr();
-  const header = (filter === 'online')
-    ? `Users Online (${onlineCount}/${rows.length})`
-    : `Users (${rows.length} total • ${onlineCount} online)`;
-  api.print(header, 'magenta');
-  api.hr();
+  api.print(`== Members (${total}) — page ${page}/${pages} ==`, 'yellow');
 
-  if (!view.length){
-    api.print(filter === 'online' ? 'No users are online right now.' : 'No users yet.', 'dim');
-    api.hr();
-    api.print('Tip: Try "/users online" to see only online users.', 'dim');
+  if (!rows.length){
+    api.print('No users yet.', 'dim');
     return;
   }
 
-  // Render rows
-  view.forEach(({ r, display, joined, last, statusDot, statusTxt }) => {
-    // Username is canonical; display name is styled; show admin badge lightly
-    const adminBadge = r.is_admin ? ' <span class="yellow">[admin]</span>' : '';
+  rows.forEach(r => {
+    const disp = r.display_name || r.username;
+    const last = r.last_login_at ? new Date(r.last_login_at*1000).toLocaleString() : '—';
+    const isOnline = HUB.online.has(r.username); // your presence set
+    const statusHTML = isOnline ? '<span style="color:#2fd44f">online</span>'
+                                : '<span class="dim">offline</span>';
+
+    // username is literal; display name may contain DIS-Markdown
     api.printHTML(
-      `${statusDot} &lt;${escapeHTML(r.username)}&gt; ${adminBadge}<br>` +
-      `Display: ${display}<br>` +
-      `Joined: <span class="dim">${escapeHTML(joined)}</span> • ` +
-      `Last login: <span class="dim">${escapeHTML(last)}</span> • ` +
-      `Status: ${statusTxt}`
+      `• &lt;${escapeHTML(r.username)}&gt; — ` +
+      `${sanitizeAndFormatDIS(disp)} — ` +
+      `last: <span class="dim">${escapeHTML(last)}</span> — ${statusHTML}`
     );
-    api.hr();
   });
 
-  api.print('Tip: View a profile with /profile <user>', 'dim');
+  api.hr();
+  const prev = page > 1 ? `/users ${page-1}` : '';
+  const next = page < pages ? `/users ${page+1}` : '';
+  if (prev || next) {
+    api.print(`Navigate: ${prev}${prev && next ? '  |  ' : ''}${next}`, 'dim');
+  } else {
+    api.print('End of list.', 'dim');
+  }
 }
+
 
 
 /* ======================= Doors (Games) ======================= */
@@ -1721,7 +1713,8 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'passwd':       return cmdPasswd(api, state, args), true;
   case 'aboutme': return cmdAboutMe(api, state, args), true;
   case 'profile':      return cmdProfile(api, state, args), true;
-  case 'users': return cmdUsers(api, state, args), true;
+  case 'users':        cmdUsers(api, state, args); return true;
+
 
 
 
