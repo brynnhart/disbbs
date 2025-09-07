@@ -774,8 +774,6 @@ function cmdHelp(api, state){
   api.print('  /leave     Leave the current game', 'cyan');
   api.print('  /about     About Dead Internet Society', 'cyan');
   api.print('  /rules     Community rules', 'cyan');
- api.print('  /slots <bet>   Spin the slots', 'cyan');
-api.print('  /slots ?     Show the payout table', 'cyan');
   api.print('  /passwd    Change your password: /passwd <old> <new>', 'cyan');
   api.print('  /format    Show DIS-Markdown examples', 'cyan');
   api.print('  /colors    Show color swatches', 'cyan');
@@ -2040,9 +2038,6 @@ function resolveUserHandle(anyName){
 
 
 
-/* ======================= CASINO (Integer Chrome) ======================= */
-const CHROME_DAILY = 100; // 100 chrome per calendar day
-const CURRENCY = '¢';
 
 function todayYMD(){
   const d = new Date();
@@ -2052,167 +2047,6 @@ function todayYMD(){
   return `${y}-${m}-${dd}`;
 }
 function nowEpoch(){ return Math.floor(Date.now()/1000); } // remove if already defined above
-
-function ensureWallet(userId){
-  let w = getWallet.get(userId);
-  if (!w){ upsertWallet.run(userId, 0, null); w = getWallet.get(userId); }
-  return w;
-}
-function grantDailyIfNeeded(userId){
-  const ymd = todayYMD();
-  const w = ensureWallet(userId);
-  if (w.last_daily_ymd === ymd) return { granted:false, balance:w.balance };
-  const newBal = (w.balance||0) + CHROME_DAILY;
-  setWalletBal.run(newBal, userId);
-  setWalletDaily.run(ymd, userId);
-  insertLedger.run(userId, +CHROME_DAILY, 'daily', null, nowEpoch());
-  return { granted:true, balance:newBal };
-}
-function getBalance(userId){ return ensureWallet(userId).balance || 0; }
-function changeBalance(userId, delta, reason, meta){
-  const w = ensureWallet(userId);
-  const newBal = (w.balance||0) + delta;
-  setWalletBal.run(newBal, userId);
-  insertLedger.run(userId, delta, String(reason||'misc'), meta ? JSON.stringify(meta) : null, nowEpoch());
-  return newBal;
-}
-function fmtChrome(n){ return `${n}${CURRENCY}`; }
-
-/* ===== Casino Screen ===== */
-function renderCasino(api, state){
-  if (!requireAuth(api, state)) return;
-
-  const leaders = topBalances.all();
-  const myBal = getBalance(state.userId);
-
-  api.batch(b=>{
-    b.clear();
-    b.printHTML('<div class="banner"><div class="line"><span class="magenta">███</span><span class="cyan"> DIS CASINO </span><span class="magenta">███</span></div><div class="line dim">Daily chrome, flashy slots, humble leaderboard.</div></div>');
-    b.hr();
-    b.print(`Your balance: ${fmtChrome(myBal)}`, 'green');
-    b.hr();
-    b.print('Top 5 fat stacks:', 'yellow');
-    if (!leaders.length) b.print('No high rollers yet.', 'dim');
-    leaders.forEach((r,i)=> b.print(`${i+1}. ${r.username} — ${fmtChrome(r.bal||0)}`, i===1?'cyan':undefined));
-    b.hr();
-    b.print('Games:', 'yellow');
-    b.print('  /slots <bet>    Spin 3 wheels. Integer payouts only.', 'cyan');
-    b.hr();
-    b.print('Navigation: /main to leave. Good luck!', 'dim');
-  });
-}
-
-/* ===== Slots (integer-only) =====
-Symbols + weights + payouts:
-- ☻ (Wild)        w=1   — substitutes for 3-of-a-kind only
-- ★ (Star)        w=2   — 3x pays 10× bet
-- 7 (Seven)       w=3   — 3x pays 6×
-- ♣ (Club)        w=4   — 3x pays 4×
-- ♦ (Diamond)     w=5   — 3x pays 3×
-- ♠ (Spade)       w=6   — 3x pays 2×
-- ♥ (Heart)       w=7   — 3x pays 2×
-- ♫ (Note)        w=8   — 3x pays 2×
-- 🍒 (Cherry)     w=9   — any 2 natural cherries (no wilds) pays 2× bet
-*/
-const SLOT_REEL = [
-  { sym:'☻', w:1,  type:'wild' },
-  { sym:'★', w:2,  mult3:10 },
-  { sym:'7', w:3,  mult3:6 },
-  { sym:'♣', w:4,  mult3:4 },
-  { sym:'♦', w:5,  mult3:3 },
-  { sym:'♠', w:6,  mult3:2 },
-  { sym:'♥', w:7,  mult3:2 },
-  { sym:'♫', w:8,  mult3:2 },
-  { sym:'🍒', w:9, type:'cherry' }
-];
-const SLOT_TOTAL_W = SLOT_REEL.reduce((a,r)=>a+r.w,0);
-
-function pickSymbol(){
-  let r = Math.random()*SLOT_TOTAL_W;
-  for (const s of SLOT_REEL){ if ((r -= s.w) <= 0) return s; }
-  return SLOT_REEL[SLOT_REEL.length-1];
-}
-
-function evalSlots(a,b,c, bet){
-  const syms = [a,b,c];
-  const wilds = syms.filter(s=>s.type==='wild').length;
-
-  // 3 of a kind (allow wilds to substitute)
-  for (const cand of SLOT_REEL.filter(s=>s.mult3)){
-    const count = syms.filter(s => s.sym===cand.sym || s.type==='wild').length;
-    if (count === 3) return { kind:'3x', of:cand.sym, payout: bet * cand.mult3 };
-  }
-
-  // natural cherry pair (no wilds count)
-  const cherryCount = syms.filter(s=>s.type==='cherry').length;
-  if (wilds===0 && cherryCount >= 2) return { kind:'2cherries', payout: bet * 2 };
-
-  // all wilds (rare) -> top award (★)
-  if (wilds === 3) return { kind:'3x', of:'★', payout: bet * 10 };
-
-  return { kind:'lose', payout: 0 };
-}
-
-function sleep(ms){ return new Promise(res=>setTimeout(res, ms)); }
-
-function cmdSlots(api, state, args){
-  if (!requireAuth(api, state)) return;
-  const raw = (args||[]).join(' ').trim();
-
-   if (!raw || raw.toLowerCase() === '?' || raw.toLowerCase() === 'help'){
-    if (!raw) api.print('Usage: /slots <bet>  or  /slots ?', 'yellow');
-    printSlotsRules(api);
-    return;
-  }
-
-  const bet = parseInt(raw, 10);
-  if (!Number.isFinite(bet) || bet <= 0){ api.print('Bet must be a positive integer, e.g. /slots 5', 'red'); return; }
-
-  const bal = getBalance(state.userId);
-  if (bet > bal){ api.print(`Insufficient funds. You have ${fmtChrome(bal)}.`, 'red'); return; }
-
-  // take bet up front
-  changeBalance(state.userId, -bet, 'slots_bet', { bet });
-
-  (async ()=>{
-    const squares = ' █  █  █';
-    api.print(squares, 'dim');                    await sleep(350);
-    const s1 = pickSymbol(); api.print(` ${s1.sym}  █  █`, 'cyan'); await sleep(380);
-    const s2 = pickSymbol(); api.print(` ${s1.sym}  ${s2.sym}  █`, 'cyan'); await sleep(420);
-    const s3 = pickSymbol(); api.print(` ${s1.sym}  ${s2.sym}  ${s3.sym}`, 'magenta');
-
-    const out = evalSlots(s1,s2,s3, bet);
-    if (out.payout > 0){
-      changeBalance(state.userId, out.payout, 'slots_win', { symbols:[s1.sym,s2.sym,s3.sym] });
-      api.print(`WIN! Payout ${fmtChrome(out.payout)} → New balance: ${fmtChrome(getBalance(state.userId))}`, 'green');
-    } else {
-      api.print(`No win. Lost ${fmtChrome(bet)} → Balance: ${fmtChrome(getBalance(state.userId))}`, 'dim');
-    }
-  })().catch(()=> api.print('Slots hiccuped.', 'red'));
-}
-
-function cmdCasino(api, state){
-  if (!requireAuth(api, state)) return;
-  renderCasino(api, state);
-}
-
-/* Pretty rules printer for /slots rules */
-function printSlotsRules(api){
-  api.hr();
-  api.print('SLOTS — payouts (integer chrome):', 'yellow');
-  api.print('Three of a kind (wilds substitute):', 'cyan');
-  api.print('  ★ ★ ★   → 10× bet');
-  api.print('  7 7 7   → 6× bet');
-  api.print('  ♣ ♣ ♣   → 4× bet');
-  api.print('  ♦ ♦ ♦   → 3× bet');
-  api.print('  ♠ ♠ ♠   → 2× bet');
-  api.print('  ♥ ♥ ♥   → 2× bet');
-  api.print('  ♫ ♫ ♫   → 2× bet');
-  api.print('Special:', 'cyan');
-  api.print('  🍒🍒 (two natural cherries, no wilds) → 2× bet');
-  api.print('Notes: ☻ is wild for 3-of-a-kind only; it does not count toward the cherry pair.', 'dim');
-  api.hr();
-}
 
 
 function retentionSecondsAdmin(){
