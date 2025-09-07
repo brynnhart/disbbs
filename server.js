@@ -169,8 +169,54 @@ CREATE TABLE IF NOT EXISTS admin_messages (
 CREATE INDEX IF NOT EXISTS idx_admin_messages_expires_at ON admin_messages(expires_at);
 CREATE INDEX IF NOT EXISTS idx_admin_messages_created_at ON admin_messages(created_at);
 
+CREATE TABLE IF NOT EXISTS users (
+   id INTEGER PRIMARY KEY AUTOINCREMENT,
+   username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+   password_hash TEXT NOT NULL,
+   is_admin INTEGER NOT NULL DEFAULT 0,
+   created_at INTEGER NOT NULL,
+   last_login_at INTEGER,
+   preferred_color TEXT,
+   display_name TEXT
+);
+
 
 `);
+
+/* One-time, safe add of 'about' column for profiles (no-op if present) */
+try {
+  const hasAbout = db.prepare("PRAGMA table_info(users)").all().some(c => c.name === 'about');
+  if (!hasAbout) {
+    db.exec(`ALTER TABLE users ADD COLUMN about TEXT`);
+  }
+} catch (e) {
+  console.error('Failed to add users.about column (ok if already exists):', e && e.message ? e.message : e);
+}
+
+
+/* One-time, safe add of normalization columns and indexes for fast lookup */
+try {
+  const cols = db.prepare("PRAGMA table_info(users)").all().map(c => c.name);
+  if (!cols.includes('username_norm')) {
+    db.exec(`ALTER TABLE users ADD COLUMN username_norm TEXT`);
+  }
+  if (!cols.includes('display_name_norm')) {
+    db.exec(`ALTER TABLE users ADD COLUMN display_name_norm TEXT`);
+  }
+} catch (e) {
+  console.error('users.*_norm add failed (ok if already exists):', e && e.message ? e.message : e);
+}
+
+try {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_users_username_norm     ON users(username_norm);
+    CREATE INDEX IF NOT EXISTS idx_users_display_name_norm ON users(display_name_norm);
+  `);
+} catch (e) {
+  console.error('users.*_norm index create failed:', e && e.message ? e.message : e);
+}
+
+
 
 /* ======================= Prepared statements / settings ======================= */
 const getSetting = db.prepare(`SELECT value FROM settings WHERE key=?`);
@@ -194,6 +240,7 @@ defSetting('news_title_max_len', 120);
 defSetting('news_reply_max_len', 600);
 defSetting('news_list_limit', 150);
 defSetting('admin_chat_retention_days', 7);
+defSetting('about_max_len', 600);
 
 
 /* Users + auth */
@@ -210,6 +257,11 @@ const clearUserColor = db.prepare(`UPDATE users SET preferred_color = NULL WHERE
 const getUserDisplay = db.prepare(`SELECT display_name FROM users WHERE id = ?`);
 const setUserDisplay = db.prepare(`UPDATE users SET display_name = ? WHERE id = ?`);
 const clearUserDisplay = db.prepare(`UPDATE users SET display_name = NULL WHERE id = ?`);
+
+/* Profiles (About) */
+const getUserAboutById   = db.prepare(`SELECT about FROM users WHERE id = ?`);
+const getUserAboutByName = db.prepare(`SELECT about FROM users WHERE username = ?`);
+const setUserAboutById   = db.prepare(`UPDATE users SET about = ? WHERE id = ?`);
 
 /* Invites */
 const insertInvite = db.prepare(`
@@ -395,6 +447,38 @@ const recentAdminMessages = db.prepare(`
 const sweepExpiredAdminMessages = db.prepare(`
   DELETE FROM admin_messages WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')
 `);
+
+
+
+
+
+
+
+
+/* Keep users.username_norm / display_name_norm up-to-date */
+const updateUserNorms = db.prepare(`
+  UPDATE users
+     SET username_norm     = ?,
+         display_name_norm = ?
+   WHERE id = ?
+`);
+
+/* Indexed lookup by normalized name (falls back when fast username match fails) */
+const getUsersByNorm = db.prepare(`
+  SELECT * FROM users
+   WHERE username_norm = ?
+      OR display_name_norm = ?
+   LIMIT 3
+`);
+
+
+const listUsersBasic = db.prepare(`
+  SELECT id, username, display_name, last_login_at, created_at, is_admin
+  FROM users
+  ORDER BY username COLLATE NOCASE ASC
+`);
+
+
 
 
 
@@ -633,6 +717,10 @@ function splashHandleRaw(text, api, state){
       state.username = user.username; // canonical case
       state.isAdmin  = !!user.is_admin;
 
+      // ensure normalization columns are up-to-date for this user
+    refreshUserNormsByRow({ id: state.userId, username: state.username, display_name: state.displayName });
+
+
       // pull color + display name
       const rc = getUserColor.get(state.userId);
       state.userColor = rc ? rc.preferred_color : null;
@@ -687,8 +775,12 @@ api.print('  /slots ?     Show the payout table', 'cyan');
   api.print('  /displayreset       Reset display name to your username', 'cyan');
   api.print('  /whoami    Show current user', 'cyan');
   api.print('  /who       List users currently online', 'cyan');
+  api.print('  /users [online]  List users (username, display name, last login, status)', 'cyan');
+
   api.print('  /suggest   Add a suggestion: /suggest <text>', 'cyan');
   api.print('  /suggestions  View all current suggestions', 'cyan');
+  api.print('  /aboutme <text>    Set your profile about text (or /aboutme clear)', 'cyan');
+  api.print('  /profile [user]    View a member profile (omit to view your own)', 'cyan');
   api.print('  /main      Return to Command Hub', 'cyan');
   api.print('  /logout    Sign out', 'cyan');
 
@@ -719,6 +811,7 @@ function renderMenu(api, state){
     b.print('  /messages        View your direct messages', 'cyan');
     b.print('  /about           About DIS', 'cyan');
     b.print('  /rules           Community rules', 'cyan');
+    b.print('  /profile         View your profile (or /profile <user>)', 'cyan');
     b.print('  /logout          Sign out', 'cyan');
     b.hr();
     b.print('Tip: You can type these anywhere. /main returns here.', 'dim');
@@ -1096,6 +1189,77 @@ function cmdRemoveNews(api, state, args){
   }
 }
 
+/* ======================= Profiles (/aboutme, /profile) ======================= */
+function cmdAboutMe(api, state, args){
+  if (!requireAuth(api, state)) return;
+  const raw = (args||[]).join(' ').trim();
+  const max = +(getSetting.get('about_max_len')?.value || 600);
+
+  if (!raw || /^clear$/i.test(raw)) {
+    setUserAboutById.run(null, state.userId);
+    api.print('About text cleared.', 'green');
+    return;
+  }
+  const visible = visibleLengthDIS(raw);
+  if (visible > max) {
+    api.print(`About too long (max ${max} visible chars).`, 'red');
+    return;
+  }
+  setUserAboutById.run(raw, state.userId);
+  api.print('About updated.', 'green');
+  api.printHTML('Preview: ' + sanitizeAndFormatDIS(raw));
+}
+
+
+function cmdProfile(api, state, args){
+  if (!requireAuth(api, state)) return;
+  const whoTyped = (args && args[0]) ? args[0].trim() : state.username;
+  if (!whoTyped) { api.print('Usage: /profile [username]', 'yellow'); return; }
+
+  const resolved = resolveUserHandle(whoTyped);
+  if (!resolved){ api.print('No such user.', 'red'); return; }
+  if (resolved.ambiguous){
+    const opts = resolved.ambiguous.map(r => r.username).join(', ');
+    api.print('That matches multiple users. Be more specific: ' + opts, 'yellow');
+    return;
+  }
+  const row = resolved.row;
+
+  const dispRow = getUserDisplay.get(row.id);
+  const display = (dispRow && dispRow.display_name) ? dispRow.display_name : row.username;
+  const colorRow = getUserColor.get(row.id);
+  const color = colorRow ? colorRow.preferred_color : null;
+  const aboutRow = getUserAboutById.get(row.id);
+  const aboutRaw = aboutRow ? aboutRow.about : null;
+  const created = row.created_at ? new Date(row.created_at*1000).toLocaleString() : '—';
+  const last    = row.last_login_at ? new Date(row.last_login_at*1000).toLocaleString() : '—';
+
+  api.hr();
+  api.printHTML(`== Profile: &lt;${sanitizeAndFormatDIS(row.username)}&gt; ==`, 'magenta');
+  api.printHTML(`Display: ${sanitizeAndFormatDIS(display)}`);
+  api.printHTML(`Joined: <span class="dim">${escapeHTML(created)}</span>`);
+  api.printHTML(`Last seen: <span class="dim">${escapeHTML(last)}</span>`);
+  if (color) api.printHTML(`Chat color: <span style="color:${color}">${escapeHTML(color)}</span>`);
+  api.hr();
+  if (aboutRaw && String(aboutRaw).trim()) {
+    const safe = sanitizeAndFormatDIS(String(aboutRaw));
+    const colored = color ? `<span style="color:${color}">${safe}</span>` : safe;
+    api.printHTML(colored);
+  } else {
+    api.print('No about text yet.', 'dim');
+  }
+  api.hr();
+  const me = state.username && row.username && state.username.toLowerCase() === row.username.toLowerCase();
+  if (me){
+    api.print('Tip: Update yours with /aboutme <text>  •  Clear with /aboutme clear', 'dim');
+  } else {
+    api.print('Tip: View your profile with /profile', 'dim');
+  }
+}
+
+
+
+
 /* ======================= Colors + Display Name ======================= */
 function cmdSetColor(api, state, args){
   if (!requireAuth(api, state)) return;
@@ -1129,25 +1293,35 @@ function normalizeColor(s){
 function cmdSetDisplay(api, state, args){
   if (!requireAuth(api, state)) return;
   const raw = (args||[]).join(' ').trim();
-  if (!raw){ api.print('Usage: /setdisplay <name>', 'yellow'); return; }
-  const max = 40;
-  if (visibleLengthDIS(raw) > max){ api.print(`Display name too long (max ${max} visible chars).`, 'red'); return; }
+
+  if (!raw){
+    api.print('Usage: /setdisplay <name>', 'yellow');
+    return;
+  }
+  // Optionally enforce a visible-length limit if you keep one for names
+  const vis = visibleLengthDIS(raw);
+  if (vis < 1){
+    api.print('That name is effectively empty after formatting. Try letters/numbers.', 'red');
+    return;
+  }
+
+  const n = normalizeHandle(raw);
+  const clash = db.prepare(`SELECT username FROM users WHERE username_norm = ? AND id <> ? LIMIT 1`).get(n, state.userId);
+  if (clash){
+    api.print(`Heads up: that looks identical to @${clash.username} when formatting is removed.`, 'yellow');
+    // allow anyway, or return to block—it’s your call
+  }
+
+
   setUserDisplay.run(raw, state.userId);
   state.displayName = raw;
-  api.print('Display name updated.', 'green');
-  api.printHTML(`Preview: ${sanitizeAndFormatDIS(raw)}`);
+
+  // keep normalization columns synced
+  refreshUserNormsByRow({ id: state.userId, username: state.username, display_name: state.displayName });
+
+  api.printHTML('Display name set to: ' + sanitizeAndFormatDIS(raw), 'green');
 }
-function cmdShowDisplay(api, state){
-  if (!requireAuth(api, state)) return;
-  const raw = state.displayName || state.username || '';
-  api.printHTML(`Display: ${sanitizeAndFormatDIS(raw)}`);
-}
-function cmdDisplayReset(api, state){
-  if (!requireAuth(api, state)) return;
-  clearUserDisplay.run(state.userId);
-  state.displayName = state.username;
-  api.print('Display name reset to username.', 'green');
-}
+
 
 function cmdMakeInvite(api, state, args){
   if (!requireAuth(api, state)) return;
@@ -1201,20 +1375,75 @@ function cmdRevokeInvite(api, state, args){
 /* ======================= DMs, Suggestions, Invites (brevity) ======================= */
 function cmdDM(api, state, args){
   if (!requireAuth(api, state)) return;
-  const to = (args||[])[0]; if (!to){ api.print('Usage: /dm <user> <message>', 'yellow'); return; }
-  const recipient = getUserIdByName.get(to);
-  if (!recipient){ api.print('No such user.', 'red'); return; }
+
+  // --- parse args ---
+  const toTyped = (args && args[0]) ? String(args[0]).trim() : '';
+  if (!toTyped){
+    api.print('Usage: /dm <user> <message>', 'yellow');
+    return;
+  }
+
+  // --- resolve recipient: username OR display name ---
+  let resolved = null;
+  try {
+    if (typeof resolveUserHandle === 'function') {
+      resolved = resolveUserHandle(toTyped);
+    } else {
+      // Fallback: direct username lookup if resolver not wired yet
+      const row = getUserByName.get(toTyped);
+      if (row) resolved = { row };
+    }
+  } catch (e) {
+    resolved = null;
+  }
+
+  if (!resolved){
+    api.print('No such user.', 'red');
+    return;
+  }
+  if (resolved.ambiguous){
+    const opts = resolved.ambiguous.map(r => r.username).join(', ');
+    api.print('That name matches multiple users. Be more specific: ' + opts, 'yellow');
+    return;
+  }
+
+  const recipient = resolved.row; // full users row (id, username, etc.)
+
+  // --- message body + limits ---
   const body = args.slice(1).join(' ').trim();
-  if (!body){ api.print('Message empty.', 'yellow'); return; }
+  if (!body){
+    api.print('Message empty.', 'yellow');
+    return;
+  }
   const max = +(getSetting.get('dm_max_len')?.value || 160);
-  if (body.length > max){ api.print(`DM too long (max ${max}).`, 'red'); return; }
-  const ts = nowEpoch(); const days = +(getSetting.get('dm_retention_days')?.value || 14);
-  insertDM.run(state.userId || null, recipient.id, body, ts, ts + days*86400);
+  if (body.length > max){
+    api.print(`DM too long (max ${max}).`, 'red');
+    return;
+  }
+
+  // --- insert DM with retention ---
+  const ts = nowEpoch();
+  const days = +(getSetting.get('dm_retention_days')?.value || 14);
+  const expiresAt = days > 0 ? (ts + days * 86400) : null;
+  insertDM.run(state.userId || null, recipient.id, body, ts, expiresAt);
+
   api.print('Sent.', 'green');
-  // live notify if online
-  const sockets = HUB.socketsByUser.get((getUserByName.get(to)?.username)||'');
-  if (sockets) sockets.forEach(ws => sendOps(ws, [{op:'print', text:`(DM) from ${state.username}: ${body}`, cls:'cyan'}]));
+
+  // --- live notify recipient if online ---
+  // socketsByUser is keyed by canonical username
+  const canonical = recipient.username;
+  const sockets = HUB.socketsByUser.get(canonical);
+  if (sockets && sockets.size){
+    const from = state.username || 'anon';
+    const notice = `(DM) from ${from}: ${body}`;
+    sockets.forEach(ws => {
+      sendOps(ws, [{ op: 'print', text: notice, cls: 'cyan' }]);
+    });
+  }
 }
+
+
+
 function cmdMessages(api, state){
   if (!requireAuth(api, state)) return;
   const rows = listDMsForUser.all(state.userId, 200);
@@ -1261,6 +1490,77 @@ function cmdRemoveSuggestion(api, state, args){
   const id = parseInt(args[0],10); if (!id){ api.print('Usage: /removesuggestion <id>', 'yellow'); return; }
   deleteSuggestionById.run(id); api.print('Removed.', 'green');
 }
+
+function cmdUsers(api, state, args){
+  if (!requireAuth(api, state)) return;
+
+  // Optional: support "/users online" to filter
+  const filter = (args && args[0]) ? String(args[0]).toLowerCase() : '';
+
+  // Helper to check online status by canonical username
+  function isOnline(username){
+    const set = HUB.socketsByUser.get(username);
+    return !!(set && set.size);
+  }
+
+  const rows = listUsersBasic.all();
+
+  // Tally
+  let onlineCount = 0;
+  const items = rows.map(r => {
+    const online = isOnline(r.username);
+    if (online) onlineCount++;
+
+    // Format display name with your DIS-markdown sanitizer
+    const display = r.display_name ? sanitizeAndFormatDIS(r.display_name) : '<span class="dim">—</span>';
+
+    // Times
+    const joined = r.created_at ? new Date(r.created_at * 1000).toLocaleString() : '—';
+    const last   = r.last_login_at ? new Date(r.last_login_at * 1000).toLocaleString() : '—';
+
+    // Icon + status text
+    const statusDot = online ? '<span class="green">●</span>' : '<span class="dim">○</span>';
+    const statusTxt = online ? '<span class="green">online</span>' : '<span class="dim">offline</span>';
+
+    return { r, online, display, joined, last, statusDot, statusTxt };
+  });
+
+  // Optional filter
+  const view = (filter === 'online')
+    ? items.filter(i => i.online)
+    : items;
+
+  api.hr();
+  const header = (filter === 'online')
+    ? `Users Online (${onlineCount}/${rows.length})`
+    : `Users (${rows.length} total • ${onlineCount} online)`;
+  api.print(header, 'magenta');
+  api.hr();
+
+  if (!view.length){
+    api.print(filter === 'online' ? 'No users are online right now.' : 'No users yet.', 'dim');
+    api.hr();
+    api.print('Tip: Try "/users online" to see only online users.', 'dim');
+    return;
+  }
+
+  // Render rows
+  view.forEach(({ r, display, joined, last, statusDot, statusTxt }) => {
+    // Username is canonical; display name is styled; show admin badge lightly
+    const adminBadge = r.is_admin ? ' <span class="yellow">[admin]</span>' : '';
+    api.printHTML(
+      `${statusDot} &lt;${escapeHTML(r.username)}&gt; ${adminBadge}<br>` +
+      `Display: ${display}<br>` +
+      `Joined: <span class="dim">${escapeHTML(joined)}</span> • ` +
+      `Last login: <span class="dim">${escapeHTML(last)}</span> • ` +
+      `Status: ${statusTxt}`
+    );
+    api.hr();
+  });
+
+  api.print('Tip: View a profile with /profile <user>', 'dim');
+}
+
 
 /* ======================= Doors (Games) ======================= */
 function listDoors(){ return DoorManager?.list?.() || []; }
@@ -1419,6 +1719,11 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'colors':       return cmdColors(api), true;
     case 'help':         cmdHelp(api, state); return true;
     case 'passwd':       return cmdPasswd(api, state, args), true;
+  case 'aboutme': return cmdAboutMe(api, state, args), true;
+  case 'profile':      return cmdProfile(api, state, args), true;
+  case 'users': return cmdUsers(api, state, args), true;
+
+
 
 case 'adminchat':
   if (state.isAdmin) renderAdminChat(api, state);
@@ -1692,6 +1997,55 @@ function createUser(username, password, opts = {}) {
     throw e;
   }
 }
+
+function normalizeHandle(s){
+  if (!s) return '';
+  const plain = stripDISFormatting(String(s));
+  return plain.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/* Refresh normalization columns for a single user row */
+function refreshUserNormsByRow(row){
+  const u = row.username || '';
+  const d = row.display_name || null;
+  updateUserNorms.run(normalizeHandle(u), d ? normalizeHandle(d) : null, row.id);
+}
+
+/* One-time backfill of normalization columns on boot (idempotent) */
+try {
+  const rows = db.prepare(`SELECT id, username, display_name FROM users`).all();
+  for (const r of rows) refreshUserNormsByRow(r);
+} catch(e) {
+  console.error('Norm backfill issue:', e && e.message ? e.message : e);
+}
+
+/**
+ * Resolve any typed handle (username or display name, any case, DIS-markdown allowed)
+ * Returns:
+ *   { row }             — unique match
+ *   { ambiguous:[…] }   — several candidates, provide usernames to disambiguate
+ *   null                — not found / empty
+ */
+function resolveUserHandle(anyName){
+  if (!anyName) return null;
+
+  // Fast path: try exact username first (users.username is UNIQUE COLLATE NOCASE)
+  const fast = getUserByName.get(String(anyName).trim());
+  if (fast) return { row: fast };
+
+  const needle = normalizeHandle(anyName);
+  if (!needle) return null;
+
+  const rows = getUsersByNorm.all(needle, needle);
+  if (rows.length === 1) return { row: rows[0] };
+  if (rows.length > 1)   return { ambiguous: rows.map(r => ({ id:r.id, username:r.username })) };
+  return null;
+}
+
+
+
+
+
 
 /* ======================= CASINO (Integer Chrome) ======================= */
 const CHROME_DAILY = 100; // 100 chrome per calendar day
