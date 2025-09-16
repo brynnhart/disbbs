@@ -559,7 +559,7 @@ function makeApi(ws){
 function broadcastSystem(line){
   HUB.clients.forEach(ws => sendOps(ws, [{op:'print', text:line, cls:'dim'}]));
 }
-function broadcastChatFrom(htmlLine, fromUsername){
+function broadcastChatFrom(htmlLine, fromUsername, createdAtSec){
   const from = (fromUsername || '').toLowerCase();
   HUB.clients.forEach((client) => {
     const st = client.__ctx?.state; if (!st) return;
@@ -567,6 +567,18 @@ function broadcastChatFrom(htmlLine, fromUsername){
     const u = (st.username || '').toLowerCase();
     const isMine = from && u === from;
     sendOps(client, [{ op:'printHTML', html: htmlLine, cls: isMine ? 'me' : undefined }]);
+    const ops = [];
+    if (createdAtSec && client.__ctx) {
+      const msgYmd = ymdFromEpoch(createdAtSec);
+     if (client.__ctx.lastChatDay !== msgYmd) {
+        // insert divider first
+        const label = dayHeadingFromEpoch(createdAtSec);
+        ops.push({ op:'printHTML', html:`<span class="dim">── ${escapeHTML(label)} ──</span>` });
+        client.__ctx.lastChatDay = msgYmd;
+      }
+    }
+    ops.push({ op:'printHTML', html: htmlLine, cls: isMine ? 'me' : undefined });
+    sendOps(client, ops);
   });
 }
 
@@ -847,7 +859,13 @@ function renderChat(api, state){
     if (rows.length === 0) {
       b.print('No messages yet. Type to chat. /leave to return.', 'dim');
     } else {
+        let lastYmd = null;
       rows.forEach(r => {
+        const thisYmd = ymdFromEpoch(r.created_at);
+        if (thisYmd !== lastYmd) {
+          printDayDivider(b, r.created_at);
+          lastYmd = thisYmd;
+        }
         const ts = new Date(r.created_at*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
         const disp = r.display_name || r.username || 'anon';
         const safeBody = sanitizeAndFormatDIS(r.body);
@@ -856,6 +874,8 @@ function renderChat(api, state){
         const mine = state.username && r.username && state.username.toLowerCase() === r.username.toLowerCase();
         b.printHTML(html, mine ? 'me' : undefined);
       });
+      // Remember the last printed day for this socket so live updates can insert dividers accurately
+      if (api.ws && api.ws.__ctx) api.ws.__ctx.lastChatDay = lastYmd;
     }
 
     b.hr();
@@ -881,7 +901,7 @@ function chatHandleRaw(text, api, state){
   const safeBody = sanitizeAndFormatDIS(msgText);
   const bodyWithColor = state.userColor ? `<span style="color:${state.userColor}">${safeBody}</span>` : safeBody;
   const html = `[${ts}] &lt;${sanitizeAndFormatDIS(disp)}&gt; ${bodyWithColor}`;
-  broadcastChatFrom(html, state.username || '');
+  broadcastChatFrom(html, state.username || '', created);
   return true;
 }
 
@@ -2033,7 +2053,28 @@ function resolveUserHandle(anyName){
   return null;
 }
 
-
+// --- Day grouping helpers ---
+function ymdFromEpoch(sec){
+  const d = new Date(sec * 1000);
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  const dd = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${dd}`;
+}
+function ymdToday(){ return ymdFromEpoch(nowEpoch()); }
+function ymdYesterday(){ return ymdFromEpoch(nowEpoch() - 86400); }
+function dayHeadingFromEpoch(sec){
+  const ymd = ymdFromEpoch(sec);
+  if (ymd === ymdToday()) return 'Today';
+  if (ymd === ymdYesterday()) return 'Yesterday';
+  // Fallback to locale date
+  return new Date(sec*1000).toLocaleDateString();
+}
+function printDayDivider(batchApi, epochSec){
+  const label = dayHeadingFromEpoch(epochSec);
+  // A subtle divider with a label
+  batchApi.printHTML(`<span class="dim">── ${escapeHTML(label)} ──</span>`);
+}
 
 
 
@@ -2063,7 +2104,7 @@ function usersCurrentlyInAdminChat(){
   return arr.sort((a,b)=>a.localeCompare(b));
 }
 
-function broadcastAdminChatFrom(htmlLine, fromUsername){
+function broadcastAdminChatFrom(htmlLine, fromUsername, createdAtSec){
   const from = (fromUsername || '').toLowerCase();
   HUB.clients.forEach((client) => {
     const st = client.__ctx?.state; if (!st) return;
@@ -2072,6 +2113,17 @@ function broadcastAdminChatFrom(htmlLine, fromUsername){
     const u = (st.username || '').toLowerCase();
     const isMine = from && u === from;
     sendOps(client, [{ op:'printHTML', html: htmlLine, cls: isMine ? 'me' : undefined }]);
+     const ops = [];
+    if (createdAtSec && client.__ctx) {
+      const msgYmd = ymdFromEpoch(createdAtSec);
+      if (client.__ctx.lastAdminChatDay !== msgYmd) {
+        const label = dayHeadingFromEpoch(createdAtSec);
+        ops.push({ op:'printHTML', html:`<span class="dim">── ${escapeHTML(label)} ──</span>` });
+        client.__ctx.lastAdminChatDay = msgYmd;
+      }
+    }
+    ops.push({ op:'printHTML', html: htmlLine, cls: isMine ? 'me' : undefined });
+    sendOps(client, ops);
   });
 }
 
@@ -2094,7 +2146,13 @@ function renderAdminChat(api, state){
     if (!rows.length){
       b.print('No messages yet. Type to chat. /leave returns to menu.', 'dim');
     } else {
+      let lastYmd = null;
       rows.forEach(r=>{
+        const thisYmd = ymdFromEpoch(r.created_at);
+        if (thisYmd !== lastYmd) {
+          printDayDivider(b, r.created_at);
+          lastYmd = thisYmd;
+        }
         const ts = new Date(r.created_at*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
         const disp = r.display_name || r.username || 'anon';
         const safeBody = sanitizeAndFormatDIS(r.body);
@@ -2103,6 +2161,7 @@ function renderAdminChat(api, state){
         const mine = state.username && r.username && state.username.toLowerCase() === r.username.toLowerCase();
         b.printHTML(html, mine ? 'me' : undefined);
       });
+      if (api.ws && api.ws.__ctx) api.ws.__ctx.lastAdminChatDay = lastYmd;
     }
 
     b.hr();
@@ -2135,9 +2194,11 @@ function adminChatHandleRaw(text, api, state){
   const safeBody = sanitizeAndFormatDIS(msgText);
   const bodyWithColor = state.userColor ? `<span style="color:${state.userColor}">${safeBody}</span>` : safeBody;
   const html = `[${ts}] &lt;${sanitizeAndFormatDIS(disp)}&gt; ${bodyWithColor}`;
-  broadcastAdminChatFrom(html, state.username || '');
+  broadcastAdminChatFrom(html, state.username || '', created);
   return true;
 }
+
+
 
 
 
