@@ -63,14 +63,63 @@
   var term  = document.getElementById('terminal');
   var form  = document.getElementById('cmdForm');
   var input = document.getElementById('cmdInput');
-  var promptEl = document.querySelector('.prompt');   // <— prompt label
+  var promptEl = document.querySelector('.prompt');
 
-  // --- Autoscroll helpers ---
+  // ===== Audio support =====
+  var AUDIO_CACHE = new Map();
+  var AUDIO_UNLOCKED = false;
+  var BEEP_CTX = null;
+
+  function unlockAudioOnce(){
+    AUDIO_UNLOCKED = true;
+    try { if (!BEEP_CTX) BEEP_CTX = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){}
+  }
+  // Unlock on first user interaction (required by autoplay policies)
+  window.addEventListener('pointerdown', unlockAudioOnce, { once: true });
+  window.addEventListener('keydown', unlockAudioOnce, { once: true });
+
+  function op_audio(src, volume){
+    if (!src || !AUDIO_UNLOCKED) return;
+    var key = String(src);
+    var a = AUDIO_CACHE.get(key);
+    if (!a){
+      a = new Audio(key);
+      a.preload = 'auto';
+      AUDIO_CACHE.set(key, a);
+    }
+    try {
+      if (typeof volume === 'number') a.volume = Math.max(0, Math.min(1, volume));
+      a.currentTime = 0;
+      a.play().catch(function(){ /* ignore: user has not interacted yet */ });
+    } catch(e){ /* ignore */ }
+  }
+
+  function op_beep(kind){
+    if (!AUDIO_UNLOCKED || !BEEP_CTX) return;
+    try {
+      var o = BEEP_CTX.createOscillator();
+      var g = BEEP_CTX.createGain();
+      o.connect(g); g.connect(BEEP_CTX.destination);
+      o.type = 'triangle';
+      // pick a short attention tone; vary by kind if desired
+      o.frequency.value = (kind === 'mention') ? 880 : 660;
+
+      var now = BEEP_CTX.currentTime;
+      g.gain.setValueAtTime(0.0001, now);
+      g.gain.exponentialRampToValueAtTime(0.25, now + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+
+      o.start(now);
+      o.stop(now + 0.17);
+    } catch(e){ /* ignore */ }
+  }
+
+  // ===== Autoscroll helpers =====
   function isNearBottom(el, threshold){ threshold = typeof threshold === 'number' ? threshold : 40;
     return (el.scrollHeight - el.scrollTop - el.clientHeight) < threshold; }
   function scrollToBottom(el){ el.scrollTop = el.scrollHeight; }
 
-  // --- Render ops ---
+  // ===== Render ops =====
   function op_clear(){ term.innerHTML = ''; }
   function op_print(text, cls){
     var stick = isNearBottom(term);
@@ -103,7 +152,7 @@
     promptEl.textContent = String(prefix || 'DIS>');
   }
 
-  // --- WebSocket ---
+  // ===== WebSocket =====
   var proto = (location.protocol === 'https:' ? 'wss:' : 'ws:');
   var ws = new WebSocket(proto + '//' + location.host + '/ws');
 
@@ -122,6 +171,8 @@
         else if (op.op === 'hr') op_hr();
         else if (op.op === 'setInput') op_setInput(op.inputType, op.placeholder);
         else if (op.op === 'setPrompt') op_setPrompt(op.prefix);
+        else if (op.op === 'audio') op_audio(op.src, op.volume);
+        else if (op.op === 'beep') op_beep(op.kind);
       });
     }
   });
@@ -166,6 +217,7 @@
   });
 })();
 </script>
+
 
 
 

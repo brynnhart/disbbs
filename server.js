@@ -32,6 +32,8 @@ app.use(express.static(path.join(__dirname, 'public')));
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/ws' });
 
+app.use('/static', require('express').static(path.join(__dirname, 'public')));
+
 /* ======================= DB Open + Pragmas ======================= */
 const db = new Database(DB_PATH);
 module.exports.__db = db;
@@ -182,6 +184,55 @@ CREATE TABLE IF NOT EXISTS users (
 
 
 `);
+
+
+// === Mentions / Notifications bootstrap ===
+let insertNotification, listNotificationsForUser, markAllNotificationsSeen;
+
+function ensureNotificationsSchema(){
+  // 1) table + indexes
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS notifications (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      to_user_id   INTEGER NOT NULL,
+      from_user_id INTEGER,
+      kind         TEXT    NOT NULL,      -- e.g. 'mention'
+      context      TEXT    NOT NULL,      -- 'chat', 'adminchat', 'topic:<id>', 'news:<id>'
+      body         TEXT    NOT NULL,      -- raw text that triggered the notify
+      created_at   INTEGER NOT NULL,
+      seen_at      INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_notify_to_created ON notifications (to_user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_notify_to_unseen  ON notifications (to_user_id, seen_at);
+  `);
+
+  // 2) prepared statements
+  insertNotification = db.prepare(`
+    INSERT INTO notifications (to_user_id, from_user_id, kind, context, body, created_at, seen_at)
+    VALUES (?, ?, ?, ?, ?, ?, NULL)
+  `);
+
+  listNotificationsForUser = db.prepare(`
+    SELECT n.id, n.kind, n.context, n.body, n.created_at, n.seen_at,
+         u.username AS from_username, u.display_name AS from_display
+    FROM notifications n
+    LEFT JOIN users u ON u.id = n.from_user_id
+   WHERE n.to_user_id = ?
+     AND n.kind = 'mention'
+   ORDER BY (n.seen_at IS NULL) DESC, n.created_at DESC
+   LIMIT ?
+ `);
+
+  markAllNotificationsSeen = db.prepare(`
+    UPDATE notifications
+       SET seen_at = strftime('%s','now')
+     WHERE to_user_id = ? AND seen_at IS NULL
+  `);
+}
+
+// call once at startup (where you set up other schema/seed):
+ensureNotificationsSchema();
+
 
 /* One-time, safe add of 'about' column for profiles (no-op if present) */
 try {
@@ -564,23 +615,29 @@ function broadcastChatFrom(htmlLine, fromUsername, createdAtSec){
   HUB.clients.forEach((client) => {
     const st = client.__ctx?.state; if (!st) return;
     if (st.currentScreen !== 'chat') return;
+
     const u = (st.username || '').toLowerCase();
     const isMine = from && u === from;
-    sendOps(client, [{ op:'printHTML', html: htmlLine, cls: isMine ? 'me' : undefined }]);
+
     const ops = [];
+
+    // Insert a day divider if needed (per socket)
     if (createdAtSec && client.__ctx) {
       const msgYmd = ymdFromEpoch(createdAtSec);
-     if (client.__ctx.lastChatDay !== msgYmd) {
-        // insert divider first
+      if (client.__ctx.lastChatDay !== msgYmd) {
         const label = dayHeadingFromEpoch(createdAtSec);
         ops.push({ op:'printHTML', html:`<span class="dim">── ${escapeHTML(label)} ──</span>` });
         client.__ctx.lastChatDay = msgYmd;
       }
     }
+
+    // Print the actual line once
     ops.push({ op:'printHTML', html: htmlLine, cls: isMine ? 'me' : undefined });
+
     sendOps(client, ops);
   });
 }
+
 
 /* ======================= DIS Markdown Helpers ======================= */
 const ALLOWED_COLORS = ['red','green','yellow','blue','magenta','cyan','white'];
@@ -742,7 +799,7 @@ function splashHandleRaw(text, api, state){
       state.isAdmin  = !!user.is_admin;
 
       // ensure normalization columns are up-to-date for this user
-    refreshUserNormsByRow({ id: state.userId, username: state.username, display_name: state.displayName });
+    
 
 
       // pull color + display name
@@ -750,6 +807,8 @@ function splashHandleRaw(text, api, state){
       state.userColor = rc ? rc.preferred_color : null;
       const dnRow = getUserDisplay.get(state.userId);
       state.displayName = dnRow && dnRow.display_name ? dnRow.display_name : state.username;
+
+      refreshUserNormsByRow({ id: state.userId, username: state.username, display_name: state.displayName });
 
       // presence
       HUB.online.add(state.username);
@@ -891,19 +950,33 @@ function chatHandleCommand(cmd, api, state){
 function chatHandleRaw(text, api, state){
   if (!requireAuth(api, state)) return true;
   const msgText = (text||'').trim(); if (!msgText) return true;
+
+  // limits
+  const max = +(getSetting.get('chat_max_len')?.value || 400);
+  if (msgText.length > max){ api.print(`Too long (max ${max}).`, 'red'); return true; }
+
   const uid = state.userId || null;
   const created = nowEpoch();
-  const ttl = retentionSeconds(); const expires = ttl > 0 ? (created + ttl) : null;
-  insertMessage.run(uid, msgText, created, expires);
+  const ttl = +(getSetting.get('chat_retention_days')?.value || 7) * 86400;
+  const expires = ttl > 0 ? (created + ttl) : null;
+
+  insertMessage.run(uid, msgText, created, expires); // your existing prepared INSERT
 
   const ts = new Date(created*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
   const disp = state.displayName || state.username || 'anon';
   const safeBody = sanitizeAndFormatDIS(msgText);
   const bodyWithColor = state.userColor ? `<span style="color:${state.userColor}">${safeBody}</span>` : safeBody;
   const html = `[${ts}] &lt;${sanitizeAndFormatDIS(disp)}&gt; ${bodyWithColor}`;
-  broadcastChatFrom(html, state.username || '', created);
+
+  broadcastChatFrom(html, state.username || '', created); // your existing broadcast with day dividers
+
+  // === NEW: mentions → notify
+  const fromRow = { id: uid, username: state.username };
+  notifyMentions(msgText, fromRow, 'chat');
+
   return true;
 }
+
 
 /* ======================= About / Rules ======================= */
 function renderAbout(api, state){
@@ -1043,14 +1116,29 @@ function topicHandleCommand(cmd, api, state, args){
 }
 function topicHandleRaw(text, api, state){
   if (!requireAuth(api, state)) return true;
-  const raw = String(text || '').trim();
-  if (!raw) return true;
-  if (raw.charAt(0) === '/') {
-    api.print('Use /board to go back, or just type to reply.', 'dim');
-    return true;
-  }
-  return topicPostRaw(raw, api, state), true;
+  const body = (text||'').trim(); if (!body) return true;
+  const topicId = state.currentTopicId;
+  if (!topicId){ api.print('No topic open.', 'red'); return true; }
+
+  const max = +(getSetting.get('topic_comment_max_len')?.value || 600);
+  if (visibleLengthDIS(body) > max){ api.print(`Too long (max ${max} visible chars).`, 'red'); return true; }
+
+  const ts = nowEpoch();
+  insertComment.run(topicId, state.userId || null, body, ts);
+  const days = +(getSetting.get('board_inactive_days')?.value || 30);
+  updateTopicBump.run(ts, ts + days*86400, topicId);
+
+  // re-render topic so commenter sees their post immediately
+  openTopic(api, state, topicId);
+
+  // mentions → notify
+  const fromRow = { id: state.userId || null, username: state.username };
+  notifyMentions(body, fromRow, `topic:${topicId}`);
+
+  return true;
 }
+
+
 function topicPostRaw(raw, api, state){
   if (!state.currentTopicId){ api.print('No topic open.', 'red'); return; }
   const maxLen = +(getSetting.get('board_reply_max_len')?.value || 600);
@@ -1170,22 +1258,32 @@ function newsListHandleCommand(cmd, api, state, args){
 }
 function newsItemHandleRaw(text, api, state){
   if (!requireAuth(api, state)) return true;
-  const raw = String(text || '').trim();
-  if (!raw) return true;
-  if (raw.charAt(0) === '/'){ api.print('Use /news to go back, or just type to comment.', 'dim'); return true; }
-  if (!state.currentNewsId){ api.print('No news item open.', 'red'); return true; }
+  const body = (text||'').trim(); if (!body) return true;
+  const newsId = state.currentNewsId;
+  if (!newsId){ api.print('No news item open.', 'red'); return true; }
 
-  const maxLen = +(getSetting.get('news_reply_max_len')?.value || 600);
-  const visible = visibleLengthDIS(raw);
-  if (visible > maxLen){ api.print(`Comment too long (max ${maxLen} visible chars).`, 'red'); return true; }
+  const max = +(getSetting.get('news_comment_max_len')?.value || 600);
+  if (visibleLengthDIS(body) > max){ api.print(`Too long (max ${max} visible chars).`, 'red'); return true; }
 
   const ts = nowEpoch();
-  insertNewsComment.run(state.currentNewsId, state.userId || null, raw, ts);
+  insertNewsComment.run(newsId, state.userId || null, body, ts);
+
+  // FIX: pass 3 args to bumpNewsPost (last_commented_at, expires_at, id)
   const days = +(getSetting.get('news_inactive_days')?.value || 30);
-  bumpNewsPost.run(ts, ts + days*86400, state.currentNewsId);
-  openNewsItem(api, state, state.currentNewsId);
+  bumpNewsPost.run(ts, ts + days*86400, newsId);
+
+  // re-render so commenter sees their post
+  openNewsItem(api, state, newsId);
+
+  // mentions → notify
+  const fromRow = { id: state.userId || null, username: state.username };
+  notifyMentions(body, fromRow, `news:${newsId}`);
+
   return true;
 }
+
+
+
 function cmdAddNews(api, state, args){
   if (!requireAuth(api, state)) return;
   const raw = (args||[]).join(' ').trim();
@@ -1465,12 +1563,25 @@ function cmdDM(api, state, args){
   const canonical = recipient.username;
   const sockets = HUB.socketsByUser.get(canonical);
   if (sockets && sockets.size){
-    const from = state.username || 'anon';
-    const notice = `(DM) from ${from}: ${body}`;
-    sockets.forEach(ws => {
+  const place = humanizeContext(context);
+  const notice = `@mention from ${fromName} in ${place}.`;
+
+  sockets.forEach(ws=>{
+    // optional: simple throttle so we don’t spam sounds if many mentions arrive at once
+    const now = Date.now();
+    if (!ws.__ctx) ws.__ctx = {};
+    if (!ws.__ctx._lastMentionSound || now - ws.__ctx._lastMentionSound > 400) {
+      ws.__ctx._lastMentionSound = now;
+      sendOps(ws, [
+        { op: 'audio', src: '/static/sounds/mention.wav', volume: 0.8 },
+        { op: 'print', text: notice, cls: 'cyan' }
+      ]);
+    } else {
+      // still show the text if throttled
       sendOps(ws, [{ op: 'print', text: notice, cls: 'cyan' }]);
-    });
-  }
+    }
+  });
+}
 }
 
 
@@ -1569,6 +1680,36 @@ function cmdUsers(api, state, args){
     api.print('End of list.', 'dim');
   }
 }
+
+
+function cmdNotifications(api, state, args){
+  if (!requireAuth(api, state)) return;
+  const limit = Math.max(1, Math.min(200, parseInt(args && args[0], 10) || 50));
+  const rows = listNotificationsForUser.all(state.userId, limit);
+
+  api.batch(b=>{
+    b.clear();
+    b.print('== Notifications ==','magenta'); b.hr();
+
+    if (!rows.length){
+      b.print('No notifications yet. Mention someone with @username in Chat/Boards/News.', 'dim');
+    } else {
+      rows.forEach(n=>{
+        const when = new Date(n.created_at*1000).toLocaleString();
+        const whoRaw = (n.from_display && n.from_display.trim()) ? n.from_display : (n.from_username || 'system');
+        const ctx = n.context || 'somewhere';
+        const body = sanitizeAndFormatDIS(n.body);
+        const seen = n.seen_at ? '<span class="dim">seen</span>' : '<span class="yellow">NEW</span>';
+        b.printHTML(`[${escapeHTML(when)}] ${seen} <span class="dim">(${escapeHTML(ctx)})</span> &lt;${sanitizeAndFormatDIS(whoRaw)}&gt; ${body}`);
+      });
+    }
+    b.hr(); b.print('Tip: /notifications 200 for more.', 'dim');
+  });
+
+  // mark yours as read after viewing
+  markAllNotificationsSeen.run(state.userId);
+}
+
 
 
 
@@ -1686,9 +1827,8 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'rules':        routeGo(api, state, 'rules'); return true;
     case 'board':        renderBoard(api, state); return true;
     case 'topic':        if (args.length) openTopic(api, state, parseInt(args[0],10)||0); else api.print('Usage: /topic <id>','yellow'); return true;
-     case 'newtopic':         return cmdNewTopic(api, state, args), true;
-   // Admin-only removal by list index or id (your cmdRemoveTopic already enforces admin):
-    case 'removetopic':      return cmdRemoveTopic(api, state, args), true;
+    case 'newtopic':     return cmdNewTopic(api, state, args), true;
+    case 'removetopic':  return cmdRemoveTopic(api, state, args), true;
 
     /* News */
     case 'news':         if (args.length) openNewsItem(api, state, parseInt(args[0],10)||0); else renderNewsList(api, state); return true;
@@ -1708,41 +1848,24 @@ function handleGlobalCommand(cmd, api, state, args){
 
     /* Colors + Display name */
     case 'setcolor':     cmdSetColor(api, state, args); return true;
-    case 'color':        cmdShowColor(api, state); return true;
+    case 'color':        cmdColor(api, state); return true;
     case 'colorreset':   cmdColorReset(api, state); return true;
     case 'setdisplay':   cmdSetDisplay(api, state, args); return true;
-    case 'display':      cmdShowDisplay(api, state); return true;
+    case 'display':      cmdDisplay(api, state); return true;
     case 'displayreset': cmdDisplayReset(api, state); return true;
 
-    /* Invites + Register */
-     case 'makeinvite':   return cmdMakeInvite(api, state, args), true;
-    case 'listinvites':  return cmdListInvites(api, state, args), true;
-   case 'revokeinvite': return cmdRevokeInvite(api, state, args), true;
+    /* Accounts / Misc */
     case 'register':     cmdRegister(api, state, args); return true;
+    case 'passwd':       cmdPasswd(api, state, args); return true;
+    case 'whoami':       cmdWhoAmI(api, state); return true;
+    case 'who':          cmdWho(api, state); return true;
+    case 'users':        cmdUsers(api, state, args); return true;
 
-    /* Misc */
-    case 'whoami':       api.print(`You are ${state.username}${state.isAdmin?' (admin)':''}`); return true;
-    case 'who':          return cmdWho(api), true;
-    case 'format':       return cmdFormat(api), true;
-    case 'here':         return cmdHere(api, state), true;
-    case 'logout':       doLogout(api, state); return true;
-    case 'colors':       return cmdColors(api), true;
-    case 'help':         cmdHelp(api, state); return true;
-    case 'passwd':       return cmdPasswd(api, state, args), true;
-  case 'aboutme': return cmdAboutMe(api, state, args), true;
-  case 'profile':      return cmdProfile(api, state, args), true;
-  case 'users':        cmdUsers(api, state, args); return true;
+    /* Notifications */
+    case 'notifications': cmdNotifications(api, state, args); return true;
 
-
-
-
-case 'adminchat':
-  if (state.isAdmin) renderAdminChat(api, state);
-  else api.print('Unknown command.', 'red'); // keep it hidden
-  return true;
-
+    default: return false;
   }
-  return false;
 }
 
 /* ======================= WS handling (containerized doors) ======================= */
@@ -2078,6 +2201,66 @@ function printDayDivider(batchApi, epochSec){
 
 
 
+function humanizeContext(ctx){
+  if (!ctx) return 'somewhere';
+  if (ctx === 'chat') return 'Chat';
+  if (ctx === 'adminchat') return 'Admin Chat';
+  const mTopic = /^topic:(\d+)$/.exec(ctx);
+  if (mTopic) return `Topic #${mTopic[1]}`;
+  const mNews = /^news:(\d+)$/.exec(ctx);
+  if (mNews) return `News #${mNews[1]}`;
+  return ctx;
+}
+
+function notifyMentions(rawText, fromUserRow, context){
+  try {
+    const handles = extractMentionsFromText(rawText);
+    if (!handles.length) return;
+
+    const created = nowEpoch();
+    const fromId = fromUserRow ? fromUserRow.id : null;
+    const fromName = fromUserRow ? (fromUserRow.username || 'someone') : 'someone';
+
+    handles.forEach(h=>{
+      const resolved = resolveUserHandle(h); // {row} | {ambiguous} | null
+      if (!resolved || resolved.ambiguous) return;
+
+      const target = resolved.row;
+      if (!target || (fromId && target.id === fromId)) return; // don't notify self
+
+      // 1) persist
+      insertNotification.run(target.id, fromId, 'mention', context, rawText, created);
+
+      // 2) live ping if online
+      const sockets = HUB.socketsByUser.get(target.username); // keyed by canonical username【turn26file11†server.js†L70-L71】
+      if (sockets && sockets.size){
+        const place = humanizeContext(context);
+        const notice = `🔔 ${fromName} mentioned you in ${place}.`;
+        sockets.forEach(ws => {
+          sendOps(ws, [{ op:'beep' }, { op:'print', text: notice, cls:'cyan' }]); // UI: add a 'beep' handler client-side
+        });
+      }
+    });
+  } catch(e){
+    // swallow – notifications are best-effort
+  }
+}
+
+// Return array of raw handles typed after '@', de-duped (case-insensitive)
+function extractMentionsFromText(raw){
+  if (!raw) return [];
+  const found = new Set();
+  const rx = /(^|[\s.,;:!?()[\]{}"'])@([A-Za-z0-9_\-./[\]]{2,32})/g; // tokeny usernames
+  let m;
+  while ((m = rx.exec(raw)) !== null) {
+    const handle = m[2];
+    if (handle) found.add(handle.toLowerCase());
+  }
+  return Array.from(found);
+}
+
+
+
 
 
 function todayYMD(){
@@ -2110,10 +2293,13 @@ function broadcastAdminChatFrom(htmlLine, fromUsername, createdAtSec){
     const st = client.__ctx?.state; if (!st) return;
     if (!st.isAdmin) return;
     if (st.currentScreen !== 'adminchat') return;
+
     const u = (st.username || '').toLowerCase();
     const isMine = from && u === from;
-    sendOps(client, [{ op:'printHTML', html: htmlLine, cls: isMine ? 'me' : undefined }]);
-     const ops = [];
+
+    const ops = [];
+
+    // Optional: day divider for admin chat too
     if (createdAtSec && client.__ctx) {
       const msgYmd = ymdFromEpoch(createdAtSec);
       if (client.__ctx.lastAdminChatDay !== msgYmd) {
@@ -2122,10 +2308,12 @@ function broadcastAdminChatFrom(htmlLine, fromUsername, createdAtSec){
         client.__ctx.lastAdminChatDay = msgYmd;
       }
     }
+
     ops.push({ op:'printHTML', html: htmlLine, cls: isMine ? 'me' : undefined });
     sendOps(client, ops);
   });
 }
+
 
 
 /* ======================= Admin Chat (admins only) ======================= */
@@ -2194,9 +2382,17 @@ function adminChatHandleRaw(text, api, state){
   const safeBody = sanitizeAndFormatDIS(msgText);
   const bodyWithColor = state.userColor ? `<span style="color:${state.userColor}">${safeBody}</span>` : safeBody;
   const html = `[${ts}] &lt;${sanitizeAndFormatDIS(disp)}&gt; ${bodyWithColor}`;
+
+  // broadcast (includes per-socket day divider handling in your broadcast helper)
   broadcastAdminChatFrom(html, state.username || '', created);
+
+  // === NEW: mentions → notify
+  const fromRow = { id: uid, username: state.username };
+  notifyMentions(msgText, fromRow, 'adminchat');
+
   return true;
 }
+
 
 
 
