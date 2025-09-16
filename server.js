@@ -1818,7 +1818,7 @@ function cmdPasswd(api, state, args){
 
 /* ======================= Global command router ======================= */
 function handleGlobalCommand(cmd, api, state, args){
-  switch(cmd){
+  switch (cmd) {
     /* Navigation */
     case 'main':
     case 'menu':         routeGo(api, state, 'menu'); return true;
@@ -1826,9 +1826,10 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'about':        routeGo(api, state, 'about'); return true;
     case 'rules':        routeGo(api, state, 'rules'); return true;
     case 'board':        renderBoard(api, state); return true;
-    case 'topic':        if (args.length) openTopic(api, state, parseInt(args[0],10)||0); else api.print('Usage: /topic <id>','yellow'); return true;
-    case 'newtopic':     return cmdNewTopic(api, state, args), true;
-    case 'removetopic':  return cmdRemoveTopic(api, state, args), true;
+    case 'topic':        if (args.length) openTopic(api, state, parseInt(args[0],10)||0); else api.print('Usage: /topic <id>', 'yellow'); return true;
+    case 'newtopic':     return (cmdNewTopic(api, state, args), true);
+    // Admin-only removal by list index or id (cmdRemoveTopic should enforce admin)
+    case 'removetopic':  return (cmdRemoveTopic(api, state, args), true);
 
     /* News */
     case 'news':         if (args.length) openNewsItem(api, state, parseInt(args[0],10)||0); else renderNewsList(api, state); return true;
@@ -1846,27 +1847,47 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'suggestions':  cmdSuggestions(api, state); return true;
     case 'removesuggestion': cmdRemoveSuggestion(api, state, args); return true;
 
-    /* Colors + Display name */
+    /* Colors + Display (compat: support both old/new handler names) */
     case 'setcolor':     cmdSetColor(api, state, args); return true;
-    case 'color':        cmdColor(api, state); return true;
+    case 'color':        (typeof cmdShowColor === 'function' ? cmdShowColor : cmdColor)(api, state); return true;
     case 'colorreset':   cmdColorReset(api, state); return true;
     case 'setdisplay':   cmdSetDisplay(api, state, args); return true;
-    case 'display':      cmdDisplay(api, state); return true;
+    case 'display':      (typeof cmdShowDisplay === 'function' ? cmdShowDisplay : cmdDisplay)(api, state); return true;
     case 'displayreset': cmdDisplayReset(api, state); return true;
 
-    /* Accounts / Misc */
+    /* Invites + Register */
+    case 'makeinvite':   return (cmdMakeInvite(api, state, args), true);
+    case 'listinvites':  return (cmdListInvites(api, state, args), true);
+    case 'revokeinvite': return (cmdRevokeInvite(api, state, args), true);
     case 'register':     cmdRegister(api, state, args); return true;
-    case 'passwd':       cmdPasswd(api, state, args); return true;
-    case 'whoami':       cmdWhoAmI(api, state); return true;
-    case 'who':          cmdWho(api, state); return true;
-    case 'users':        cmdUsers(api, state, args); return true;
 
     /* Notifications */
     case 'notifications': cmdNotifications(api, state, args); return true;
 
-    default: return false;
+    /* Misc */
+    case 'whoami':       api.print(`You are ${state.username}${state.isAdmin ? ' (admin)' : ''}`); return true;
+    case 'who':          return (cmdWho(api, state), true);      // extra arg is fine if handler only expects one
+    case 'format':       return (cmdFormat(api), true);
+    case 'here':         return (cmdHere(api, state), true);
+    case 'logout':       doLogout(api, state); return true;
+    case 'colors':       return (cmdColors(api), true);
+    case 'help':         cmdHelp(api, state); return true;
+    case 'passwd':       return (cmdPasswd(api, state, args), true);
+    case 'aboutme':      return (cmdAboutMe(api, state, args), true);
+    case 'profile':      return (cmdProfile(api, state, args), true);
+    case 'users':        cmdUsers(api, state, args); return true;
+
+    /* Admin Chat entry (kept hidden for non-admins) */
+    case 'adminchat':
+      if (state.isAdmin) renderAdminChat(api, state);
+      else api.print('Unknown command.', 'red');
+      return true;
+
+    default:
+      return false;
   }
 }
+
 
 /* ======================= WS handling (containerized doors) ======================= */
 wss.on('connection', (ws) => {
