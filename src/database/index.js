@@ -141,6 +141,17 @@ CREATE TABLE IF NOT EXISTS admin_messages (
 CREATE INDEX IF NOT EXISTS idx_admin_messages_expires_at ON admin_messages(expires_at);
 CREATE INDEX IF NOT EXISTS idx_admin_messages_created_at ON admin_messages(created_at);
 
+/* Announcements */
+CREATE TABLE IF NOT EXISTS announcements (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  body TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_announcements_expires_at ON announcements(expires_at);
+CREATE INDEX IF NOT EXISTS idx_announcements_created_at ON announcements(created_at);
+
 CREATE TABLE IF NOT EXISTS users (
    id INTEGER PRIMARY KEY AUTOINCREMENT,
    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -348,6 +359,25 @@ CREATE TABLE IF NOT EXISTS users (
     DELETE FROM admin_messages WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')
   `);
 
+  const insertAnnouncement = db.prepare(`
+    INSERT INTO announcements (user_id, body, created_at, expires_at)
+    VALUES (?, ?, ?, ?)
+  `);
+  const listAnnouncements = db.prepare(`
+    SELECT a.id, a.body, a.created_at,
+           u.username, u.display_name
+      FROM announcements a
+      LEFT JOIN users u ON u.id = a.user_id
+     WHERE (a.expires_at IS NULL OR a.expires_at > strftime('%s','now'))
+     ORDER BY a.created_at DESC
+     LIMIT ?
+  `);
+  const deleteAnnouncementById = db.prepare('DELETE FROM announcements WHERE id = ?');
+  const sweepExpiredAnnouncements = db.prepare(`
+    DELETE FROM announcements
+     WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')
+  `);
+
   const updateUserNorms = db.prepare(`
     UPDATE users
        SET username_norm     = ?,
@@ -413,6 +443,7 @@ CREATE TABLE IF NOT EXISTS users (
   defSetting('news_reply_max_len', 600);
   defSetting('news_list_limit', 150);
   defSetting('admin_chat_retention_days', 7);
+  defSetting('announcement_retention_days', 30);
   defSetting('about_max_len', 600);
   defSetting('users_page_size', 20);
 
@@ -567,6 +598,10 @@ CREATE TABLE IF NOT EXISTS users (
     insertAdminMessage,
     recentAdminMessages,
     sweepExpiredAdminMessages,
+    insertAnnouncement,
+    listAnnouncements,
+    deleteAnnouncementById,
+    sweepExpiredAnnouncements,
     updateUserNorms,
     getUsersByNorm,
     listUsersBasic,
