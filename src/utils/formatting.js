@@ -30,7 +30,7 @@ function disDim(s){
 
 function disColors(s){
   return ALLOWED_COLORS.reduce((acc, c) => {
-    const re = new RegExp(`\\\\[${c}\\\\]([\\\\s\\\\S]*?)\\\\[\\\\/${c}\\\\]`, 'gi');
+    const re = new RegExp(`\\[${c}\\]([\\s\\S]*?)\\[\/${c}\\]`, 'gi');
     return acc.replace(re, `<span class="${c}">$1</span>`);
   }, s);
 }
@@ -49,8 +49,8 @@ function stripDISFormatting(s){
   if (!s) return '';
   let out = String(s);
   COLOR_TAGS.forEach(tag => {
-    const open  = new RegExp(`\\\\[${tag}\\\\]`, 'gi');
-    const close = new RegExp(`\\\\[\\\\/${tag}\\\\]`, 'gi');
+    const open  = new RegExp(`\\[${tag}\\]`, 'gi');
+    const close = new RegExp(`\\[\/${tag}\\]`, 'gi');
     out = out.replace(open, '').replace(close, '');
   });
   out = out.replace(/\*\*([^*]+)\*\*/g, '$1');
