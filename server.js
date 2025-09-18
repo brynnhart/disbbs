@@ -1027,11 +1027,13 @@ function cmdDM(api, state, args){
     const fromName = (state.displayName && state.displayName.trim())
       ? state.displayName
       : (state.username || 'someone');
-    const notice = `📬 DM from ${fromName}.`;
+    const noticeHTML = `📬 DM from ${sanitizeAndFormatDIS(fromName)}.`;
+
 
     sockets.forEach(ws=>{
       const now = Date.now();
       if (!ws.__ctx) ws.__ctx = {};
+
       if (!ws.__ctx._lastMentionSound || now - ws.__ctx._lastMentionSound > 400) {
         ws.__ctx._lastMentionSound = now;
         sendOps(ws, [
