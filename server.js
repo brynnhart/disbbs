@@ -1029,16 +1029,20 @@ function cmdDM(api, state, args){
       : (state.username || 'someone');
     const noticeHTML = `📬 DM from ${sanitizeAndFormatDIS(fromName)}.`;
 
+
     sockets.forEach(ws=>{
       const now = Date.now();
       if (!ws.__ctx) ws.__ctx = {};
-      const ops = [];
+
       if (!ws.__ctx._lastMentionSound || now - ws.__ctx._lastMentionSound > 400) {
         ws.__ctx._lastMentionSound = now;
-        ops.push({ op: 'audio', src: '/static/sounds/mention.wav', volume: 0.8 });
+        sendOps(ws, [
+          { op: 'audio', src: '/static/sounds/mention.wav', volume: 0.8 },
+          { op: 'print', text: notice, cls: 'cyan' }
+        ]);
+      } else {
+        sendOps(ws, [{ op: 'print', text: notice, cls: 'cyan' }]);
       }
-      ops.push({ op: 'printHTML', html: noticeHTML, cls: 'cyan' });
-      sendOps(ws, ops);
     });
   }
 }
