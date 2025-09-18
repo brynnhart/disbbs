@@ -73,6 +73,9 @@ const {
   humanizeContext,
 } = notifications;
 
+const ANNOUNCEMENT_LIST_LIMIT = 50;
+const ANNOUNCEMENT_MAX_LEN = 600;
+
 const {
   getSetting,
   getUserByName,
@@ -120,6 +123,10 @@ const {
   insertAdminMessage,
   recentAdminMessages,
   sweepExpiredAdminMessages,
+  insertAnnouncement,
+  listAnnouncements,
+  deleteAnnouncementById,
+  sweepExpiredAnnouncements,
   updateUserNorms,
   getUsersByNorm,
   listUsersBasic,
@@ -280,9 +287,8 @@ function splashHandleRaw(text, api, state){
       api.setInputType('text', 'Type here… try /help');
       api.print('Login successful.', 'green');
 
-    
-
       routeGo(api, state, 'menu');
+      cmdAnnouncements(api, state);
     } else {
       api.print('Invalid credentials. Try again.', 'red');
       state.login.step='username'; state.login.tempUser='';
@@ -324,6 +330,7 @@ function cmdHelp(api, state){
   api.print('  /suggestions  View all current suggestions', 'cyan');
   api.print('  /aboutme <text>    Set your profile about text (or /aboutme clear)', 'cyan');
   api.print('  /profile [user]    View a member profile (omit to view your own)', 'cyan');
+  api.print('  /announcements     View site announcements', 'cyan');
   api.print('  /main      Return to Command Hub', 'cyan');
   api.print('  /logout    Sign out', 'cyan');
 
@@ -334,6 +341,8 @@ function cmdHelp(api, state){
     api.print('  /revokeinvite <code>        Expire an unused invite', 'cyan');
     api.print('  /removesuggestion <#>  Remove a suggestion (from the current list)', 'cyan');
     api.print('  /adminchat   Admin live room (private)', 'cyan');
+    api.print('  /announce <text>             Post a new announcement', 'cyan');
+    api.print('  /removeannounce <id>         Remove an announcement', 'cyan');
 
   }
   api.hr();
@@ -352,6 +361,7 @@ function renderMenu(api, state){
     b.print('  /news            Fark-like news links', 'cyan');
     b.print('  /games           List door games', 'cyan');
     b.print('  /messages        View your direct messages', 'cyan');
+    b.print('  /announcements   View site announcements', 'cyan');
     b.print('  /about           About DIS', 'cyan');
     b.print('  /rules           Community rules', 'cyan');
     b.print('  /profile         View your profile (or /profile <user>)', 'cyan');
@@ -362,6 +372,93 @@ function renderMenu(api, state){
   });
 }
 function menuHandleRaw(text, api){ api.print('Use slash commands here. Try /chat, /board, /news or /help.', 'dim'); return true; }
+
+/* ======================= Announcements ======================= */
+function fetchActiveAnnouncements(){
+  try { runAnnouncementSweep(); } catch {}
+  const limit = Math.max(1, Math.min(200, ANNOUNCEMENT_LIST_LIMIT));
+  return listAnnouncements.all(limit);
+}
+
+function printAnnouncements(api, rows){
+  api.batch(b => {
+    b.hr();
+    b.print('== Announcements ==', 'magenta');
+    b.hr();
+
+    if (!rows.length){
+      b.print('No announcements at this time.', 'dim');
+    } else {
+      rows.forEach(r => {
+        const when = r.created_at ? new Date(r.created_at * 1000).toLocaleString() : '';
+        const whoRaw = (r.display_name && r.display_name.trim()) ? r.display_name : (r.username || 'system');
+        const safeBody = sanitizeAndFormatDIS(r.body || '');
+        const header = `<span class="yellow">[#${escapeHTML(String(r.id))}]</span>` +
+                       (when ? ` <span class="dim">${escapeHTML(when)}</span>` : '') +
+                       ` &lt;${sanitizeAndFormatDIS(whoRaw)}&gt;`;
+        b.printHTML(`${header} — ${safeBody}`);
+      });
+    }
+
+    b.hr();
+  });
+}
+
+function cmdAnnouncements(api, state){
+  if (!requireAuth(api, state)) return;
+  const rows = fetchActiveAnnouncements();
+  printAnnouncements(api, rows);
+}
+
+function cmdAnnounce(api, state, args){
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin){ api.print('Unknown command.', 'red'); return; }
+
+  const text = (args || []).join(' ').trim();
+  if (!text){ api.print('Usage: /announce <announcement text>', 'yellow'); return; }
+  if (text.length > ANNOUNCEMENT_MAX_LEN){
+    api.print(`Announcement too long (max ${ANNOUNCEMENT_MAX_LEN} characters).`, 'red');
+    return;
+  }
+
+  const created = nowEpoch();
+  const daysRow = getSetting.get('announcement_retention_days');
+  const parsedRetention = daysRow && daysRow.value != null ? parseInt(daysRow.value, 10) : NaN;
+  const retentionDays = Number.isFinite(parsedRetention) ? parsedRetention : 30;
+  const expires = retentionDays > 0 ? created + retentionDays * 86400 : null;
+
+  try {
+    insertAnnouncement.run(state.userId || null, text, created, expires);
+  } catch (e) {
+    console.error('Failed to insert announcement:', e && e.message ? e.message : e);
+    api.print('Failed to create announcement.', 'red');
+    return;
+  }
+
+  api.print('Announcement posted.', 'green');
+  cmdAnnouncements(api, state);
+}
+
+function cmdRemoveAnnouncement(api, state, args){
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin){ api.print('Unknown command.', 'red'); return; }
+
+  const id = parseInt(args && args[0], 10);
+  if (!id){ api.print('Usage: /removeannounce <id#>', 'yellow'); return; }
+
+  try {
+    const info = deleteAnnouncementById.run(id);
+    if (info.changes){
+      api.print(`Announcement #${id} removed.`, 'green');
+      cmdAnnouncements(api, state);
+    } else {
+      api.print('Announcement not found.', 'red');
+    }
+  } catch (e) {
+    console.error('Failed to remove announcement:', e && e.message ? e.message : e);
+    api.print('Failed to remove announcement.', 'red');
+  }
+}
 
 /* ======================= Chat ======================= */
 function renderChat(api, state){
@@ -1326,6 +1423,9 @@ function handleGlobalCommand(cmd, api, state, args){
 
     /* Notifications */
     case 'notifications': cmdNotifications(api, state, args); return true;
+    case 'announcements': cmdAnnouncements(api, state); return true;
+    case 'announce':      cmdAnnounce(api, state, args); return true;
+    case 'removeannounce': cmdRemoveAnnouncement(api, state, args); return true;
 
     /* Misc */
     case 'whoami':       api.print(`You are ${state.username}${state.isAdmin ? ' (admin)' : ''}`); return true;
@@ -1458,10 +1558,11 @@ function runDMSweep(){ try { sweepExpiredDMs.run(); } catch {} }
 function runInviteSweep(){ try { sweepExpiredInvites.run(); } catch {} }
 function runSuggestionSweep(){ try { sweepExpiredSuggestions.run(); } catch {} }
 function runAdminChatSweep(){ try { sweepExpiredAdminMessages.run(); } catch {} }
+function runAnnouncementSweep(){ try { sweepExpiredAnnouncements.run(); } catch {} }
 
 
 setInterval(()=>{
-  runChatSweep(); runDMSweep(); runInviteSweep(); runSuggestionSweep(); runBoardSweep(); runNewsSweep(); runAdminChatSweep();
+  runChatSweep(); runDMSweep(); runInviteSweep(); runSuggestionSweep(); runBoardSweep(); runNewsSweep(); runAdminChatSweep(); runAnnouncementSweep();
 }, 10 * 60 * 1000);
 
 /* ======================= Doors boot (optional) ======================= */
