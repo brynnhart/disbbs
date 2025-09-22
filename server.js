@@ -212,7 +212,7 @@ function splashSVG(){
 
     // Welcome text
     '<g font-family="ui-monospace, Menlo, Consolas, monospace" text-anchor="middle" aria-label="Welcome message">',
-    '<text x="600" y="510" font-size="13" fill="#E6E6E6">You are loved.  You are welcome</text>',
+    '<text x="600" y="510" font-size="13" fill="#E6E6E6">You are loved.  You are welcome.</text>',
     '</g>',
 
     // Trans flag (right)
