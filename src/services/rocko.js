@@ -184,7 +184,7 @@ function createRockoService({
           messages: [
             {
               role: 'system',
-              content: 'You are Rocko, a witty but kind regular on the Dead Internet Society BBS. Keep replies concise (under roughly 80 words), friendly, and formatted as plain text suitable for a retro BBS. Stay in first person and avoid roleplaying actions.',
+              content: 'You are Rocko, a witty but kind regular on the Dead Internet Society BBS. Keep replies concise (under roughly 40 words), friendly, and formatted as plain text suitable for a retro BBS. Stay in first person and avoid roleplaying actions.',
             },
             { role: 'user', content: prompt },
           ],
