@@ -78,6 +78,7 @@ const {
   escapeHTML,
   visibleLengthDIS,
   stripDISFormatting,
+  ALLOWED_COLORS,
 } = formatting;
 
 const {
@@ -498,6 +499,27 @@ function getStatusFeedLimit(){
   return Math.max(1, Math.min(STATUS_FEED_LIMIT_CAP, parsed));
 }
 
+const STATUS_NAME_COLOR_CLASS_RE = new RegExp(`class\\s*=\\s*"(?:${ALLOWED_COLORS.join('|')})"`, 'i');
+const STATUS_NAME_COLOR_STYLE_RE = /style\s*=\s*"[^"]*color\s*:/i;
+
+function statusDisplayHasExplicitColor(html){
+  if (!html) return false;
+  return STATUS_NAME_COLOR_CLASS_RE.test(html) || STATUS_NAME_COLOR_STYLE_RE.test(html);
+}
+
+function formatStatusDisplayName(row){
+  const fallback = (row.username && row.username.trim()) ? row.username : 'anon';
+  const source = (row.display_name && row.display_name.trim()) ? row.display_name : fallback;
+  let formatted = sanitizeAndFormatDIS(source);
+  if (!formatted){
+    formatted = sanitizeAndFormatDIS(fallback);
+  }
+  if (row.color && formatted && !statusDisplayHasExplicitColor(formatted)){
+    formatted = `<span style="color:${escapeHTML(row.color)}">${formatted}</span>`;
+  }
+  return formatted;
+}
+
 function printStatusFeed(api, rows, opts = {}){
   const headingText = opts.headingText || 'Status Feed';
   const emptyMessage = opts.emptyMessage || 'No updates yet. Share one with /post <text>.';
@@ -519,8 +541,7 @@ function printStatusFeed(api, rows, opts = {}){
         }
 
         const timeLabel = new Date(r.created_at * 1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
-        const dispRaw = (r.display_name && r.display_name.trim()) ? r.display_name : (r.username || 'anon');
-        const safeDisp = sanitizeAndFormatDIS(dispRaw);
+        const safeDisp = formatStatusDisplayName(r);
         const safeBody = sanitizeAndFormatDIS(r.body || '');
         const coloredBody = r.color ? `<span style="color:${r.color}">${safeBody}</span>` : safeBody;
         b.printHTML(`[${escapeHTML(timeLabel)}] &lt;${safeDisp}&gt; ${coloredBody}`);
