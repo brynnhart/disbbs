@@ -75,6 +75,18 @@ CREATE TABLE IF NOT EXISTS suggestions (
 CREATE INDEX IF NOT EXISTS idx_suggestions_expires ON suggestions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_suggestions_created ON suggestions(created_at DESC);
 
+/* Status Posts */
+CREATE TABLE IF NOT EXISTS status_posts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  body TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_status_posts_expires_at ON status_posts(expires_at);
+CREATE INDEX IF NOT EXISTS idx_status_posts_created_at ON status_posts(created_at);
+CREATE INDEX IF NOT EXISTS idx_status_posts_user_created ON status_posts(user_id, created_at DESC);
+
 /* Commons Chat */
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -239,6 +251,33 @@ CREATE TABLE IF NOT EXISTS users (
   const deleteSuggestionById = db.prepare('DELETE FROM suggestions WHERE id = ?');
   const sweepExpiredSuggestions = db.prepare(`
     DELETE FROM suggestions WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')
+  `);
+
+  const insertStatusPost = db.prepare(`
+    INSERT INTO status_posts (user_id, body, created_at, expires_at)
+    VALUES (?, ?, ?, ?)
+  `);
+  const listStatusPosts = db.prepare(`
+    SELECT p.id, p.body, p.created_at,
+           u.username, u.display_name, u.preferred_color AS color
+      FROM status_posts p
+      LEFT JOIN users u ON u.id = p.user_id
+     WHERE (p.expires_at IS NULL OR p.expires_at > strftime('%s','now'))
+     ORDER BY p.created_at DESC
+     LIMIT ?
+  `);
+  const listStatusPostsByUser = db.prepare(`
+    SELECT p.id, p.body, p.created_at,
+           u.username, u.display_name, u.preferred_color AS color
+      FROM status_posts p
+      LEFT JOIN users u ON u.id = p.user_id
+     WHERE p.user_id = ?
+       AND (p.expires_at IS NULL OR p.expires_at > strftime('%s','now'))
+     ORDER BY p.created_at DESC
+     LIMIT ?
+  `);
+  const sweepExpiredStatusPosts = db.prepare(`
+    DELETE FROM status_posts WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')
   `);
 
   const insertMessage = db.prepare(`
@@ -446,6 +485,9 @@ CREATE TABLE IF NOT EXISTS users (
   defSetting('announcement_retention_days', 30);
   defSetting('about_max_len', 600);
   defSetting('users_page_size', 20);
+  defSetting('status_retention_days', 30);
+  defSetting('status_max_len', 280);
+  defSetting('status_feed_limit', 50);
 
   function normalizeHandle(s){
     if (!s) return '';
@@ -576,6 +618,10 @@ CREATE TABLE IF NOT EXISTS users (
     listSuggestions,
     deleteSuggestionById,
     sweepExpiredSuggestions,
+    insertStatusPost,
+    listStatusPosts,
+    listStatusPostsByUser,
+    sweepExpiredStatusPosts,
     insertMessage,
     recentMessages,
     sweepExpiredMessages,
