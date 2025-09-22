@@ -151,6 +151,13 @@
     if (!promptEl) return;
     promptEl.textContent = String(prefix || 'DIS>');
   }
+  function op_reload(){
+    try {
+      window.location.reload();
+    } catch(e) {
+      window.location.href = window.location.href;
+    }
+  }
 
   // ===== WebSocket =====
   var proto = (location.protocol === 'https:' ? 'wss:' : 'ws:');
@@ -171,6 +178,7 @@
         else if (op.op === 'hr') op_hr();
         else if (op.op === 'setInput') op_setInput(op.inputType, op.placeholder);
         else if (op.op === 'setPrompt') op_setPrompt(op.prefix);
+        else if (op.op === 'reload') op_reload();
         else if (op.op === 'audio') op_audio(op.src, op.volume);
         else if (op.op === 'beep') op_beep(op.kind);
       });
