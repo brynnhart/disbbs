@@ -77,6 +77,8 @@ const {
   sanitizeAndFormatDIS,
   escapeHTML,
   visibleLengthDIS,
+  stripDISFormatting,
+  ALLOWED_COLORS,
 } = formatting;
 
 const {
@@ -94,6 +96,7 @@ const {
 
 const ANNOUNCEMENT_LIST_LIMIT = 50;
 const ANNOUNCEMENT_MAX_LEN = 600;
+const STATUS_FEED_LIMIT_CAP = 200;
 
 const {
   getSetting,
@@ -120,6 +123,10 @@ const {
   listSuggestions,
   deleteSuggestionById,
   sweepExpiredSuggestions,
+  insertStatusPost,
+  listStatusPosts,
+  listStatusPostsByUser,
+  sweepExpiredStatusPosts,
   insertMessage,
   recentMessages,
   sweepExpiredMessages,
@@ -325,6 +332,8 @@ function cmdHelp(api, state){
   api.print('  /register  Create an account: /register <user> <pass> <invite>', 'cyan');
   api.print('  /chat      Enter the Commons Chat', 'cyan');
   api.print('  /here      Show who is currently in the chat', 'cyan');
+  api.print('  /post <text>  Share a short status update (swept after ~30 days)', 'cyan');
+  api.print('  /feed [user]  View recent updates (optionally for a user)', 'cyan');
   api.print('  /games     List available games', 'cyan');
   api.print('  /dm        Send a direct message: /dm <user> <message>', 'cyan');
   api.print('  /messages  Show your recent direct messages', 'cyan');
@@ -376,6 +385,8 @@ function renderMenu(api, state){
     b.printHTML('<div class="banner"><div class="line"><span class="cyan">▄▄▄</span><span class="magenta"> Dead Internet Society </span><span class="cyan">▄▄▄</span></div><div class="line dim">Command Hub — use slash commands to navigate.</div></div>');
     b.print('Main Menu:', 'yellow');
     b.print('  /chat            Enter the Commons Chat', 'cyan');
+    b.print('  /post <text>     Share a short status update', 'cyan');
+    b.print('  /feed [user]     View the latest updates', 'cyan');
     b.print('  /board           Bulletin board', 'cyan');
     b.print('  /news            Fark-like news links', 'cyan');
     b.print('  /games           List door games', 'cyan');
@@ -477,6 +488,156 @@ function cmdRemoveAnnouncement(api, state, args){
     console.error('Failed to remove announcement:', e && e.message ? e.message : e);
     api.print('Failed to remove announcement.', 'red');
   }
+}
+
+/* ======================= Status Posts / Feed ======================= */
+function getStatusFeedLimit(){
+  const row = getSetting.get('status_feed_limit');
+  const parsed = row && row.value != null ? parseInt(row.value, 10) : NaN;
+  const fallback = 50;
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(1, Math.min(STATUS_FEED_LIMIT_CAP, parsed));
+}
+
+const STATUS_NAME_COLOR_CLASS_RE = new RegExp(`class\\s*=\\s*"(?:${ALLOWED_COLORS.join('|')})"`, 'i');
+const STATUS_NAME_COLOR_STYLE_RE = /style\s*=\s*"[^"]*color\s*:/i;
+
+function statusDisplayHasExplicitColor(html){
+  if (!html) return false;
+  return STATUS_NAME_COLOR_CLASS_RE.test(html) || STATUS_NAME_COLOR_STYLE_RE.test(html);
+}
+
+function formatStatusDisplayName(row){
+  const fallback = (row.username && row.username.trim()) ? row.username : 'anon';
+  const source = (row.display_name && row.display_name.trim()) ? row.display_name : fallback;
+  let formatted = sanitizeAndFormatDIS(source);
+  if (!formatted){
+    formatted = sanitizeAndFormatDIS(fallback);
+  }
+  if (row.color && formatted && !statusDisplayHasExplicitColor(formatted)){
+    formatted = `<span style="color:${escapeHTML(row.color)}">${formatted}</span>`;
+  }
+  return formatted;
+}
+
+function printStatusFeed(api, rows, opts = {}){
+  const headingText = opts.headingText || 'Status Feed';
+  const emptyMessage = opts.emptyMessage || 'No updates yet. Share one with /post <text>.';
+
+  api.batch(b => {
+    b.hr();
+    b.print(`== ${headingText} ==`, 'magenta');
+    b.hr();
+
+    if (!rows.length){
+      b.print(emptyMessage, 'dim');
+    } else {
+      let lastYmd = null;
+      rows.forEach(r => {
+        const thisYmd = ymdFromEpoch(r.created_at);
+        if (thisYmd !== lastYmd) {
+          printDayDivider(b, r.created_at);
+          lastYmd = thisYmd;
+        }
+
+        const timeLabel = new Date(r.created_at * 1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+        const safeDisp = formatStatusDisplayName(r);
+        const safeBody = sanitizeAndFormatDIS(r.body || '');
+        const coloredBody = r.color ? `<span style="color:${r.color}">${safeBody}</span>` : safeBody;
+        b.printHTML(`[${escapeHTML(timeLabel)}] &lt;${safeDisp}&gt; ${coloredBody}`);
+      });
+    }
+
+    b.hr();
+  });
+}
+
+function cmdFeed(api, state, args){
+  if (!requireAuth(api, state)) return;
+  runStatusPostSweep();
+
+  const limit = getStatusFeedLimit();
+  const targetRaw = (args || []).join(' ').trim();
+
+  if (!targetRaw){
+    const rows = listStatusPosts.all(limit);
+    printStatusFeed(api, rows, {
+      headingText: 'Status Feed',
+      emptyMessage: 'No updates yet. Share one with /post <text>.',
+    });
+    return;
+  }
+
+  const lookup = targetRaw.startsWith('@') ? targetRaw.slice(1) : targetRaw;
+  let resolved = null;
+  try {
+    resolved = resolveUserHandle ? resolveUserHandle(lookup) : null;
+  } catch (e) {
+    resolved = null;
+  }
+
+  if (!resolved){
+    api.print('No such user.', 'red');
+    return;
+  }
+  if (resolved.ambiguous){
+    const opts = resolved.ambiguous.map(r => r.username).join(', ');
+    api.print('That matches multiple users. Be more specific: ' + opts, 'yellow');
+    return;
+  }
+
+  const userRow = resolved.row;
+  const rows = listStatusPostsByUser.all(userRow.id, limit);
+  const labelSource = (userRow.display_name && userRow.display_name.trim()) ? userRow.display_name : userRow.username;
+  let labelText = stripDISFormatting(labelSource || '');
+  if (!labelText.trim()) labelText = userRow.username || 'that user';
+  const headingText = (userRow.id && state.userId && userRow.id === state.userId)
+    ? 'Your Updates'
+    : `Posts by ${labelText}`;
+  const emptyMessage = (userRow.id && state.userId && userRow.id === state.userId)
+    ? 'You have not posted anything yet. Share one with /post <text>.'
+    : 'No updates from that user yet.';
+
+  printStatusFeed(api, rows, { headingText, emptyMessage });
+}
+
+function cmdPost(api, state, args){
+  if (!requireAuth(api, state)) return;
+
+  const text = (args || []).join(' ').trim();
+  if (!text){
+    api.print('Usage: /post <update text>', 'yellow');
+    return;
+  }
+
+  const maxRow = getSetting.get('status_max_len');
+  const parsedMax = maxRow && maxRow.value != null ? parseInt(maxRow.value, 10) : NaN;
+  const maxLen = Number.isFinite(parsedMax) ? parsedMax : 280;
+  if (text.length > maxLen){
+    api.print(`Update too long (max ${maxLen} characters).`, 'red');
+    return;
+  }
+
+  const created = nowEpoch();
+  const daysRow = getSetting.get('status_retention_days');
+  const parsedDays = daysRow && daysRow.value != null ? parseInt(daysRow.value, 10) : NaN;
+  const retentionDays = Number.isFinite(parsedDays) ? parsedDays : 30;
+  const expires = retentionDays > 0 ? (created + retentionDays * 86400) : null;
+
+  try {
+    insertStatusPost.run(state.userId || null, text, created, expires);
+  } catch (e) {
+    console.error('Failed to insert status post:', e && e.message ? e.message : e);
+    api.print('Failed to publish update.', 'red');
+    return;
+  }
+
+  try { runStatusPostSweep(); } catch {}
+
+  const fromRow = { id: state.userId, username: state.username };
+  notifyMentions(text, fromRow, 'status');
+
+  api.print('Update posted. Use /feed to see recent updates.', 'green');
 }
 
 /* ======================= Chat ======================= */
@@ -1456,6 +1617,8 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'play':         cmdPlay(api, state, args); return true;
 
     /* DMs / Suggestions */
+    case 'post':         cmdPost(api, state, args); return true;
+    case 'feed':         cmdFeed(api, state, args); return true;
     case 'dm':           cmdDM(api, state, args); return true;
     case 'messages':     cmdMessages(api, state); return true;
     case 'suggest':      cmdSuggest(api, state, args); return true;
@@ -1612,12 +1775,13 @@ function runChatSweep(){ try { sweepExpiredMessages.run(); } catch {} }
 function runDMSweep(){ try { sweepExpiredDMs.run(); } catch {} }
 function runInviteSweep(){ try { sweepExpiredInvites.run(); } catch {} }
 function runSuggestionSweep(){ try { sweepExpiredSuggestions.run(); } catch {} }
+function runStatusPostSweep(){ try { sweepExpiredStatusPosts.run(); } catch {} }
 function runAdminChatSweep(){ try { sweepExpiredAdminMessages.run(); } catch {} }
 function runAnnouncementSweep(){ try { sweepExpiredAnnouncements.run(); } catch {} }
 
 
 setInterval(()=>{
-  runChatSweep(); runDMSweep(); runInviteSweep(); runSuggestionSweep(); runBoardSweep(); runNewsSweep(); runAdminChatSweep(); runAnnouncementSweep();
+  runChatSweep(); runDMSweep(); runInviteSweep(); runSuggestionSweep(); runStatusPostSweep(); runBoardSweep(); runNewsSweep(); runAdminChatSweep(); runAnnouncementSweep();
 }, 10 * 60 * 1000);
 
 /* ======================= Doors boot (optional) ======================= */

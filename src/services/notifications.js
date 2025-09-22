@@ -10,6 +10,7 @@ function createNotificationService({ statements, helpers, hub, timeUtils }){
     if (!ctx) return 'somewhere';
     if (ctx === 'chat') return 'Chat';
     if (ctx === 'adminchat') return 'Admin Chat';
+    if (ctx === 'status') return 'Status Feed';
     const mTopic = /^topic:(\d+)$/.exec(ctx);
     if (mTopic) return `Topic #${mTopic[1]}`;
     const mNews = /^news:(\d+)$/.exec(ctx);
