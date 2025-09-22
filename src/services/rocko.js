@@ -93,6 +93,7 @@ function createRockoService({
 
   const rockoUserId = userRow?.id || null;
   const rockoDisplayName = (userRow?.display_name && userRow.display_name.trim()) || desiredDisplayName || username;
+  const rockoColor = ((userRow?.preferred_color || desiredColor || '').trim()) || '';
 
   const fetchFn = typeof fetch === 'function' ? fetch.bind(globalThis) : null;
   const apiKey = openAI.apiKey || process.env.OPENAI_API_KEY || null;
@@ -247,7 +248,7 @@ function createRockoService({
 
     const timeLabel = new Date(created * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const safeBody = sanitizeAndFormatDIS(trimmed);
-    const chatColor = ((userRow?.preferred_color || desiredColor || '').trim());
+    const chatColor = rockoColor;
     const bodyWithColor = chatColor ? `<span style="color:${chatColor}">${safeBody}</span>` : safeBody;
     const html = `[${timeLabel}] &lt;${sanitizeAndFormatDIS(rockoDisplayName)}&gt; ${bodyWithColor}`;
     broadcastChatFrom?.(html, username, created);
@@ -361,6 +362,8 @@ function createRockoService({
     username,
     usernameLower,
     userId: rockoUserId,
+    displayName: rockoDisplayName,
+    color: rockoColor,
     isEnabled: enabled,
     handleChatMessage,
     handleDM,

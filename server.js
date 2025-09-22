@@ -703,9 +703,14 @@ function renderChat(api, state){
           lastYmd = thisYmd;
         }
         const ts = new Date(r.created_at*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
-        const disp = r.display_name || r.username || 'anon';
+        const usernameRaw = typeof r.username === 'string' ? r.username : '';
+        const isRocko = !!(rocko && usernameRaw && typeof rocko.usernameLower === 'string' && usernameRaw.toLowerCase() === rocko.usernameLower);
+        const displaySource = r.display_name && typeof r.display_name === 'string' ? r.display_name.trim() : '';
+        const shouldUseRockoDisplay = isRocko && (!displaySource || displaySource.toLowerCase() === usernameRaw.toLowerCase());
+        const disp = shouldUseRockoDisplay ? (rocko.displayName || usernameRaw || 'anon') : (displaySource || usernameRaw || 'anon');
+        const color = r.color || (isRocko ? rocko.color : '');
         const safeBody = sanitizeAndFormatDIS(r.body);
-        const bodyWithColor = r.color ? `<span style="color:${r.color}">${safeBody}</span>` : safeBody;
+        const bodyWithColor = color ? `<span style="color:${color}">${safeBody}</span>` : safeBody;
         const html = `[${ts}] &lt;${sanitizeAndFormatDIS(disp)}&gt; ${bodyWithColor}`;
         const mine = state.username && r.username && state.username.toLowerCase() === r.username.toLowerCase();
         b.printHTML(html, mine ? 'me' : undefined);
