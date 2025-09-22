@@ -3,6 +3,31 @@
 const ALLOWED_COLORS = ['red','green','yellow','blue','magenta','cyan','white'];
 const COLOR_TAGS = ['dim', ...ALLOWED_COLORS];
 
+const EMOJI_DEFINITIONS = {
+  happy: {
+    src: '/static/emoji/happy.svg',
+    label: 'Happy face',
+  },
+  sad: {
+    src: '/static/emoji/sad.svg',
+    label: 'Sad face',
+  },
+  angry: {
+    src: '/static/emoji/angry.svg',
+    label: 'Angry face',
+  },
+  shrug: {
+    src: '/static/emoji/shrug.svg',
+    label: 'Shrugging',
+  },
+  wow: {
+    src: '/static/emoji/wow.svg',
+    label: 'Wow face',
+  },
+};
+
+const EMOJI_PATTERN = /:([a-z0-9_+-]{2,32})(?::)?/gi;
+
 function escapeHTML(s){
   return String(s)
     .replace(/&/g,'&amp;')
@@ -35,6 +60,28 @@ function disColors(s){
   }, s);
 }
 
+function renderEmojis(html){
+  if (!html) return '';
+  return String(html).replace(EMOJI_PATTERN, (match, name, offset, source) => {
+    const key = name.toLowerCase();
+    const def = EMOJI_DEFINITIONS[key];
+    if (!def) return match;
+
+    const prev = offset > 0 ? source[offset - 1] : '';
+    if (prev && /[A-Za-z0-9_]/.test(prev)) return match;
+
+    const nextIndex = offset + match.length;
+    const next = nextIndex < source.length ? source[nextIndex] : '';
+    if (next && /[A-Za-z0-9_]/.test(next)) return match;
+
+    const alt = def.alt || `:${key}:`;
+    const title = def.title || def.label || alt;
+    const src = def.src;
+
+    return `<img class="emoji" src="${escapeHTML(src)}" alt="${escapeHTML(alt)}" title="${escapeHTML(title)}">`;
+  });
+}
+
 function sanitizeAndFormatDIS(text){
   let out = escapeHTML(text);
   out = disUnderline(out);
@@ -42,6 +89,7 @@ function sanitizeAndFormatDIS(text){
   out = disItalics(out);
   out = disDim(out);
   out = disColors(out);
+  out = renderEmojis(out);
   return out;
 }
 
@@ -67,8 +115,10 @@ function visibleLengthDIS(s){
 module.exports = {
   ALLOWED_COLORS,
   COLOR_TAGS,
+  EMOJI_DEFINITIONS,
   escapeHTML,
   sanitizeAndFormatDIS,
+  renderEmojis,
   stripDISFormatting,
   visibleLengthDIS,
 };
