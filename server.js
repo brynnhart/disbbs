@@ -240,6 +240,40 @@ function makeInitialState(){
     currentNewsId:null
   };
 }
+
+function resetState(state){
+  if (!state) return;
+  const fresh = makeInitialState();
+  for (const key of Object.keys(state)) delete state[key];
+  Object.assign(state, fresh);
+}
+
+function removeUserPresence(api, state, { broadcast = true } = {}){
+  if (!state || !state.username) return null;
+
+  const ws = api?.ws;
+  const username = state.username;
+  const sockets = HUB.socketsByUser.get(username);
+  let fullyRemoved = false;
+
+  if (sockets) {
+    if (ws && sockets.has(ws)) sockets.delete(ws);
+    if (!sockets.size) {
+      HUB.socketsByUser.delete(username);
+      fullyRemoved = true;
+    }
+  } else {
+    fullyRemoved = true;
+  }
+
+  if (fullyRemoved) {
+    HUB.online.delete(username);
+    if (broadcast) broadcastSystem(`${username} left`);
+    return username;
+  }
+
+  return null;
+}
 function routeGo(api, state, name){
   state.currentScreen = name;
   if (api && api.ws) api.ws.__ctx = { state };
@@ -1592,6 +1626,32 @@ function cmdPasswd(api, state, args){
 
 
 
+/* ======================= Logout ======================= */
+function doLogout(api, state){
+  if (!state || !state.authenticated){
+    api.print('You are not logged in.', 'yellow');
+    return;
+  }
+
+  try { DoorManager?.leave?.(api, state); } catch {}
+
+  removeUserPresence(api, state);
+  resetState(state);
+
+  if (api && api.ws) {
+    api.ws.__ctx = { state };
+    sendOps(api.ws, [
+      { op: 'print', text: 'Logging out…', cls: 'yellow' },
+      { op: 'reload' }
+    ]);
+    setTimeout(() => {
+      try { api.ws.close(4001, 'logout'); } catch {}
+    }, 50);
+  }
+}
+
+
+
 /* ======================= Global command router ======================= */
 function handleGlobalCommand(cmd, api, state, args){
   switch (cmd) {
@@ -1760,7 +1820,7 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     HUB.clients.delete(ws);
     try { DoorManager?.leave?.(api, state); } catch {}
-    // your existing close cleanup can remain here
+    removeUserPresence(api, state);
   });
 
   ws.on('error', (err) => console.error('WS error:', err));
