@@ -7,6 +7,7 @@ const bcrypt = require('bcryptjs');
 const { createDatabase } = require('./src/database');
 const { createHub } = require('./src/hub');
 const { createNotificationService } = require('./src/services/notifications');
+const { createRockoService } = require('./src/services/rocko');
 const formatting = require('./src/utils/formatting');
 const timeUtils = require('./src/utils/time');
 
@@ -42,6 +43,24 @@ const notifications = createNotificationService({
   hub: hubApi,
   timeUtils,
 });
+
+const rocko = createRockoService({
+  statements,
+  helpers,
+  formatting,
+  timeUtils,
+  notifications,
+  hub: hubApi,
+  openAI: {
+    apiKey: process.env.OPENAI_API_KEY,
+    model: process.env.ROCKO_MODEL || 'gpt-5-nano',
+  },
+  logger: console,
+});
+
+if (rocko && typeof rocko.start === 'function') {
+  rocko.start();
+}
 
 const {
   hub: HUB,
@@ -531,6 +550,19 @@ function chatHandleRaw(text, api, state){
   // === NEW: mentions → notify
   const fromRow = { id: uid, username: state.username };
   notifyMentions(msgText, fromRow, 'chat');
+
+  if (rocko && typeof rocko.handleChatMessage === 'function') {
+    try {
+      rocko.handleChatMessage({
+        text: msgText,
+        fromUsername: state.username,
+        displayName: state.displayName,
+        userId: state.userId,
+      });
+    } catch (e) {
+      console.warn('[rocko] chat hook failed:', e && e.message ? e.message : e);
+    }
+  }
 
   return true;
 }
@@ -1115,6 +1147,29 @@ function cmdDM(api, state, args){
   insertDM.run(state.userId || null, recipient.id, body, ts, expiresAt);
 
   api.print('Sent.', 'green');
+
+  if (
+    rocko
+    && typeof rocko.handleDM === 'function'
+    && recipient
+    && recipient.username
+    && recipient.username.toLowerCase() === rocko.usernameLower
+  ) {
+    try {
+      rocko.handleDM({
+        text: body,
+        fromUsername: state.username,
+        displayName: state.displayName,
+        userRow: {
+          id: state.userId,
+          username: state.username,
+          display_name: state.displayName,
+        },
+      });
+    } catch (e) {
+      console.warn('[rocko] dm hook failed:', e && e.message ? e.message : e);
+    }
+  }
 
   // --- live notify recipient if online ---
   // socketsByUser is keyed by canonical username
