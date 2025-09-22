@@ -266,7 +266,7 @@ function createRockoService({
     const promptParts = [];
     if (context) promptParts.push(`Recent chat (oldest to newest):\n${context}`);
     promptParts.push(`@${payload.fromUsername} said: "${cleaned || humanText || payload.text}"`);
-    promptParts.push(`Reply as Rocko. Mention @${payload.fromUsername} in your response and keep it under 80 words.`);
+    promptParts.push(`Reply as Rocko. Keep it under 80 words.`);
     const reply = await callOpenAI(promptParts.join('\n\n'));
     if (!reply) return;
     const final = `@${payload.fromUsername} ${reply}`.trim();
