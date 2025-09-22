@@ -25,6 +25,7 @@ function createRockoService({
   const {
     getUserByName,
     setUserDisplay,
+    setUserColor,
     insertMessage,
     recentMessages,
     insertDM,
@@ -39,6 +40,8 @@ function createRockoService({
 
   const username = 'Rocko';
   const usernameLower = username.toLowerCase();
+  const desiredDisplayName = '[blue]Rocko[/blue]';
+  const desiredColor = '#2fd44f'; // normalized hex for the "green" chat color
 
   let userRow = getUserByName?.get ? getUserByName.get(username) : null;
 
@@ -57,17 +60,39 @@ function createRockoService({
     userRow = getUserByName?.get ? getUserByName.get(username) : null;
   }
 
-  if (userRow && setUserDisplay && (!userRow.display_name || !userRow.display_name.trim())) {
-    try {
-      setUserDisplay.run(userRow.id, 'Rocko');
-      userRow = getUserByName.get(username);
-    } catch (err) {
-      logger?.warn?.('[rocko] failed to set display name', err);
+  if (userRow && (setUserDisplay || setUserColor)) {
+    const updates = [];
+    const currentDisplay = (userRow.display_name || '').trim();
+    if (setUserDisplay && currentDisplay !== desiredDisplayName) {
+      try {
+        setUserDisplay.run(userRow.id, desiredDisplayName);
+        updates.push('display name');
+      } catch (err) {
+        logger?.warn?.('[rocko] failed to set display name', err);
+      }
+    }
+
+    const currentColor = (userRow.preferred_color || '').trim().toLowerCase();
+    if (setUserColor && currentColor !== desiredColor) {
+      try {
+        setUserColor.run(desiredColor, userRow.id);
+        updates.push('color');
+      } catch (err) {
+        logger?.warn?.('[rocko] failed to set color', err);
+      }
+    }
+
+    if (updates.length) {
+      try {
+        userRow = getUserByName.get(username);
+      } catch (err) {
+        logger?.warn?.('[rocko] failed to refresh user after updates', err);
+      }
     }
   }
 
   const rockoUserId = userRow?.id || null;
-  const rockoDisplayName = (userRow?.display_name && userRow.display_name.trim()) || username;
+  const rockoDisplayName = (userRow?.display_name && userRow.display_name.trim()) || desiredDisplayName || username;
 
   const fetchFn = typeof fetch === 'function' ? fetch.bind(globalThis) : null;
   const apiKey = openAI.apiKey || process.env.OPENAI_API_KEY || null;
