@@ -41,7 +41,7 @@ function createRockoService({
   const username = 'Rocko';
   const usernameLower = username.toLowerCase();
   const desiredDisplayName = '**[blue]Rocko[/blue]**';
-  const desiredColor = '#2fd44f'; // normalized hex for the "green" chat color
+  const desiredColor = 'green'; // preferred chat text color
 
   let userRow = getUserByName?.get ? getUserByName.get(username) : null;
 
@@ -247,7 +247,9 @@ function createRockoService({
 
     const timeLabel = new Date(created * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const safeBody = sanitizeAndFormatDIS(trimmed);
-    const html = `[${timeLabel}] &lt;${sanitizeAndFormatDIS(rockoDisplayName)}&gt; ${safeBody}`;
+    const chatColor = ((userRow?.preferred_color || desiredColor || '').trim());
+    const bodyWithColor = chatColor ? `<span style="color:${chatColor}">${safeBody}</span>` : safeBody;
+    const html = `[${timeLabel}] &lt;${sanitizeAndFormatDIS(rockoDisplayName)}&gt; ${bodyWithColor}`;
     broadcastChatFrom?.(html, username, created);
     try {
       notifyMentions?.(trimmed, { id: rockoUserId, username }, 'chat');
