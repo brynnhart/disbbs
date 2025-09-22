@@ -194,6 +194,11 @@ function splashSVG(){
     '<text x="600" y="352" font-size="16" fill="#19C3C3" opacity="0.9">punk-built • human-scale • honest connection</text>',
     '</g>',
 
+    '<g font-family="ui-monospace, Menlo, Consolas, monospace" text-anchor="middle">',
+    '<text x="600" y="402" font-size="26" font-weight="bold" fill="#c32419ff" opacity="0.9">proudly ANTI-FAscist</text>',
+    '<text x="600" y="422" font-size="13" font-weight="bold" fill="#c32419ff" opacity="0.5">(which should... ya know... be the default)</text>',
+    '</g>',
+
     // Pride flag (left)
     '<g aria-label="Pride flag" transform="translate(360,490)">',
     '<rect x="0" y="0" width="96" height="30" rx="4" ry="4" fill="none" stroke="#222" stroke-width="1"/>',

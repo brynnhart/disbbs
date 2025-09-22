@@ -40,7 +40,7 @@ function createRockoService({
 
   const username = 'Rocko';
   const usernameLower = username.toLowerCase();
-  const desiredDisplayName = '[blue]Rocko[/blue]';
+  const desiredDisplayName = '**[blue]Rocko[/blue]**';
   const desiredColor = '#2fd44f'; // normalized hex for the "green" chat color
 
   let userRow = getUserByName?.get ? getUserByName.get(username) : null;
