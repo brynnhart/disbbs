@@ -115,6 +115,7 @@ function createRockoService({
 
   const state = {
     lastResponseAt: 0,
+    lastChatResponseAt: 0,
     lastHumanMessage: null,
   };
 
@@ -257,7 +258,9 @@ function createRockoService({
     } catch (err) {
       logger?.warn?.('[rocko] notify mentions failed', err);
     }
-    state.lastResponseAt = Date.now();
+    const now = Date.now();
+    state.lastResponseAt = now;
+    state.lastChatResponseAt = now;
   }
 
   function sendDM(toUser, body) {
@@ -317,7 +320,10 @@ function createRockoService({
     const now = Date.now();
     if (now - state.lastResponseAt < 60_000) return;
     if (!state.lastHumanMessage) return;
-    if (now - state.lastHumanMessage.at > 5 * 60_000) return;
+    const lastHumanMessageAt = state.lastHumanMessage.at || 0;
+    const lastChatResponseAt = state.lastChatResponseAt || 0;
+    if (lastChatResponseAt > 0 && lastHumanMessageAt <= lastChatResponseAt) return;
+    if (now - lastHumanMessageAt > 5 * 60_000) return;
     if (Math.random() > idleChance) return;
     await delayRandom(1500, 4000);
     const context = buildChatContext(14);
@@ -332,12 +338,18 @@ function createRockoService({
   function handleChatMessage(payload = {}) {
     const { fromUsername, text } = payload;
     const now = Date.now();
-    if (fromUsername && fromUsername.toLowerCase() !== usernameLower) {
+    const fromLower = fromUsername ? fromUsername.toLowerCase() : null;
+    if (fromLower === usernameLower) {
+      state.lastResponseAt = now;
+      state.lastChatResponseAt = now;
+      return;
+    }
+    if (fromUsername) {
       state.lastHumanMessage = { at: now, username: fromUsername, text };
     }
     if (!enabled) return;
     if (!fromUsername || !text) return;
-    if (fromUsername.toLowerCase() === usernameLower) return;
+    if (fromLower === usernameLower) return;
     const mentions = extractMentionsFromText?.(text) || [];
     if (mentions.includes(usernameLower)) {
       enqueue(() => respondToMention(payload));
