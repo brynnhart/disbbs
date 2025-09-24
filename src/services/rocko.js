@@ -98,8 +98,8 @@ function createRockoService({
   const fetchFn = typeof fetch === 'function' ? fetch.bind(globalThis) : null;
   const apiKey = openAI.apiKey || process.env.OPENAI_API_KEY || null;
   const model = openAI.model || 'gpt-5-nano';
-  const idleIntervalMs = openAI.idleIntervalMs || 90_000;
-  const idleChance = openAI.idleChance ?? 0.25;
+  const idleIntervalMs = openAI.idleIntervalMs || 300_000;
+  const idleChance = openAI.idleChance ?? 0.01;
 
   if (!fetchFn) {
     logger?.warn?.('[rocko] global fetch() not available; disabling AI replies.');
