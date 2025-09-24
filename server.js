@@ -11,7 +11,7 @@ const { createRockoService } = require('./src/services/rocko');
 const formatting = require('./src/utils/formatting');
 const timeUtils = require('./src/utils/time');
 
-let DoorManager, tinyquestDoor, lordDoor, casinoDoor, astroblasterDoor;
+let DoorManager, tinyquestDoor, lordDoor, casinoDoor, astroblasterDoor, froggerDoor;
 try {
   const DM = require('./doors/manager');
   DoorManager = DM?.DoorManager || DM;
@@ -19,6 +19,7 @@ try {
   lordDoor = require('./doors/lord');
   casinoDoor = require('./doors/casino');
   astroblasterDoor = require('./doors/astroblaster');
+  froggerDoor = require('./doors/frogger');
 } catch (e) {
   console.error('Doors load failed:', e && e.message ? e.message : e);
 }
@@ -1901,6 +1902,19 @@ if (DoorManager && typeof DoorManager.register === 'function') {
     console.log('[doors] registered:', listed.map(d => d.id).join(', ') || '(none)');
   } catch (e) {
     console.error('AstroBlaster register failed:', e && e.message ? e.message : e);
+  }
+  try {
+    if (froggerDoor) {
+      if (typeof froggerDoor === 'function') {
+        DoorManager.register('frogger', froggerDoor, { name: 'River Runner' });
+      } else {
+        DoorManager.register(froggerDoor);
+      }
+    }
+    const listed = DoorManager.list ? DoorManager.list() : [];
+    console.log('[doors] registered:', listed.map(d => d.id).join(', ') || '(none)');
+  } catch (e) {
+    console.error('River Runner register failed:', e && e.message ? e.message : e);
   }
   try {
     if (lordDoor) {
