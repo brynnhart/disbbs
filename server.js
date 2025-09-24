@@ -11,13 +11,14 @@ const { createRockoService } = require('./src/services/rocko');
 const formatting = require('./src/utils/formatting');
 const timeUtils = require('./src/utils/time');
 
-let DoorManager, tinyquestDoor, lordDoor, casinoDoor;
+let DoorManager, tinyquestDoor, lordDoor, casinoDoor, astroblasterDoor;
 try {
   const DM = require('./doors/manager');
   DoorManager = DM?.DoorManager || DM;
   tinyquestDoor = require('./doors/tinyquest');
   lordDoor = require('./doors/lord');
   casinoDoor = require('./doors/casino');
+  astroblasterDoor = require('./doors/astroblaster');
 } catch (e) {
   console.error('Doors load failed:', e && e.message ? e.message : e);
 }
@@ -1760,13 +1761,35 @@ wss.on('connection', (ws) => {
 
     // Handshake
     if (msg.type === 'init') { routeGo(api, state, 'splash'); return; }
+
+    const inDoor = !!(state.currentScreen && state.currentScreen.startsWith('door:'));
+    const doorId = inDoor ? state.currentScreen.slice(5) : null;
+
+    const exitDoor = () => {
+      try { DoorManager?.leave?.(api, state); } catch {}
+      api.setPrompt && api.setPrompt('DIS>');
+      api.setInputType && api.setInputType('text', 'type /help for commands');
+      routeGo(api, state, 'menu');
+    };
+
+    if (msg.type === 'doorEvent') {
+      if (!inDoor || !doorId) return;
+      const slug = String(msg.slug || '').trim().toLowerCase();
+      if (!slug || slug !== String(doorId || '').toLowerCase()) return;
+      const payload = msg.payload;
+      if (payload && typeof payload === 'object' && String(payload.type || '').toLowerCase() === 'leave') {
+        exitDoor();
+        return;
+      }
+      const handled = DoorManager?.dispatch?.(doorId, 'event', payload, api, state);
+      if (handled === 'leave') exitDoor();
+      return;
+    }
+
     if (msg.type !== 'input') return;
 
     const raw = String(msg.raw || '').trim();
     if (!raw) return;
-
-    const inDoor = !!(state.currentScreen && state.currentScreen.startsWith('door:'));
-    const doorId = inDoor ? state.currentScreen.slice(5) : null;
 
     // Slash commands
     if (raw.startsWith('/')) {
@@ -1778,10 +1801,7 @@ wss.on('connection', (ws) => {
         // Only /leave escapes; everything else is door-local
         const handled = DoorManager?.dispatch?.(doorId, 'command', cmd, api, state, args);
         if (handled === 'leave') {
-          try { DoorManager?.leave?.(api, state); } catch {}
-          api.setPrompt && api.setPrompt('DIS>');
-          api.setInputType && api.setInputType('text', 'type /help for commands'); // reset hint
-          routeGo(api, state, 'menu');
+          exitDoor();
           return;
         }
         if (handled) return;
@@ -1868,6 +1888,19 @@ if (DoorManager && typeof DoorManager.register === 'function') {
     console.log('[doors] registered:', listed.map(d => d.id).join(', ') || '(none)');
   } catch (e) {
     console.error('TinyQuest register failed:', e && e.message ? e.message : e);
+  }
+  try {
+    if (astroblasterDoor) {
+      if (typeof astroblasterDoor === 'function') {
+        DoorManager.register('astroblaster', astroblasterDoor, { name: 'AstroBlaster' });
+      } else {
+        DoorManager.register(astroblasterDoor);
+      }
+    }
+    const listed = DoorManager.list ? DoorManager.list() : [];
+    console.log('[doors] registered:', listed.map(d => d.id).join(', ') || '(none)');
+  } catch (e) {
+    console.error('AstroBlaster register failed:', e && e.message ? e.message : e);
   }
   try {
     if (lordDoor) {

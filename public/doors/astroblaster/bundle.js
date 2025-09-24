@@ -1,9 +1,15 @@
 // Registers a simple canvas door named 'astroblaster'
 window.DDR_Doors = window.DDR_Doors || {};
 window.DDR_Doors['astroblaster'] = function DoorFactory(ctx){
-  const { mount, send } = ctx;
+  const { mount, send, opts } = ctx;
   const canvas = document.createElement('canvas');
-  const W = canvas.width = 720, H = canvas.height = 420;
+  const desiredW = opts && opts.width ? Math.max(320, Math.min(1024, parseInt(opts.width, 10) || 720)) : 720;
+  const desiredH = opts && opts.height ? Math.max(240, Math.min(720, parseInt(opts.height, 10) || 420)) : 420;
+  canvas.width = desiredW;
+  canvas.height = desiredH;
+  canvas.style.width = desiredW + 'px';
+  canvas.style.height = desiredH + 'px';
+  const W = canvas.width, H = canvas.height;
   mount.appendChild(canvas);
   const g = canvas.getContext('2d');
 

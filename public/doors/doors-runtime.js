@@ -35,7 +35,7 @@
     }
 
     // Boot the door
-    const api = factory({ mount, send });
+    const api = factory({ mount, send, opts });
     doors.set(slug, { api, mount, cleanup: api?.destroy || null });
   }
 
