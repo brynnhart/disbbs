@@ -111,6 +111,10 @@
       if (typeof sess.inst.handleCommand === 'function') return !!sess.inst.handleCommand(cmd, extra, api, state);
       return false;
     }
+    if (kind === 'event') {
+      if (typeof sess.inst.handleEvent === 'function') return sess.inst.handleEvent(payload, api, state);
+      return false;
+    }
     return false;
   }
 
