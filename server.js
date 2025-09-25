@@ -181,7 +181,7 @@ function printDayDivider(batchApi, epochSec){
 function splashSVG(){
   return [
     '<div class="svg-splash-wrap">',
-    '<svg class="svg-splash" viewBox="0 0 1200 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Dead Internet Society">',
+    '<svg class="svg-splash" viewBox="0 0 1200 550" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Dead Internet Society">',
     '<defs>',
     '<linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#19C3C3"/><stop offset="100%" stop-color="#CC66FF"/></linearGradient>',
     '<filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>',
@@ -310,6 +310,7 @@ function renderSplash(api, state){
     b.printHTML(splashSVG());
     b.print('Enter username to log in', 'cyan');
     b.print('or type /register <user> <pass> <invite> to create a new account.', 'dim');
+     b.print('Accounts removed after 60 days of inactivity. Issues? sysop@disbbs.org', 'red');
     b.setInputType('text', 'Username or /register');
   });
   state.login.step='username'; state.login.tempUser='';
