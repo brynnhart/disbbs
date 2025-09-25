@@ -11,7 +11,7 @@ const { createRockoService } = require('./src/services/rocko');
 const formatting = require('./src/utils/formatting');
 const timeUtils = require('./src/utils/time');
 
-let DoorManager, tinyquestDoor, lordDoor, casinoDoor, astroblasterDoor;
+let DoorManager, tinyquestDoor, lordDoor, casinoDoor, astroblasterDoor, graffitiDoor;
 try {
   const DM = require('./doors/manager');
   DoorManager = DM?.DoorManager || DM;
@@ -19,6 +19,7 @@ try {
   lordDoor = require('./doors/lord');
   casinoDoor = require('./doors/casino');
   astroblasterDoor = require('./doors/astroblaster');
+  graffitiDoor = require('./doors/graffiti');
 } catch (e) {
   console.error('Doors load failed:', e && e.message ? e.message : e);
 }
@@ -1747,6 +1748,10 @@ function handleGlobalCommand(cmd, api, state, args){
 wss.on('connection', (ws) => {
   HUB.clients.add(ws);
   const api = makeApi(ws);
+  if (api && typeof api === 'object') {
+    api.__statements = statements;
+    api.__helpers = helpers;
+  }
   const state = makeInitialState();
   ws.__ctx = { state };
 
@@ -1790,12 +1795,13 @@ wss.on('connection', (ws) => {
 
     if (msg.type !== 'input') return;
 
-    const raw = String(msg.raw || '').trim();
-    if (!raw) return;
+    const rawOriginal = String(msg.raw ?? '');
+    const rawTrimmed = rawOriginal.trim();
+    if (!rawTrimmed && !inDoor) return;
 
     // Slash commands
-    if (raw.startsWith('/')) {
-      const [head, ...rest] = raw.slice(1).split(/\s+/);
+    if (rawTrimmed.startsWith('/')) {
+      const [head, ...rest] = rawTrimmed.slice(1).split(/\s+/);
       const cmd  = head.toLowerCase();
       const args = rest;
 
@@ -1831,18 +1837,20 @@ wss.on('connection', (ws) => {
 
     // Raw input
     if (inDoor) {
-      const consumed = DoorManager?.dispatch?.(doorId, 'raw', raw, api, state);
+      const consumed = DoorManager?.dispatch?.(doorId, 'raw', rawOriginal, api, state);
       if (consumed) return;
       api.print('Game did not accept input. Use /leave to exit.', 'yellow');
       return;
     }
 
+    if (!rawTrimmed) return;
+
     // === Raw input outside a door → route by current screen ===
-    if (state.currentScreen === 'splash')     { splashHandleRaw && splashHandleRaw(raw, api, state); return; }
-    if (state.currentScreen === 'chat')       { chatHandleRaw && chatHandleRaw(raw, api, state);     return; }
-    if (state.currentScreen === 'adminchat')  { adminChatHandleRaw && adminChatHandleRaw(raw, api, state); return; }
-    if (state.currentScreen === 'topic')      { topicHandleRaw && topicHandleRaw(raw, api, state);   return; }
-    if (state.currentScreen === 'news:item')  { newsItemHandleRaw && newsItemHandleRaw(raw, api, state); return; }
+    if (state.currentScreen === 'splash')     { splashHandleRaw && splashHandleRaw(rawTrimmed, api, state); return; }
+    if (state.currentScreen === 'chat')       { chatHandleRaw && chatHandleRaw(rawTrimmed, api, state);     return; }
+    if (state.currentScreen === 'adminchat')  { adminChatHandleRaw && adminChatHandleRaw(rawTrimmed, api, state); return; }
+    if (state.currentScreen === 'topic')      { topicHandleRaw && topicHandleRaw(rawTrimmed, api, state);   return; }
+    if (state.currentScreen === 'news:item')  { newsItemHandleRaw && newsItemHandleRaw(rawTrimmed, api, state); return; }
     if (state.currentScreen === 'board')      { api.print('Use /topic <id> or /newtopic <title>.', 'dim'); return; }
 
     // Fallback
@@ -1937,6 +1945,19 @@ if (DoorManager && typeof DoorManager.register === 'function') {
     console.log('[doors] registered:', listed.map(d => d.id).join(', ') || '(none)');
   } catch (e) {
     console.error('Casino register failed:', e && e.message ? e.message : e);
+  }
+  try {
+    if (graffitiDoor) {
+      if (typeof graffitiDoor === 'function') {
+        DoorManager.register('graffiti', graffitiDoor, { name: 'Graffiti Wall' });
+      } else {
+        DoorManager.register(graffitiDoor);
+      }
+    }
+    const listed = DoorManager.list ? DoorManager.list() : [];
+    console.log('[doors] registered:', listed.map(d => d.id).join(', ') || '(none)');
+  } catch (e) {
+    console.error('Graffiti register failed:', e && e.message ? e.message : e);
   }
 }
 

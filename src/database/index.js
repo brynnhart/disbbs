@@ -164,6 +164,16 @@ CREATE TABLE IF NOT EXISTS announcements (
 CREATE INDEX IF NOT EXISTS idx_announcements_expires_at ON announcements(expires_at);
 CREATE INDEX IF NOT EXISTS idx_announcements_created_at ON announcements(created_at);
 
+/* Graffiti Door */
+CREATE TABLE IF NOT EXISTS graffiti_cells (
+  x INTEGER NOT NULL,
+  y INTEGER NOT NULL,
+  color TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  PRIMARY KEY (x, y)
+);
+
 CREATE TABLE IF NOT EXISTS users (
    id INTEGER PRIMARY KEY AUTOINCREMENT,
    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -417,6 +427,17 @@ CREATE TABLE IF NOT EXISTS users (
      WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')
   `);
 
+  const selectGraffitiCells = db.prepare('SELECT x, y, color FROM graffiti_cells');
+  const upsertGraffitiCell = db.prepare(`
+    INSERT INTO graffiti_cells (x, y, color, updated_at, updated_by)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(x, y) DO UPDATE SET
+      color = excluded.color,
+      updated_at = excluded.updated_at,
+      updated_by = excluded.updated_by
+  `);
+  const deleteGraffitiCell = db.prepare('DELETE FROM graffiti_cells WHERE x = ? AND y = ?');
+
   const sweepInactiveUsers = db.prepare(`
     DELETE FROM users
      WHERE is_admin = 0
@@ -655,6 +676,9 @@ CREATE TABLE IF NOT EXISTS users (
     listAnnouncements,
     deleteAnnouncementById,
     sweepExpiredAnnouncements,
+    selectGraffitiCells,
+    upsertGraffitiCell,
+    deleteGraffitiCell,
     sweepInactiveUsers,
     updateUserNorms,
     getUsersByNorm,

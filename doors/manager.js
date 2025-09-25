@@ -14,7 +14,7 @@
   // ────────────────────────────────────────────────────────────────────────────
   // Registry + sessions
   const registry = new Map();          // id -> { id, name, create(api,state,meta) }
-  const sessions = new WeakMap();      // ws -> { id, inst }
+  const sessions = new Map();          // ws -> { id, inst, api, state }
 
   function normId(x){ return String(x||'').trim().toLowerCase(); }
 
@@ -73,7 +73,7 @@
 
     // create instance for this connection
     const inst = rec.create(api, state, { id: rec.id, name: rec.name });
-    sessions.set(ws, { id: rec.id, inst });
+    sessions.set(ws, { id: rec.id, inst, api, state });
     // allow the door to print its banner/prompt
     if (typeof inst.enter === 'function') inst.enter(api, state);
     return true;
@@ -86,6 +86,26 @@
     try { sess.inst && typeof sess.inst.leave === 'function' && sess.inst.leave(api, state); }
     finally { sessions.delete(ws); }
     return true;
+  }
+
+  function broadcastEvent(id, payload, { except } = {}){
+    const target = normId(id);
+    if (!target) return 0;
+    let delivered = 0;
+    sessions.forEach((sess, ws) => {
+      if (!sess || normId(sess.id) !== target) return;
+      if (except && ws === except) return;
+      const inst = sess.inst;
+      if (inst && typeof inst.handleEvent === 'function') {
+        try {
+          inst.handleEvent(payload, sess.api, sess.state);
+          delivered += 1;
+        } catch (err) {
+          try { console.error('Door broadcast failed:', err); } catch {}
+        }
+      }
+    });
+    return delivered;
   }
 
   function current(ws){
@@ -140,6 +160,8 @@
     register, list, enter, leave,
     // routing helpers used by your server
     dispatch, handleRaw, handleCommand, current,
+    // broadcast helper
+    broadcastEvent,
     // tiny debug
     _debug(){ return { registry: list() }; }
   };
