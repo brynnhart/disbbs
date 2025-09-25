@@ -417,6 +417,12 @@ CREATE TABLE IF NOT EXISTS users (
      WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')
   `);
 
+  const sweepInactiveUsers = db.prepare(`
+    DELETE FROM users
+     WHERE is_admin = 0
+       AND COALESCE(last_login_at, created_at) <= strftime('%s','now') - ?
+  `);
+
   const updateUserNorms = db.prepare(`
     UPDATE users
        SET username_norm     = ?,
@@ -488,6 +494,7 @@ CREATE TABLE IF NOT EXISTS users (
   defSetting('status_retention_days', 30);
   defSetting('status_max_len', 280);
   defSetting('status_feed_limit', 50);
+  defSetting('user_inactive_days', 60);
 
   function normalizeHandle(s){
     if (!s) return '';
@@ -648,6 +655,7 @@ CREATE TABLE IF NOT EXISTS users (
     listAnnouncements,
     deleteAnnouncementById,
     sweepExpiredAnnouncements,
+    sweepInactiveUsers,
     updateUserNorms,
     getUsersByNorm,
     listUsersBasic,

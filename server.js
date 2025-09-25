@@ -154,6 +154,7 @@ const {
   listAnnouncements,
   deleteAnnouncementById,
   sweepExpiredAnnouncements,
+  sweepInactiveUsers,
   updateUserNorms,
   getUsersByNorm,
   listUsersBasic,
@@ -1868,10 +1869,18 @@ function runSuggestionSweep(){ try { sweepExpiredSuggestions.run(); } catch {} }
 function runStatusPostSweep(){ try { sweepExpiredStatusPosts.run(); } catch {} }
 function runAdminChatSweep(){ try { sweepExpiredAdminMessages.run(); } catch {} }
 function runAnnouncementSweep(){ try { sweepExpiredAnnouncements.run(); } catch {} }
+function runInactiveUserSweep(){
+  try {
+    const maxAgeSeconds = inactiveUserAgeSeconds();
+    if (maxAgeSeconds > 0) {
+      sweepInactiveUsers.run(maxAgeSeconds);
+    }
+  } catch {}
+}
 
 
 setInterval(()=>{
-  runChatSweep(); runDMSweep(); runInviteSweep(); runSuggestionSweep(); runStatusPostSweep(); runBoardSweep(); runNewsSweep(); runAdminChatSweep(); runAnnouncementSweep();
+  runChatSweep(); runDMSweep(); runInviteSweep(); runSuggestionSweep(); runStatusPostSweep(); runBoardSweep(); runNewsSweep(); runAdminChatSweep(); runAnnouncementSweep(); runInactiveUserSweep();
 }, 10 * 60 * 1000);
 
 /* ======================= Doors boot (optional) ======================= */
@@ -1935,6 +1944,11 @@ if (DoorManager && typeof DoorManager.register === 'function') {
 
 function retentionSecondsAdmin(){
   const days = +(getSetting.get('admin_chat_retention_days')?.value || 7);
+  return days > 0 ? days*86400 : 0;
+}
+
+function inactiveUserAgeSeconds(){
+  const days = +(getSetting.get('user_inactive_days')?.value || 60);
   return days > 0 ? days*86400 : 0;
 }
 
