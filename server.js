@@ -11,14 +11,12 @@ const { createRockoService } = require('./src/services/rocko');
 const formatting = require('./src/utils/formatting');
 const timeUtils = require('./src/utils/time');
 
-let DoorManager, tinyquestDoor, lordDoor, casinoDoor, astroblasterDoor;
+let DoorManager, lordDoor, casinoDoor;
 try {
   const DM = require('./doors/manager');
   DoorManager = DM?.DoorManager || DM;
-  tinyquestDoor = require('./doors/tinyquest');
   lordDoor = require('./doors/lord');
   casinoDoor = require('./doors/casino');
-  astroblasterDoor = require('./doors/astroblaster');
 } catch (e) {
   console.error('Doors load failed:', e && e.message ? e.message : e);
 }
@@ -1887,32 +1885,6 @@ setInterval(()=>{
 /* ======================= Doors boot (optional) ======================= */
 if (DoorManager && typeof DoorManager.register === 'function') {
   try {
-    if (tinyquestDoor) {
-      if (typeof tinyquestDoor === 'function') {
-        DoorManager.register('tinyquest', tinyquestDoor, { name: 'TinyQuest' });
-      } else {
-        DoorManager.register(tinyquestDoor); // expects { id:'tinyquest', name:'TinyQuest', create(...) }
-      }
-    }
-    const listed = DoorManager.list ? DoorManager.list() : [];
-    console.log('[doors] registered:', listed.map(d => d.id).join(', ') || '(none)');
-  } catch (e) {
-    console.error('TinyQuest register failed:', e && e.message ? e.message : e);
-  }
-  try {
-    if (astroblasterDoor) {
-      if (typeof astroblasterDoor === 'function') {
-        DoorManager.register('astroblaster', astroblasterDoor, { name: 'AstroBlaster' });
-      } else {
-        DoorManager.register(astroblasterDoor);
-      }
-    }
-    const listed = DoorManager.list ? DoorManager.list() : [];
-    console.log('[doors] registered:', listed.map(d => d.id).join(', ') || '(none)');
-  } catch (e) {
-    console.error('AstroBlaster register failed:', e && e.message ? e.message : e);
-  }
-  try {
     if (lordDoor) {
       if (typeof lordDoor === 'function') {
         DoorManager.register('LORD', lordDoor, { name: 'Legend of the Redux Dragon' });
@@ -1928,7 +1900,7 @@ if (DoorManager && typeof DoorManager.register === 'function') {
   try {
     if (casinoDoor) {
       if (typeof casinoDoor === 'function') {
-        DoorManager.register('LORD', casinoDoor, { name: 'Casino' });
+        DoorManager.register('casino', casinoDoor, { name: 'Casino' });
       } else {
         DoorManager.register(casinoDoor); // expects { id:'tinyquest', name:'TinyQuest', create(...) }
       }

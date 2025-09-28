@@ -246,8 +246,8 @@ module.exports = {
     // Other screens
     function forestMenu(p){ printHeader('The Forest'); showStatus(p);
       if (p.daily.forestTurns<=0) api.print('You are out of turns for today. Sleep at the Inn.','yellow');
-      else { api.print('Hunt) Hunt for monsters'); api.print('S) Search for gold'); }
-      api.print('V) Return to Town Square'); api.hr(); api.print('Type: hunt, search, or v.','dim'); }
+      else { api.print('H) Hunt for monsters'); api.print('S) Search for gold'); }
+      api.print('V) Return to Town Square'); api.hr(); api.print('Type: h, s, or v.','dim'); }
     function innMenu(p){ printHeader('The Dark Cloak Inn'); showStatus(p);
       api.print('R) Rent a room and sleep (end your day, restore HP, refresh turns)'); api.print('V) Return to Town Square'); api.hr(); api.print('Type: r or v','dim'); }
     function smithMenu(p){ printHeader('The Blacksmith'); showStatus(p);
@@ -335,9 +335,9 @@ module.exports = {
       const k=t.toLowerCase();
       if (k==='v'){ p.screen='town'; return render(p); }
       if (p.daily.forestTurns<=0) return api.print('No turns left today. Sleep at the Inn.','yellow');
-      if (k.startsWith('hunt')||k==='h'){ p.combat=genEnemy(p); p.screen='combat'; return render(p); }
-      if (k.startsWith('search')||k==='s'){ const gold=randInt(2,15)+randInt(0,p.level); p.daily.forestTurns--; p.gold+=gold; api.print(`You find ${gold} gold.`,'green'); savePlayer(p); return render(p); }
-      api.print('Type hunt, search, or v.','dim');
+      if (k.startsWith('h')||k==='h'){ p.combat=genEnemy(p); p.screen='combat'; return render(p); }
+      if (k.startsWith('s')||k==='s'){ const gold=randInt(2,15)+randInt(0,p.level); p.daily.forestTurns--; p.gold+=gold; api.print(`You find ${gold} gold.`,'green'); savePlayer(p); return render(p); }
+      api.print('Type h, s, or v.','dim');
     }
     function onCombat(p,t){ const k=t.toLowerCase(); if (k==='a'||k.startsWith('att')) return doAttackRound(p); if (k==='f'||k.startsWith('fl')) return doFlee(p); if (k==='i'){ renderCombat(p); return; } api.print('Options: A)ttack, F)lee, I)nspect','dim'); }
     function onInn(p,t){ const k=t.toLowerCase(); if (k==='v'){ p.screen='town'; return render(p); } if (k==='r'){ p.dayCount++; p.hp=p.maxHp; p.daily=defaultDaily(); api.print('You sleep soundly. A new day dawns.','green'); savePlayer(p); p.screen='town'; return render(p); } api.print('Type r to sleep, or v to return.','dim'); }
