@@ -260,6 +260,8 @@ module.exports = {
     // BALANCE / ECONOMY CONSTANTS
     const ECON_DEBUG_LOG = (process.env.ECON_DEBUG_LOG === 'true');
     const INTEREST_RATE = 0.01;
+    const FOREST_TURNS_PER_DAY = 10;
+    const TAVERN_DRINK_MAX = 2;
     const DUEL_GOLD_TAKE_RATE = 0.05;
     const SEARCH_GOLD_MIN = 2;
     const SEARCH_GOLD_MAX = 15;
@@ -798,8 +800,9 @@ module.exports = {
     function defaultDaily(baseDate){
       const key = baseDate || todayKey();
       return {
-        forestTurns:10,
-        tavernDrinks:2,
+        forestTurns:FOREST_TURNS_PER_DAY,
+        tavernDrinks:TAVERN_DRINK_MAX,
+        tavernDrinkMax:TAVERN_DRINK_MAX,
         heals:DAILY_HEALS,
         slept:false,
         duelUsed:false,
@@ -815,8 +818,9 @@ module.exports = {
     function normalizeDaily(d){
       const today = todayKey();
       if (!d) return defaultDaily(today);
-      if (typeof d.forestTurns === 'undefined') d.forestTurns = 10;
-      if (typeof d.tavernDrinks === 'undefined') d.tavernDrinks = 2;
+      if (typeof d.forestTurns === 'undefined') d.forestTurns = FOREST_TURNS_PER_DAY;
+      if (typeof d.tavernDrinks === 'undefined') d.tavernDrinks = TAVERN_DRINK_MAX;
+      if (typeof d.tavernDrinkMax !== 'number') d.tavernDrinkMax = TAVERN_DRINK_MAX;
       if (typeof d.heals === 'undefined') d.heals = DAILY_HEALS;
       if (typeof d.slept === 'undefined') d.slept = false;
       if (typeof d.duelUsed === 'undefined') d.duelUsed = false;
@@ -837,6 +841,28 @@ module.exports = {
       p.daily.interestDate = key;
       if (interest > 0 && typeof addNews === 'function') addNews(`${p.name} earned ${interest} gold interest in the bank.`);
       return interest;
+    }
+
+    function ensureNewDay(player){
+      if (!player) return false;
+      player.daily = normalizeDaily(player.daily);
+      const today = todayKey();
+      if (player.daily.lastDate === today) return false;
+      const interestAlreadyApplied = player.daily.interestDate === today;
+      let interestGained = 0;
+      if (!interestAlreadyApplied){
+        const applied = applyBankInterest(player, today);
+        if (typeof applied === 'number') interestGained = applied;
+      }
+      const refreshed = defaultDaily(today);
+      refreshed.interestDate = today;
+      player.daily = refreshed;
+      savePlayer(player);
+      api.print('A new day has begun. Your turns are refreshed.','green');
+      if (interestGained > 0){
+        api.print(`Your bank earns ${interestGained} gold interest.`, 'green');
+      }
+      return true;
     }
 
     function toRow(p){
@@ -2982,27 +3008,13 @@ module.exports = {
       let p = dbGetPlayer();
       if (!p){ p=defaultPlayer(fallbackName,null); p.screen='create:name'; p.temp={ name:fallbackName, step:'name' }; savePlayer(p); }
 
+      ensureNewDay(p);
+
       const nowTs = nowEpoch();
       p.lastSeen = nowTs;
       savePlayer(p);
 
       p.daily = normalizeDaily(p.daily);
-      const today = todayKey();
-      if (p.daily.lastDate !== today){
-        const lastDate = p.daily.lastDate;
-        if (p.daily.interestDate !== lastDate){
-          api.print('A new day has begun. Your turns are refreshed.','green');
-          let interest = applyBankInterest(p, lastDate || today);
-          if (interest === null) interest = 0;
-          api.print(`Your bank earns ${interest} gold interest.`, interest>0 ? 'green' : 'dim');
-          const refreshed = defaultDaily(today);
-          p.daily = refreshed;
-        } else {
-          p.daily.lastDate = today;
-        }
-        if (p.daily) p.daily.jewelerPurchases = 0;
-        savePlayer(p);
-      }
 
       // Creation flow
       if (p.screen==='create:name'){ const name = raw || fallbackName; p.temp={ name, step:'gender' }; p.screen='create:gender'; savePlayer(p); render(p); return true; }
