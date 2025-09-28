@@ -96,6 +96,8 @@ module.exports = {
     const DRAGON_FIND_CHANCE = 0.15;
     const DRAGON_GOLD_MIN = 500;
     const DRAGON_GOLD_MAX = 700;
+    const CAMP_HEAL_PCT = 0.30;
+    const DAILY_HEALS = 2;
     function timeLeftMMSS() {
       const now = new Date(); const end = new Date(now); end.setHours(23,59,59,999);
       const s = Math.max(0, Math.floor((end - now)/1000));
@@ -162,14 +164,14 @@ module.exports = {
     }
     function defaultDaily(baseDate){
       const key = baseDate || todayKey();
-      return { forestTurns:10, tavernDrinks:2, heals:3, slept:false, duelUsed:false, lastDate:key, interestDate:null };
+      return { forestTurns:10, tavernDrinks:2, heals:DAILY_HEALS, slept:false, duelUsed:false, lastDate:key, interestDate:null };
     }
     function normalizeDaily(d){
       const today = todayKey();
       if (!d) return defaultDaily(today);
       if (typeof d.forestTurns === 'undefined') d.forestTurns = 10;
       if (typeof d.tavernDrinks === 'undefined') d.tavernDrinks = 2;
-      if (typeof d.heals === 'undefined') d.heals = 3;
+      if (typeof d.heals === 'undefined') d.heals = DAILY_HEALS;
       if (typeof d.slept === 'undefined') d.slept = false;
       if (typeof d.duelUsed === 'undefined') d.duelUsed = false;
       if (!d.lastDate || typeof d.lastDate !== 'string') d.lastDate = today;
@@ -352,14 +354,23 @@ module.exports = {
 
     // Other screens
     function forestMenu(p){ printHeader('The Forest'); showStatus(p);
-      if (p.daily.forestTurns<=0) api.print('You are out of turns for today. Sleep at the Inn.','yellow');
-      else {
-        api.print('H) Hunt for monsters'); api.print('S) Search for gold');
-        if (p.level >= DRAGON_LEVEL_REQ) api.print('D) Search for the Dragon');
+      const prompts=[];
+      if (p.daily.heals>0){ api.print('H) Camp Heal'); prompts.push('h'); }
+      if (p.daily.forestTurns<=0){
+        api.print('You are out of turns for today. Sleep at the Inn.','yellow');
+      } else {
+        api.print('M) Hunt for monsters'); prompts.push('m');
+        api.print('S) Search for gold'); prompts.push('s');
+        if (p.level >= DRAGON_LEVEL_REQ){ api.print('D) Search for the Dragon'); prompts.push('d'); }
       }
-      api.print('V) Return to Town Square'); api.hr();
-      const prompt=(p.level>=DRAGON_LEVEL_REQ && p.daily.forestTurns>0)?'Type: h, s, d, or v.':'Type: h, s, or v.';
-      api.print(prompt,'dim'); }
+      api.print('V) Return to Town Square'); prompts.push('v'); api.hr();
+      if (!prompts.length) return;
+      const promptList = prompts.length === 1
+        ? prompts[0]
+        : prompts.length === 2
+          ? `${prompts[0]} or ${prompts[1]}`
+          : `${prompts.slice(0, -1).join(', ')}, or ${prompts[prompts.length - 1]}`;
+      api.print(`Type: ${promptList}.`,'dim'); }
     function innMenu(p){ printHeader('The Dark Cloak Inn'); showStatus(p);
       api.print('R) Rent a room and sleep (end your day, restore HP, refresh turns)'); api.print('V) Return to Town Square'); api.hr(); api.print('Type: r or v','dim'); }
     function smithMenu(p){ printHeader('The Blacksmith'); showStatus(p);
@@ -547,10 +558,29 @@ module.exports = {
       api.print('Try a letter like F,K,A,V or a place name (forest, inn, bank…).','dim');
     }
     function onForest(p,t){
-      const k=t.toLowerCase();
-      if (k==='v'){ p.screen='town'; return render(p); }
+      const raw=t.trim().toLowerCase();
+      if (raw==='v'){ p.screen='town'; return render(p); }
+      let k=raw;
+      const wantsHeal = raw==='h' || raw==='heal' || raw==='camp' || raw==='camp heal';
+      if (wantsHeal && p.daily.heals>0){
+        const before=p.hp;
+        const healAmt=Math.ceil(p.maxHp * CAMP_HEAL_PCT);
+        p.hp=clamp(p.hp+healAmt,0,p.maxHp);
+        const gained=p.hp-before;
+        p.daily.heals=Math.max(0, p.daily.heals-1);
+        api.print(`You rest at camp and recover ${gained} HP. Camp heals left: ${p.daily.heals}.`, gained>0 ? 'green' : 'dim');
+        savePlayer(p);
+        return render(p);
+      }
+      if (wantsHeal){
+        if (raw==='h' && p.daily.forestTurns>0){
+          k='hunt';
+        } else {
+          return api.print('You have no camp heals remaining today.','yellow');
+        }
+      }
       if (p.daily.forestTurns<=0) return api.print('No turns left today. Sleep at the Inn.','yellow');
-      if (k.startsWith('h')||k==='h'){ p.combat=genEnemy(p); p.screen='combat'; return render(p); }
+      if (k==='m'||k.startsWith('m')||k.startsWith('hunt')||k.startsWith('fight')){ p.combat=genEnemy(p); p.screen='combat'; return render(p); }
       if (k.startsWith('s')||k==='s'){ const gold=randInt(2,15)+randInt(0,p.level); p.daily.forestTurns--; p.gold+=gold; api.print(`You find ${gold} gold.`,'green'); savePlayer(p); return render(p); }
       if (k.startsWith('d')||k==='d'){
         if (p.level < DRAGON_LEVEL_REQ) return api.print('The legends warn that the Dragon is beyond your skill for now.','yellow');
@@ -560,8 +590,19 @@ module.exports = {
         api.print('A thunderous roar shakes the canopy — the Ancient Dragon descends!','red');
         p.combat=dragon; p.screen='combat'; savePlayer(p); return render(p);
       }
-      const opts=(p.level>=DRAGON_LEVEL_REQ)?'Type h, s, d, or v.':'Type h, s, or v.';
-      api.print(opts,'dim');
+      const options=[];
+      if (p.daily.heals>0) options.push('h');
+      if (p.daily.forestTurns>0){
+        options.push('m','s');
+        if (p.level >= DRAGON_LEVEL_REQ) options.push('d');
+      }
+      options.push('v');
+      const optsText = options.length === 1
+        ? options[0]
+        : options.length === 2
+          ? `${options[0]} or ${options[1]}`
+          : `${options.slice(0, -1).join(', ')}, or ${options[options.length - 1]}`;
+      api.print(`Type: ${optsText}.`,'dim');
     }
     function onCombat(p,t){ const k=t.toLowerCase(); if (k==='a'||k.startsWith('att')) return doAttackRound(p); if (k==='f'||k.startsWith('fl')) return doFlee(p); if (k==='i'){ renderCombat(p); return; } api.print('Options: A)ttack, F)lee, I)nspect','dim'); }
     function onInn(p,t){
