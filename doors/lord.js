@@ -104,6 +104,20 @@ module.exports = {
       { name:'Knight', def:11, cost:1600 }, { name:'Dragon Scale', def:15, cost:3600 },
     ];
     const xpToNext = (level) => 20 + level * 15;
+    function applyLevelUps(p){
+      let leveled = false;
+      while (p.xp >= xpToNext(p.level)){
+        const needed = xpToNext(p.level);
+        p.xp -= needed;
+        p.level += 1;
+        const hpGain = 5 + randInt(0,5);
+        p.maxHp += hpGain;
+        p.hp = p.maxHp;
+        api.print(`You reach Level ${p.level}! Max HP +${hpGain}.`,'magenta');
+        leveled = true;
+      }
+      return leveled;
+    }
 
     // Player identity from BBS
     const userId = state.userId;
@@ -280,7 +294,17 @@ module.exports = {
     function stubMenu(title, p){ printHeader(title); showStatus(p);
       api.print('Coming soon.','yellow'); api.print('V) Return to Town Square'); api.hr(); api.print('Type: v','dim'); }
     function duelsMenu(p){ stubMenu('The Dueling Grounds', p); }
-    function trainingMenu(p){ stubMenu('Warrior Training', p); }
+    function trainingMenu(p){
+      printHeader(`Turgon's Warrior Training`);
+      showStatus(p);
+      api.print('S) Sparring — hone your edge (+10 xp) — Cost: 80 gold');
+      api.print('E) Endurance drills — toughen up (+3 Max HP) — Cost: 120 gold');
+      api.print('W) Swagger lessons — polish your charm (+1 Charm, cap 10) — Cost: 60 gold');
+      if (p.charm >= 10) api.print('Your charm already dazzles the realm; further swagger is impossible.','dim');
+      api.print('V) Return to Town Square');
+      api.hr();
+      api.print('Type: s, e, w, or v.','dim');
+    }
     function newsMenu(p){ stubMenu('Daily News', p); }
     function mailMenu(p){ stubMenu('Write Mail', p); }
     function conjugalityMenu(p){ stubMenu('Conjugality List', p); }
@@ -299,7 +323,7 @@ module.exports = {
       e.hp=Math.max(0, e.hp-dmgToEnemy); api.print(`You strike the ${e.name} for ${dmgToEnemy}.`,'green');
       if (e.hp<=0){ const gold=randInt(10,20)+p.level*randInt(5,10); const xp=randInt(8,12)+p.level*randInt(2,4);
         p.kills++; p.daily.forestTurns=Math.max(0, p.daily.forestTurns-1); p.gold+=gold; p.xp+=xp; api.print(`Victory! You gain ${gold} gold and ${xp} xp.`,'cyan');
-        while (p.xp>=xpToNext(p.level)){ p.xp-=xpToNext(p.level); p.level+=1; const hpGain=5+randInt(0,5); p.maxHp+=hpGain; p.hp=p.maxHp; api.print(`You reach Level ${p.level}! Max HP +${hpGain}.`,'magenta'); }
+        applyLevelUps(p);
         p.combat=null; savePlayer(p); api.hr(); p.screen='forest'; return render(p); }
       const dmgToYou=Math.max(1, e.atk + randInt(0,3) - ARMOR[p.armorIdx].def);
       p.hp=Math.max(0, p.hp-dmgToYou); api.print(`The ${e.name} hits you for ${dmgToYou}.`,'yellow');
@@ -392,7 +416,29 @@ module.exports = {
       api.print('Type g (gossip), d (drink), or v.','dim'); }
     function onStatus(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
     function onDuel(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
-    function onTraining(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
+    function onTraining(p,t){
+      const k=t.trim().toLowerCase();
+      if (k==='v'){ p.screen='town'; return render(p); }
+      if (k==='s'||k.startsWith('spar')){
+        if (p.gold < 80) return api.print('Turgon grunts: "Come back with more gold."','yellow');
+        p.gold -= 80; p.xp += 10; api.print('You spar with Turgon and feel sharper. (+10 xp)','green');
+        applyLevelUps(p); savePlayer(p); return render(p);
+      }
+      if (k==='e'||k.startsWith('end')){
+        if (p.gold < 120) return api.print('The drills are not free — earn more coin first.','yellow');
+        p.gold -= 120; p.maxHp += 3; p.hp = Math.min(p.maxHp, p.hp + 3);
+        api.print('Endurance training leaves you hardier. Max HP +3.','green');
+        savePlayer(p); return render(p);
+      }
+      if (k==='w'||k.startsWith('swag')||k.startsWith('charm')){
+        if (p.charm >= 10) return api.print('Turgon laughs: "Your swagger is already legendary."','yellow');
+        if (p.gold < 60) return api.print('Swagger lessons require coin you do not possess.','yellow');
+        p.gold -= 60; p.charm = clamp(p.charm + 1, 0, 10);
+        api.print('You perfect a roguish grin. Charm +1.','green');
+        savePlayer(p); return render(p);
+      }
+      api.print('Type s (sparring), e (endurance), w (swagger), or v to return.','dim');
+    }
     function onNews(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
     function onMail(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
     function onConjugality(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
