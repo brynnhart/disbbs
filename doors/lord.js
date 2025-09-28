@@ -9,12 +9,17 @@ module.exports = {
     // Safe/lazy DB — fallback to memory if anything fails
     const G = (globalThis || global);
     const MEMKEY = '__LORD_MEM_STORE__';
-    if (!G[MEMKEY]) G[MEMKEY] = { players: new Map() };
+    if (!G[MEMKEY]) G[MEMKEY] = { players: new Map(), proposals: [], nextProposalId: 1 };
     const MEM = G[MEMKEY];
+    if (!MEM.players) MEM.players = new Map();
+    if (!Array.isArray(MEM.proposals)) MEM.proposals = [];
+    if (typeof MEM.nextProposalId !== 'number') MEM.nextProposalId = 1;
 
     let dbReady = false;
     let useDB = false;
-    let db = null, selectPlayer = null, insertPlayer = null, updatePlayer = null, topHeroesStmt = null, opponentsStmt = null;
+    let db = null, selectPlayer = null, insertPlayer = null, updatePlayer = null, topHeroesStmt = null, opponentsStmt = null,
+      selectMarriageCandidatesStmt = null, insertProposalStmt = null, selectProposalsForStmt = null, checkProposalStmt = null,
+      deleteProposalStmt = null, deleteProposalsByPlayerStmt = null, selectMarriedPairsStmt = null;
 
     function lazyInitDB() {
       if (dbReady) return;
@@ -47,26 +52,44 @@ module.exports = {
             daily_json   TEXT,
             expert       INTEGER NOT NULL DEFAULT 0,
             screen       TEXT,
-            gems         INTEGER NOT NULL DEFAULT 0
+            gems         INTEGER NOT NULL DEFAULT 0,
+            spouse_id    TEXT,
+            spouse_name  TEXT,
+            married_on   INTEGER NOT NULL DEFAULT 0
           );
           CREATE INDEX IF NOT EXISTS idx_lord_players_updated ON lord_players(updated_at DESC);
         `);
 
         db.exec(`ALTER TABLE lord_players ADD COLUMN IF NOT EXISTS gems INTEGER NOT NULL DEFAULT 0;`);
+        db.exec(`ALTER TABLE lord_players ADD COLUMN IF NOT EXISTS spouse_id TEXT;`);
+        db.exec(`ALTER TABLE lord_players ADD COLUMN IF NOT EXISTS spouse_name TEXT;`);
+        db.exec(`ALTER TABLE lord_players ADD COLUMN IF NOT EXISTS married_on INTEGER NOT NULL DEFAULT 0;`);
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS lord_proposals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_id   TEXT,
+            from_name TEXT,
+            to_id     TEXT,
+            to_name   TEXT,
+            ts        INTEGER NOT NULL
+          );
+        `);
 
         selectPlayer = db.prepare(`SELECT * FROM lord_players WHERE user_id = ?`);
         insertPlayer = db.prepare(`
           INSERT INTO lord_players (
             user_id, char_name, gender, created_at, updated_at,
             level, xp, hp, max_hp, gold, bank, weapon_idx, armor_idx,
-            charm, kills, deaths, day_count, daily_json, expert, screen, gems
-          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            charm, kills, deaths, day_count, daily_json, expert, screen, gems,
+            spouse_id, spouse_name, married_on
+          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         `);
         updatePlayer = db.prepare(`
           UPDATE lord_players
              SET char_name=?, gender=?, updated_at=?,
                  level=?, xp=?, hp=?, max_hp=?, gold=?, bank=?, weapon_idx=?, armor_idx=?,
-                 charm=?, kills=?, deaths=?, day_count=?, daily_json=?, expert=?, screen=?, gems=?
+                 charm=?, kills=?, deaths=?, day_count=?, daily_json=?, expert=?, screen=?, gems=?,
+                 spouse_id=?, spouse_name=?, married_on=?
            WHERE user_id=?
         `);
         topHeroesStmt = db.prepare(`
@@ -81,6 +104,35 @@ module.exports = {
            WHERE user_id != ?
            ORDER BY level DESC, xp DESC, kills DESC
            LIMIT 20
+        `);
+        selectMarriageCandidatesStmt = db.prepare(`
+          SELECT user_id, char_name, level, charm
+            FROM lord_players
+           WHERE user_id != ? AND (spouse_id IS NULL OR spouse_id = '')
+           ORDER BY level DESC, xp DESC, charm DESC
+           LIMIT 20
+        `);
+        insertProposalStmt = db.prepare(`
+          INSERT INTO lord_proposals (from_id, from_name, to_id, to_name, ts)
+          VALUES (?, ?, ?, ?, ?)
+        `);
+        selectProposalsForStmt = db.prepare(`
+          SELECT id, from_id, from_name, to_id, to_name, ts
+            FROM lord_proposals
+           WHERE to_id = ?
+           ORDER BY ts ASC
+           LIMIT 50
+        `);
+        checkProposalStmt = db.prepare(`
+          SELECT id FROM lord_proposals WHERE from_id = ? AND to_id = ? LIMIT 1
+        `);
+        deleteProposalStmt = db.prepare(`DELETE FROM lord_proposals WHERE id = ?`);
+        deleteProposalsByPlayerStmt = db.prepare(`DELETE FROM lord_proposals WHERE from_id = ? OR to_id = ?`);
+        selectMarriedPairsStmt = db.prepare(`
+          SELECT user_id, char_name, spouse_id, spouse_name, married_on
+            FROM lord_players
+           WHERE spouse_id IS NOT NULL AND spouse_id != ''
+           ORDER BY married_on ASC, char_name ASC
         `);
         useDB = true;
       } catch (e) {
@@ -101,6 +153,11 @@ module.exports = {
     const HEARTSTONE_HP = 2;
     const RING_CHARM_INC = 1;
     const CHARM_MAX = 10;
+    const FLIRT_GOLD_MAX = 20;
+    const FLIRT_XP_MAX = 10;
+    const PROPOSAL_DAILY_LIMIT = 1;
+    const DIVORCE_GOLD_COST = 25;
+    const DIVORCE_CHARM_COST = 1;
     const DRAGON_LEVEL_REQ = 12;
     const DRAGON_FIND_CHANCE = 0.15;
     const DRAGON_GOLD_MIN = 500;
@@ -119,6 +176,19 @@ module.exports = {
       const s = Math.max(0, Math.floor((end - now)/1000));
       const mm = String(Math.floor(s/60)).padStart(2,'0'); const ss = String(s%60).padStart(2,'0');
       return `${mm}:${ss}`;
+    }
+    function safeName(name){
+      const cleaned = String(name || '').replace(/[\x00-\x1F\x7F]/g, '').trim();
+      return cleaned || 'Unknown';
+    }
+    function formatDate(epoch){
+      if (!epoch) return 'unknown';
+      const d = new Date(epoch * 1000);
+      if (Number.isNaN(d.getTime())) return 'unknown';
+      const y = d.getFullYear();
+      const m = String(d.getMonth()+1).padStart(2,'0');
+      const day = String(d.getDate()).padStart(2,'0');
+      return `${y}-${m}-${day}`;
     }
 
     const ENEMIES = ['Rat','Mangy Wolf','Highway Thief','Goblin','Skeleton','Bandit','Ogre','Wraith','Warlock','Black Knight'];
@@ -472,7 +542,8 @@ module.exports = {
         bard:false,
         lastDate:key,
         interestDate:null,
-        jewelerPurchases:0
+        jewelerPurchases:0,
+        proposalsMade:0
       };
     }
     function normalizeDaily(d){
@@ -487,6 +558,7 @@ module.exports = {
       if (!d.lastDate || typeof d.lastDate !== 'string') d.lastDate = today;
       if (typeof d.interestDate === 'undefined') d.interestDate = null;
       if (typeof d.jewelerPurchases !== 'number') d.jewelerPurchases = 0;
+      if (typeof d.proposalsMade !== 'number') d.proposalsMade = 0;
       return d;
     }
     function applyBankInterest(p, dateKey){
@@ -508,7 +580,10 @@ module.exports = {
         weapon_idx: p.weaponIdx, armor_idx: p.armorIdx,
         charm: p.charm, kills: p.kills, deaths: p.deaths,
         day_count: p.dayCount, daily_json: JSON.stringify(normalizeDaily(p.daily)),
-        expert: p.expert ? 1 : 0, screen: p.screen, gems: p.gems || 0
+        expert: p.expert ? 1 : 0, screen: p.screen, gems: p.gems || 0,
+        spouse_id: p.spouseId || null,
+        spouse_name: p.spouseName || null,
+        married_on: p.marriedOn || 0
       };
     }
     function fromRow(r){
@@ -520,7 +595,10 @@ module.exports = {
         charm: r.charm, kills: r.kills, deaths: r.deaths,
         dayCount: r.day_count, daily: normalizeDaily(parseDaily(r.daily_json)),
         expert: !!r.expert, screen: r.screen || 'town', combat: null, temp: null,
-        gems: typeof r.gems === 'number' ? r.gems : 0
+        gems: typeof r.gems === 'number' ? r.gems : 0,
+        spouseId: r.spouse_id ? String(r.spouse_id) : null,
+        spouseName: r.spouse_name || null,
+        marriedOn: typeof r.married_on === 'number' ? r.married_on : 0
       };
     }
 
@@ -548,7 +626,8 @@ module.exports = {
       insertPlayer.run(
         r.user_id, r.char_name, r.gender, r.created_at, r.updated_at,
         r.level, r.xp, r.hp, r.max_hp, r.gold, r.bank, r.weapon_idx, r.armor_idx,
-        r.charm, r.kills, r.deaths, r.day_count, r.daily_json, r.expert, r.screen, r.gems
+        r.charm, r.kills, r.deaths, r.day_count, r.daily_json, r.expert, r.screen, r.gems,
+        r.spouse_id, r.spouse_name, r.married_on
       );
     }
     function dbUpdatePlayer(p){
@@ -558,6 +637,7 @@ module.exports = {
         r.char_name, r.gender, r.updated_at,
         r.level, r.xp, r.hp, r.max_hp, r.gold, r.bank, r.weapon_idx, r.armor_idx,
         r.charm, r.kills, r.deaths, r.day_count, r.daily_json, r.expert, r.screen, r.gems,
+        r.spouse_id, r.spouse_name, r.married_on,
         r.user_id
       );
     }
@@ -593,6 +673,124 @@ module.exports = {
     }
     function topHeroes(){ return useDB ? topHeroesStmt.all() : memTop(); }
 
+    function isMarried(p){
+      if (!p) return false;
+      const id = typeof p.spouseId === 'undefined' ? p.spouse_id : p.spouseId;
+      if (!id) return false;
+      return String(id).trim() !== '';
+    }
+    function getPendingProposalsFor(id){
+      const key = String(id);
+      if (useDB){
+        if (!selectProposalsForStmt) return [];
+        return selectProposalsForStmt.all(key).map(row => ({
+          id: row.id,
+          fromId: row.from_id ? String(row.from_id) : '',
+          fromName: safeName(row.from_name),
+          toId: row.to_id ? String(row.to_id) : '',
+          toName: safeName(row.to_name),
+          ts: row.ts
+        }));
+      }
+      return MEM.proposals
+        .filter(p => p.toId === key)
+        .map(p => ({ ...p }));
+    }
+    function hasPendingProposals(id){ return getPendingProposalsFor(id).length > 0; }
+    function hasProposalBetween(fromId, toId){
+      const fromKey = String(fromId);
+      const toKey = String(toId);
+      if (useDB){
+        if (!checkProposalStmt) return false;
+        const row = checkProposalStmt.get(fromKey, toKey);
+        return !!row;
+      }
+      return MEM.proposals.some(p => p.fromId === fromKey && p.toId === toKey);
+    }
+    function addProposalRecord(fromPlayer, toPlayer){
+      const ts = nowEpoch();
+      const entry = {
+        fromId: String(fromPlayer.userId),
+        fromName: safeName(fromPlayer.name),
+        toId: String(toPlayer.userId),
+        toName: safeName(toPlayer.name),
+        ts
+      };
+      if (useDB){
+        if (!insertProposalStmt) return;
+        insertProposalStmt.run(entry.fromId, entry.fromName, entry.toId, entry.toName, ts);
+        return;
+      }
+      const id = MEM.nextProposalId++;
+      MEM.proposals.push({ id, ...entry });
+      if (MEM.proposals.length > 200){
+        MEM.proposals.splice(0, MEM.proposals.length - 200);
+      }
+    }
+    function removeProposal(id){
+      if (useDB){
+        if (deleteProposalStmt) deleteProposalStmt.run(id);
+        return;
+      }
+      MEM.proposals = MEM.proposals.filter(p => p.id !== id);
+    }
+    function clearProposalsFor(id){
+      const key = String(id);
+      if (useDB){
+        if (deleteProposalsByPlayerStmt) deleteProposalsByPlayerStmt.run(key, key);
+        return;
+      }
+      MEM.proposals = MEM.proposals.filter(p => p.fromId !== key && p.toId !== key);
+    }
+    function listMarriageCandidates(p){
+      if (!p) return [];
+      if (useDB){
+        if (!selectMarriageCandidatesStmt) return [];
+        return selectMarriageCandidatesStmt.all(p.userId).map(row => ({
+          userId: String(row.user_id),
+          name: safeName(row.char_name),
+          level: row.level,
+          charm: row.charm || 0
+        }));
+      }
+      return [...MEM.players.values()]
+        .filter(other => other.userId !== p.userId && !isMarried(other))
+        .sort((a,b)=>(b.level-a.level)||((b.xp||0)-(a.xp||0))||((b.charm||0)-(a.charm||0)))
+        .slice(0,20)
+        .map(o => ({ userId:String(o.userId), name:safeName(o.name), level:o.level, charm:o.charm||0 }));
+    }
+    function getMarriedPairs(){
+      const seen = new Set();
+      const pairs = [];
+      const addPair = (id, name, spouseId, spouseName, marriedOn) => {
+        if (!spouseId) return;
+        const key = [String(id), String(spouseId)].sort().join(':');
+        if (seen.has(key)) return;
+        seen.add(key);
+        pairs.push({
+          aName: safeName(name),
+          bName: safeName(spouseName || ''),
+          marriedOn: typeof marriedOn === 'number' ? marriedOn : 0
+        });
+      };
+      if (useDB){
+        if (!selectMarriedPairsStmt) return [];
+        selectMarriedPairsStmt.all().forEach(row => {
+          const spouseId = row.spouse_id ? String(row.spouse_id) : null;
+          addPair(row.user_id, row.char_name, spouseId, row.spouse_name, row.married_on);
+        });
+      } else {
+        MEM.players.forEach(player => {
+          if (!isMarried(player)) return;
+          addPair(player.userId, player.name, player.spouseId, player.spouseName, player.marriedOn);
+        });
+      }
+      if (!useDB){
+        pairs.sort((a,b) => (a.marriedOn||0) - (b.marriedOn||0) || a.aName.localeCompare(b.aName));
+      }
+      return pairs;
+    }
+
     // ─────────────────────────────────────────────────────────────
     // Character creation
     function defaultPlayer(charName, gender){
@@ -603,6 +801,7 @@ module.exports = {
         level:1, xp:0, hp:30, maxHp:30, gold:50, bank:0, weaponIdx:0, armorIdx:0,
         charm:0, kills:0, deaths:0, dayCount:1, daily: defaultDaily(),
         gems:0,
+        spouseId:null, spouseName:null, marriedOn:0,
         expert:false, screen:'town', combat:null, temp:null
       };
     }
@@ -763,11 +962,47 @@ module.exports = {
       rows.forEach((r,i)=> api.print(`${i+1}. ${r.name}  Lv${r.level}  K:${r.kills} D:${r.deaths}  Riches:${r.wealth}`));
       api.hr(); api.print('V) Return to Town Square','dim'); }
     function tavernMenu(p){ printHeader('The Tavern'); showStatus(p);
-      api.print('G) Gossip — overhear a rumor'); api.print('D) Drink — regain a few HP (limited per day)');
-      if (BARD_ENABLED && !p.daily.bard){ api.print('B) Bard\'s Song — accept today\'s boon'); }
+      const bardReady = BARD_ENABLED && !p.daily.bard;
+      const married = isMarried(p);
+      const hasInbox = hasPendingProposals(p.userId);
+      api.print('G) Gossip — overhear a rumor');
+      api.print('D) Drink — regain a few HP (limited per day)');
+      if (bardReady){ api.print('B) Bard\'s Song — accept today\'s boon'); }
+      api.print('F) Flirt — flash a roguish grin');
+      if (!married){ api.print('R) Propose Marriage'); }
+      if (hasInbox){ api.print('L) View Proposals'); }
       api.print('V) Return to Town Square'); api.hr();
-      const opts = (BARD_ENABLED && !p.daily.bard) ? 'g, b, d, or v' : 'g, d, or v';
-      api.print(`Type: ${opts}`,'dim'); }
+      const opts = ['g'];
+      if (bardReady) opts.push('b');
+      opts.push('d','f');
+      if (!married) opts.push('r');
+      if (hasInbox) opts.push('l');
+      opts.push('v');
+      const hint = opts.length === 2 ? `${opts[0]} or ${opts[1]}`
+        : `${opts.slice(0, -1).join(', ')}, or ${opts[opts.length - 1]}`;
+      api.print(`Type: ${hint}`,'dim'); }
+    function marriageProposeMenu(p){ printHeader('The Tavern — Marriage'); showStatus(p);
+      if (isMarried(p)){ api.print('You are already wed.','yellow'); api.print('V) Return to the Tavern'); api.hr(); api.print('Type: v','dim'); p.temp={ mode:'propose', candidates:[] }; return; }
+      const limit = Math.max(0, PROPOSAL_DAILY_LIMIT || 0);
+      const used = Math.max(0, p.daily.proposalsMade || 0);
+      if (limit > 0){ api.print(`Daily proposals used: ${Math.min(used, limit)}/${limit}`,'dim'); }
+      if (limit > 0 && used >= limit){ api.print('You have already offered your hand today.','yellow'); api.print('V) Return to the Tavern'); api.hr(); api.print('Type: v','dim'); p.temp={ mode:'propose', candidates:[] }; return; }
+      const candidates = listMarriageCandidates(p);
+      if (!candidates.length){ api.print('No eligible partners linger here just now.','dim'); api.print('V) Return to the Tavern'); api.hr(); api.print('Type: v','dim'); p.temp={ mode:'propose', candidates:[] }; return; }
+      p.temp = { mode:'propose', candidates };
+      candidates.forEach((c,i)=>{ api.print(`${i+1}) ${c.name}  Lv${c.level}  Charm:${c.charm}`); });
+      api.print('V) Return to the Tavern');
+      api.hr(); api.print('Pick a number to propose, or V to return.','dim'); }
+    function proposalInboxMenu(p){ printHeader('The Tavern — Proposals'); showStatus(p);
+      const proposals = getPendingProposalsFor(p.userId);
+      if (!proposals.length){ api.print('No one has proposed to you.','dim'); api.print('V) Return to the Tavern'); api.hr(); api.print('Type: v','dim'); p.temp={ mode:'inbox', proposals:[] }; return; }
+      p.temp = { mode:'inbox', proposals };
+      proposals.forEach((pr,i)=>{
+        const when = formatDate(pr.ts);
+        api.print(`${i+1}) ${pr.fromName} (since ${when})`);
+      });
+      api.print('V) Return to the Tavern');
+      api.hr(); api.print('Type A# to accept or D# to decline (e.g., A1). V to return.','dim'); }
     function statusMenu(p){ printHeader('Your Status'); showStatus(p);
       api.print('V) Return to Town Square'); api.hr(); api.print('Type: v','dim'); }
     function stubMenu(title, p){ printHeader(title); showStatus(p);
@@ -834,7 +1069,14 @@ module.exports = {
     }
     function newsMenu(p){ stubMenu('Daily News', p); }
     function mailMenu(p){ stubMenu('Write Mail', p); }
-    function conjugalityMenu(p){ stubMenu('Conjugality List', p); }
+    function conjugalityMenu(p){ printHeader('Conjugality List'); showStatus(p);
+      const pairs = getMarriedPairs();
+      if (!pairs.length){ api.print('No unions are recorded in the town ledger.','dim'); }
+      else { pairs.forEach(pair => { const since = formatDate(pair.marriedOn); api.print(`${pair.aName} ❤ ${pair.bName} (since ${since})`); }); }
+      api.hr();
+      if (isMarried(p)){ api.print(`D) Divorce — penalty ${DIVORCE_CHARM_COST} charm, ${DIVORCE_GOLD_COST} gold`); }
+      api.print('V) Return to Town Square'); api.hr();
+      api.print(isMarried(p) ? 'Type: d or v' : 'Type: v','dim'); }
     function announceMenu(p){ stubMenu('Town Announcements', p); }
     function peopleMenu(p){ stubMenu('People Online', p); }
 
@@ -1105,6 +1347,32 @@ module.exports = {
       api.print('Type r for a Ring of Swagger, h for a Heartstone, or v to return.','dim');
     }
     function onRankings(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
+    function onFlirt(p){
+      const currentCharm = clamp(p.charm || 0, 0, CHARM_MAX);
+      const roll = randInt(0, 100) + currentCharm * 5;
+      let charmDelta = 0, goldDelta = 0, xpDelta = 0;
+      let line = 'You mingle without much notice.';
+      if (roll >= 120 && currentCharm < CHARM_MAX){
+        charmDelta = 1;
+        line = 'A patron swoons at your grin. Charm +1!';
+      } else if (roll >= 95){
+        goldDelta = randInt(1, Math.max(1, FLIRT_GOLD_MAX));
+        line = `You charm a tipster. +${goldDelta} gold.`;
+      } else if (roll >= 70){
+        xpDelta = randInt(1, Math.max(1, FLIRT_XP_MAX));
+        line = `Witty banter sharpens you. +${xpDelta} xp.`;
+      } else {
+        if (currentCharm >= Math.max(1, CHARM_MAX - 1)){ charmDelta = -1; line = 'You overplay your swagger. Charm -1.'; }
+        else line = 'The crowd barely glances your way.';
+      }
+      if (charmDelta){ p.charm = clamp((p.charm || 0) + charmDelta, 0, CHARM_MAX); }
+      if (goldDelta){ p.gold = Math.max(0, (p.gold || 0) + goldDelta); }
+      if (xpDelta){ p.xp = Math.max(0, (p.xp || 0) + xpDelta); applyLevelUps(p); }
+      savePlayer(p);
+      const color = charmDelta < 0 ? 'yellow' : (charmDelta>0 || goldDelta>0 || xpDelta>0) ? 'green' : 'dim';
+      api.print(line, color);
+      return render(p);
+    }
     function onTavern(p,t){ const k=t.toLowerCase(); if (k==='v'){ p.screen='town'; return render(p); }
       if (k==='g'){ const rumors=['They say a dragon’s hoard lies deep in the forest…','The Blacksmith sharpens for free if you’re charming — or so they say.','A hidden grove yields gold to those who listen to the wind.','Beware the Black Knight past the old bridge.']; api.print(rumors[randInt(0,rumors.length-1)],'cyan'); return; }
       if (k==='b'){
@@ -1147,8 +1415,79 @@ module.exports = {
         return render(p);
       }
       if (k==='d'){ if (p.daily.tavernDrinks<=0) return api.print('No more drinks today.','yellow'); p.daily.tavernDrinks--; const heal=randInt(2,6); p.hp=clamp(p.hp+heal,0,p.maxHp); api.print(`You feel warm. Recovered ${heal} HP.`,'green'); savePlayer(p); return render(p); }
-      const suffix = (BARD_ENABLED && !p.daily.bard) ? 'g (gossip), b (bard), d (drink), or v.' : 'g (gossip), d (drink), or v.';
-      api.print(`Type ${suffix}`,'dim'); }
+      if (k==='f'){ return onFlirt(p); }
+      if (k==='r'){ if (isMarried(p)) return api.print('You are already wed.','yellow'); p.screen='tavern:propose'; return render(p); }
+      if (k==='l'){ const proposals = getPendingProposalsFor(p.userId); if (!proposals.length) return api.print('No proposals await you.','dim'); p.screen='tavern:inbox'; return render(p); }
+      const bits = ['g (gossip)'];
+      if (BARD_ENABLED && !p.daily.bard) bits.push('b (bard)');
+      bits.push('d (drink)','f (flirt)');
+      if (!isMarried(p)) bits.push('r (propose)');
+      if (hasPendingProposals(p.userId)) bits.push('l (proposals)');
+      bits.push('v (leave)');
+      const hint = bits.length === 2 ? `${bits[0]} or ${bits[1]}` : `${bits.slice(0,-1).join(', ')}, or ${bits[bits.length-1]}`;
+      api.print(`Type ${hint}`,'dim'); }
+    function onMarriagePropose(p,t){ const raw=t.trim().toLowerCase();
+      if (raw==='v'){ p.temp=null; p.screen='tavern'; return render(p); }
+      if (!p.temp || p.temp.mode!=='propose'){ p.screen='tavern'; return render(p); }
+      const list = Array.isArray(p.temp.candidates) ? p.temp.candidates : [];
+      if (!list.length) return api.print('No one here to propose to. Type v to return.','dim');
+      const idx=parseInt(raw,10);
+      if (Number.isNaN(idx) || idx<1 || idx>list.length) return api.print('Choose a number from the list, or V to return.','dim');
+      if (isMarried(p)) return api.print('You are already wed.','yellow');
+      const limit = Math.max(0, PROPOSAL_DAILY_LIMIT || 0);
+      const used = Math.max(0, p.daily.proposalsMade || 0);
+      if (limit > 0 && used >= limit) return api.print('You have already proposed today.','yellow');
+      const choice = list[idx-1];
+      if (!choice) return api.print('That suitor is no longer here.','yellow');
+      if (String(choice.userId) === String(p.userId)) return api.print('You cannot propose to yourself.','yellow');
+      const target = getPlayerByIdRaw(choice.userId);
+      if (!target){ api.print('That suitor slips away into the crowd.','yellow'); p.temp.candidates = listMarriageCandidates(p); return render(p); }
+      if (isMarried(target)){ api.print(`${safeName(target.name)} is already wed.`, 'yellow'); p.temp.candidates = listMarriageCandidates(p); return render(p); }
+      if (hasProposalBetween(p.userId, target.userId)) return api.print('You already proposed to them. Patience!','dim');
+      addProposalRecord(p, target);
+      const nextUsed = used + 1;
+      p.daily.proposalsMade = limit > 0 ? Math.min(limit, nextUsed) : nextUsed;
+      savePlayer(p);
+      api.print(`You propose to ${safeName(target.name)}.`, 'green');
+      p.temp=null; p.screen='tavern';
+      return render(p);
+    }
+    function onProposalInbox(p,t){ const raw=t.trim().toLowerCase();
+      if (raw==='v'){ p.temp=null; p.screen='tavern'; return render(p); }
+      if (!p.temp || p.temp.mode!=='inbox'){ p.screen='tavern'; return render(p); }
+      const proposals = Array.isArray(p.temp.proposals) ? p.temp.proposals : [];
+      if (!proposals.length) return api.print('No proposals to review. Type v to return.','dim');
+      const action = raw[0];
+      const num = parseInt(raw.replace(/[^0-9]/g,''),10);
+      if (!num || num<1 || num>proposals.length) return api.print('Use A# to accept or D# to decline.','dim');
+      const proposal = proposals[num-1];
+      if (!proposal){ return api.print('That proposal is no longer available.','yellow'); }
+      if (action==='a'){ if (isMarried(p)) return api.print('You are already wed.','yellow');
+        const suitor = getPlayerByIdRaw(proposal.fromId);
+        if (!suitor){ api.print('That suitor has vanished.','yellow'); removeProposal(proposal.id); p.temp.proposals = getPendingProposalsFor(p.userId); return render(p); }
+        if (isMarried(suitor)){ api.print(`${safeName(suitor.name)} has already wed another.`, 'yellow'); removeProposal(proposal.id); p.temp.proposals = getPendingProposalsFor(p.userId); return render(p); }
+        const now = nowEpoch();
+        const spouseName = safeName(suitor.name);
+        const selfName = safeName(p.name);
+        p.spouseId = String(suitor.userId);
+        p.spouseName = spouseName;
+        p.marriedOn = now;
+        suitor.spouseId = String(p.userId);
+        suitor.spouseName = selfName;
+        suitor.marriedOn = now;
+        removeProposal(proposal.id);
+        clearProposalsFor(p.userId);
+        clearProposalsFor(suitor.userId);
+        savePlayer(p);
+        putPlayerRaw(suitor);
+        api.print(`You and ${spouseName} are wed beneath the tavern lanterns!`,'green');
+        if (typeof addNews === 'function') addNews(`${safeName(p.name)} and ${spouseName} were wed.`);
+        p.temp=null; p.screen='tavern';
+        return render(p);
+      }
+      if (action==='d'){ removeProposal(proposal.id); api.print(`You decline ${proposal.fromName}'s proposal.`, 'dim'); p.temp.proposals = getPendingProposalsFor(p.userId); if (!p.temp.proposals.length){ p.temp=null; p.screen='tavern'; } return render(p); }
+      api.print('Use A# to accept or D# to decline.','dim');
+    }
     function onStatus(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
     function onDuel(p,t){
       const raw=t.trim().toLowerCase();
@@ -1263,7 +1602,31 @@ module.exports = {
     }
     function onNews(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
     function onMail(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
-    function onConjugality(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
+    function handleDivorce(p){
+      if (!isMarried(p)) return api.print('You are not married.','yellow');
+      const spouseKey = p.spouseId ? String(p.spouseId) : null;
+      const spouse = spouseKey ? getPlayerByIdRaw(spouseKey) : null;
+      const spouseName = safeName(p.spouseName || (spouse?.name) || 'Unknown');
+      const goldCost = Math.max(0, DIVORCE_GOLD_COST || 0);
+      const charmCost = Math.max(0, DIVORCE_CHARM_COST || 0);
+      p.spouseId = null;
+      p.spouseName = null;
+      p.marriedOn = 0;
+      if (goldCost > 0) p.gold = Math.max(0, (p.gold || 0) - goldCost);
+      if (charmCost > 0) p.charm = clamp((p.charm || 0) - charmCost, 0, CHARM_MAX);
+      savePlayer(p);
+      if (spouse){ spouse.spouseId = null; spouse.spouseName = null; spouse.marriedOn = 0; putPlayerRaw(spouse); }
+      clearProposalsFor(p.userId);
+      if (spouseKey) clearProposalsFor(spouseKey);
+      api.print(`You part ways with ${spouseName}.`, 'yellow');
+      if (goldCost > 0 || charmCost > 0){ const parts=[]; if (goldCost>0) parts.push(`-${goldCost} gold`); if (charmCost>0) parts.push(`-${charmCost} charm`); api.print(`Penalty: ${parts.join(', ')}.`, 'dim'); }
+      if (typeof addNews === 'function') addNews(`${safeName(p.name)} and ${spouseName} parted ways.`);
+      return render(p);
+    }
+    function onConjugality(p,t){ const raw=t.trim().toLowerCase();
+      if (raw==='v'){ p.screen='town'; return render(p); }
+      if (raw==='d'){ if (!isMarried(p)) return api.print('You are not married.','yellow'); return handleDivorce(p); }
+      api.print(isMarried(p) ? 'Type d to divorce, or v to return.' : 'Type v to return.','dim'); }
     function onAnnounce(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
     function onPeople(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
 
@@ -1287,6 +1650,8 @@ module.exports = {
         case 'jeweler':    return jewelerMenu(p);
         case 'rankings':   return rankingsMenu();
         case 'tavern':     return tavernMenu(p);
+        case 'tavern:propose': return marriageProposeMenu(p);
+        case 'tavern:inbox':   return proposalInboxMenu(p);
         case 'status':     return statusMenu(p);
         case 'duel':       return duelsMenu(p);
         case 'duel:result':return duelResultMenu(p);
@@ -1386,6 +1751,8 @@ module.exports = {
         case 'jeweler':    onJeweler(p, raw);    break;
         case 'rankings':   onRankings(p, raw);   break;
         case 'tavern':     onTavern(p, raw);     break;
+        case 'tavern:propose': onMarriagePropose(p, raw); break;
+        case 'tavern:inbox':   onProposalInbox(p, raw); break;
         case 'status':     onStatus(p, raw);     break;
         case 'duel':       onDuel(p, raw);       break;
         case 'duel:result':onDuelResult(p, raw); break;
