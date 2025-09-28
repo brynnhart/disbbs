@@ -9,17 +9,20 @@ module.exports = {
     // Safe/lazy DB — fallback to memory if anything fails
     const G = (globalThis || global);
     const MEMKEY = '__LORD_MEM_STORE__';
-    if (!G[MEMKEY]) G[MEMKEY] = { players: new Map(), proposals: [], nextProposalId: 1 };
+    if (!G[MEMKEY]) G[MEMKEY] = { players: new Map(), proposals: [], nextProposalId: 1, mail: [], nextMailId: 1 };
     const MEM = G[MEMKEY];
     if (!MEM.players) MEM.players = new Map();
     if (!Array.isArray(MEM.proposals)) MEM.proposals = [];
     if (typeof MEM.nextProposalId !== 'number') MEM.nextProposalId = 1;
+    if (!Array.isArray(MEM.mail)) MEM.mail = [];
+    if (typeof MEM.nextMailId !== 'number') MEM.nextMailId = 1;
 
     let dbReady = false;
     let useDB = false;
     let db = null, selectPlayer = null, insertPlayer = null, updatePlayer = null, topHeroesStmt = null, opponentsStmt = null,
       selectMarriageCandidatesStmt = null, insertProposalStmt = null, selectProposalsForStmt = null, checkProposalStmt = null,
-      deleteProposalStmt = null, deleteProposalsByPlayerStmt = null, selectMarriedPairsStmt = null;
+      deleteProposalStmt = null, deleteProposalsByPlayerStmt = null, selectMarriedPairsStmt = null,
+      insertMailStmt = null, selectInboxMailStmt = null, selectMailByIdStmt = null, markMailReadStmt = null;
 
     function lazyInitDB() {
       if (dbReady) return;
@@ -75,6 +78,24 @@ module.exports = {
             to_name   TEXT,
             ts        INTEGER NOT NULL
           );
+        `);
+
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS lord_mail (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            to_id        TEXT NOT NULL,
+            to_name      TEXT NOT NULL,
+            from_id      TEXT NOT NULL,
+            from_name    TEXT NOT NULL,
+            ts           INTEGER NOT NULL,
+            subject      TEXT NOT NULL,
+            body         TEXT NOT NULL,
+            unread       INTEGER NOT NULL DEFAULT 1,
+            deleted_to   INTEGER NOT NULL DEFAULT 0,
+            deleted_from INTEGER NOT NULL DEFAULT 0
+          );
+          CREATE INDEX IF NOT EXISTS idx_lord_mail_to_ts ON lord_mail(to_id, ts DESC);
+          CREATE INDEX IF NOT EXISTS idx_lord_mail_from_ts ON lord_mail(from_id, ts DESC);
         `);
 
         selectPlayer = db.prepare(`SELECT * FROM lord_players WHERE user_id = ?`);
@@ -136,6 +157,24 @@ module.exports = {
            WHERE spouse_id IS NOT NULL AND spouse_id != ''
            ORDER BY married_on ASC, char_name ASC
         `);
+        insertMailStmt = db.prepare(`
+          INSERT INTO lord_mail (to_id, to_name, from_id, from_name, ts, subject, body, unread, deleted_to, deleted_from)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, 0)
+        `);
+        selectInboxMailStmt = db.prepare(`
+          SELECT id, to_id, to_name, from_id, from_name, ts, subject, body, unread
+            FROM lord_mail
+           WHERE to_id = ? AND deleted_to = 0
+           ORDER BY ts DESC
+           LIMIT 20
+        `);
+        selectMailByIdStmt = db.prepare(`
+          SELECT id, to_id, to_name, from_id, from_name, ts, subject, body, unread
+            FROM lord_mail
+           WHERE id = ? AND to_id = ? AND deleted_to = 0
+           LIMIT 1
+        `);
+        markMailReadStmt = db.prepare(`UPDATE lord_mail SET unread = 0 WHERE id = ?`);
         useDB = true;
       } catch (e) {
         useDB = false; // fall back silently; don't break DoorManager
@@ -179,6 +218,10 @@ module.exports = {
     const DEATHKNIGHT_FIRST_STRIKE_BONUS = 1;
     const ALLOW_CLASS_RESPEC = false;
     const RESPEC_COST_GOLD = 500;
+    const MAIL_SEND_DAILY_LIMIT = 5;
+    const MAIL_SUBJECT_MAX = 40;
+    const MAIL_BODY_MAX = 500;
+    const ANNOUNCE_SUBJECT_MAX = 60;
     const CLASS_OPTIONS = [
       { id:'thief', key:'t', name:'Thief', description:'Cunning and quick. Finds a bit more gold while Searching.' },
       { id:'mystic', key:'m', name:'Mystic', description:'Calm and attuned. Heals slightly after victorious combat.' },
@@ -196,6 +239,22 @@ module.exports = {
       const cleaned = String(name || '').replace(/[\x00-\x1F\x7F]/g, '').trim();
       return cleaned || 'Unknown';
     }
+    function stripControls(text, allowNewlines){
+      const pattern = allowNewlines ? /[\x00-\x09\x0B-\x1F\x7F]/g : /[\x00-\x1F\x7F]/g;
+      return String(text || '').replace(pattern, '');
+    }
+    function sanitizeMailSubject(text){
+      const cleaned = stripControls(text, false).trim();
+      return cleaned.slice(0, MAIL_SUBJECT_MAX);
+    }
+    function sanitizeMailBody(text){
+      const cleaned = stripControls(text, true).trim();
+      return cleaned.slice(0, MAIL_BODY_MAX);
+    }
+    function sanitizeAnnouncement(text){
+      const cleaned = stripControls(text, false).trim();
+      return cleaned.slice(0, ANNOUNCE_SUBJECT_MAX);
+    }
     function formatDate(epoch){
       if (!epoch) return 'unknown';
       const d = new Date(epoch * 1000);
@@ -204,6 +263,17 @@ module.exports = {
       const m = String(d.getMonth()+1).padStart(2,'0');
       const day = String(d.getDate()).padStart(2,'0');
       return `${y}-${m}-${day}`;
+    }
+    function formatDateTime(epoch){
+      if (!epoch) return 'unknown';
+      const d = new Date(epoch * 1000);
+      if (Number.isNaN(d.getTime())) return 'unknown';
+      const y = d.getFullYear();
+      const m = String(d.getMonth()+1).padStart(2,'0');
+      const day = String(d.getDate()).padStart(2,'0');
+      const h = String(d.getHours()).padStart(2,'0');
+      const min = String(d.getMinutes()).padStart(2,'0');
+      return `${y}-${m}-${day} ${h}:${min}`;
     }
     function getClassInfo(id){ return id ? CLASS_LOOKUP[id] || null : null; }
     function getClassName(id){ const info = getClassInfo(id); return info ? info.name : null; }
@@ -560,7 +630,9 @@ module.exports = {
         lastDate:key,
         interestDate:null,
         jewelerPurchases:0,
-        proposalsMade:0
+        proposalsMade:0,
+        mailSent:0,
+        announced:false
       };
     }
     function normalizeDaily(d){
@@ -576,6 +648,8 @@ module.exports = {
       if (typeof d.interestDate === 'undefined') d.interestDate = null;
       if (typeof d.jewelerPurchases !== 'number') d.jewelerPurchases = 0;
       if (typeof d.proposalsMade !== 'number') d.proposalsMade = 0;
+      if (typeof d.mailSent !== 'number') d.mailSent = 0;
+      if (typeof d.announced !== 'boolean') d.announced = false;
       return d;
     }
     function applyBankInterest(p, dateKey){
@@ -760,6 +834,119 @@ module.exports = {
         return;
       }
       MEM.proposals = MEM.proposals.filter(p => p.fromId !== key && p.toId !== key);
+    }
+    function addMailRecord(fromPlayer, toPlayer, subject, body){
+      const ts = nowEpoch();
+      const entry = {
+        toId: String(toPlayer.userId),
+        toName: safeName(toPlayer.name),
+        fromId: String(fromPlayer.userId),
+        fromName: safeName(fromPlayer.name),
+        subject,
+        body,
+        ts
+      };
+      if (useDB){
+        if (!insertMailStmt) return;
+        insertMailStmt.run(entry.toId, entry.toName, entry.fromId, entry.fromName, ts, entry.subject, entry.body);
+        return;
+      }
+      const id = MEM.nextMailId++;
+      MEM.mail.push({ id, ...entry, unread:1, deletedTo:0, deletedFrom:0 });
+      if (MEM.mail.length > 500){
+        MEM.mail.splice(0, MEM.mail.length - 500);
+      }
+    }
+    function getInboxMessages(player){
+      if (!player) return [];
+      const key = String(player.userId);
+      if (useDB){
+        if (!selectInboxMailStmt) return [];
+        return selectInboxMailStmt.all(key).map(row => ({
+          id: row.id,
+          toId: row.to_id ? String(row.to_id) : key,
+          toName: safeName(row.to_name),
+          fromId: row.from_id ? String(row.from_id) : '',
+          fromName: safeName(row.from_name),
+          ts: row.ts,
+          subject: sanitizeMailSubject(row.subject),
+          body: sanitizeMailBody(row.body),
+          unread: row.unread ? 1 : 0
+        }));
+      }
+      return MEM.mail
+        .filter(m => m.toId === key && !m.deletedTo)
+        .sort((a,b) => b.ts - a.ts)
+        .slice(0, 20)
+        .map(m => ({
+          id: m.id,
+          toId: m.toId,
+          toName: safeName(m.toName),
+          fromId: m.fromId,
+          fromName: safeName(m.fromName),
+          ts: m.ts,
+          subject: sanitizeMailSubject(m.subject),
+          body: sanitizeMailBody(m.body),
+          unread: m.unread ? 1 : 0
+        }));
+    }
+    function getMailByIdForPlayer(player, mailId){
+      if (!player) return null;
+      const key = String(player.userId);
+      const idNum = Number(mailId);
+      if (!Number.isInteger(idNum) || idNum <= 0) return null;
+      if (useDB){
+        if (!selectMailByIdStmt) return null;
+        const row = selectMailByIdStmt.get(idNum, key);
+        if (!row) return null;
+        return {
+          id: row.id,
+          toId: row.to_id ? String(row.to_id) : key,
+          toName: safeName(row.to_name),
+          fromId: row.from_id ? String(row.from_id) : '',
+          fromName: safeName(row.from_name),
+          ts: row.ts,
+          subject: sanitizeMailSubject(row.subject),
+          body: sanitizeMailBody(row.body),
+          unread: row.unread ? 1 : 0
+        };
+      }
+      const found = MEM.mail.find(m => m.id === idNum && m.toId === key && !m.deletedTo);
+      if (!found) return null;
+      return {
+        id: found.id,
+        toId: found.toId,
+        toName: safeName(found.toName),
+        fromId: found.fromId,
+        fromName: safeName(found.fromName),
+        ts: found.ts,
+        subject: sanitizeMailSubject(found.subject),
+        body: sanitizeMailBody(found.body),
+        unread: found.unread ? 1 : 0
+      };
+    }
+    function markMailRead(mailId){
+      const idNum = Number(mailId);
+      if (!Number.isInteger(idNum) || idNum <= 0) return;
+      if (useDB){
+        if (markMailReadStmt) markMailReadStmt.run(idNum);
+        return;
+      }
+      const entry = MEM.mail.find(m => m.id === idNum);
+      if (entry) entry.unread = 0;
+    }
+    function listMailRecipients(player, searchTerm){
+      if (!player) return [];
+      const opponents = getOpponentsFor(player) || [];
+      const key = String(player.userId);
+      const normalized = opponents.map(row => ({
+        userId: String(row.user_id ?? row.userId ?? ''),
+        name: safeName(row.name || row.char_name || ''),
+        level: typeof row.level === 'number' ? row.level : 1
+      })).filter(rec => rec.userId && rec.userId !== key);
+      const term = searchTerm ? searchTerm.toLowerCase() : '';
+      const filtered = term ? normalized.filter(rec => rec.name.toLowerCase().includes(term)) : normalized;
+      return filtered.slice(0, 20);
     }
     function listMarriageCandidates(p){
       if (!p) return [];
@@ -1142,8 +1329,190 @@ module.exports = {
       api.hr();
       api.print('Type the letter of your chosen class, or v to return.','dim');
     }
+    function getMailTemp(p){
+      if (!p) return null;
+      if (!p.temp || typeof p.temp !== 'object') p.temp = {};
+      if (!p.temp.mailState || typeof p.temp.mailState !== 'object') p.temp.mailState = {};
+      return p.temp.mailState;
+    }
+    function clearMailTemp(p){
+      if (!p || !p.temp) return;
+      if (p.temp.mailState) delete p.temp.mailState;
+      if (Object.keys(p.temp).length === 0) p.temp = null;
+    }
+    function ensureMailDraft(p){
+      const mailTemp = getMailTemp(p);
+      if (!mailTemp.draft){
+        mailTemp.draft = {
+          step:'recipient',
+          searchTerm:'',
+          recipients:[],
+          toId:null,
+          toName:null,
+          subject:'',
+          body:''
+        };
+      }
+      return mailTemp.draft;
+    }
     function newsMenu(p){ stubMenu('Daily News', p); }
-    function mailMenu(p){ stubMenu('Write Mail', p); }
+    function mailMenu(p){
+      getMailTemp(p);
+      printHeader('Town Mail Service');
+      showStatus(p);
+      const limit = Math.max(0, MAIL_SEND_DAILY_LIMIT || 0);
+      const used = Math.max(0, p.daily?.mailSent || 0);
+      if (limit > 0){
+        api.print(`Daily mail sent: ${Math.min(used, limit)}/${limit}`,'dim');
+      }
+      api.print('I) Inbox — read messages awaiting you');
+      api.print('C) Compose — send a message to another adventurer');
+      api.print('V) Return to Town Square');
+      api.hr();
+      api.print('Type: i, c, or v.','dim');
+    }
+    function inboxMenu(p){
+      const mailTemp = getMailTemp(p);
+      mailTemp.current = null;
+      printHeader('Town Mail — Inbox');
+      showStatus(p);
+      const inbox = getInboxMessages(p);
+      mailTemp.inbox = inbox;
+      if (!inbox.length){
+        api.print('Your inbox is empty.','dim');
+        api.print('V) Return to Mail Menu');
+        api.hr();
+        api.print('Type: v','dim');
+        return;
+      }
+      inbox.forEach((mail, idx) => {
+        const status = mail.unread ? '[Unread]' : '[Read] ';
+        const when = formatDateTime(mail.ts);
+        const subject = mail.subject || '(no subject)';
+        api.print(`${idx+1}) ${status} ${mail.fromName} — ${subject} (${when})`);
+      });
+      api.print('V) Return to Mail Menu');
+      api.hr();
+      api.print('Type a number to read a message, or v to return.','dim');
+    }
+    function readMailView(p){
+      const mailTemp = getMailTemp(p);
+      const mail = mailTemp.current;
+      printHeader('Town Mail — Message');
+      showStatus(p);
+      if (!mail){
+        api.print('That message is no longer available.','yellow');
+        api.print('V) Return to Inbox');
+        api.hr();
+        api.print('Type: v','dim');
+        return;
+      }
+      api.print(`From: ${mail.fromName}`);
+      api.print(`Subject: ${mail.subject || '(no subject)'}`);
+      api.print(`Date: ${formatDateTime(mail.ts)}`);
+      api.hr();
+      if (mail.body){
+        mail.body.split(/\r?\n/).forEach(line => api.print(line));
+      } else {
+        api.print('(No message body)','dim');
+      }
+      api.hr();
+      const hints = [];
+      if (mail.fromId && String(mail.fromId) !== String(p.userId)){
+        api.print('R) Reply');
+        hints.push('r (reply)');
+      }
+      api.print('V) Return to Inbox');
+      hints.push('v (return)');
+      api.hr();
+      const hint = hints.length === 1 ? hints[0] : `${hints.slice(0,-1).join(', ')}, or ${hints[hints.length-1]}`;
+      api.print(`Type: ${hint}.`,'dim');
+    }
+    function composeMailFlow(p){
+      const limit = Math.max(0, MAIL_SEND_DAILY_LIMIT || 0);
+      const used = Math.max(0, p.daily?.mailSent || 0);
+      const mailTemp = getMailTemp(p);
+      const draft = ensureMailDraft(p);
+      printHeader('Town Mail — Compose');
+      showStatus(p);
+      if (limit > 0){
+        api.print(`Daily mail sent: ${Math.min(used, limit)}/${limit}`,'dim');
+      }
+      if (limit > 0 && used >= limit){
+        api.print('You have already sent the maximum amount of mail today.','yellow');
+        api.print('V) Return to Mail Menu');
+        api.hr();
+        api.print('Type: v','dim');
+        return;
+      }
+      if (draft.toName){
+        api.print(`To: ${draft.toName}`);
+      }
+      if (draft.step === 'recipient'){
+        const list = listMailRecipients(p, draft.searchTerm || '');
+        mailTemp.recipients = list;
+        if (draft.searchTerm){
+          api.print(`Filter: "${draft.searchTerm}"`,'dim');
+        }
+        if (!list.length){
+          api.print('No adventurers match that search.','yellow');
+        } else {
+          list.forEach((rec, idx) => {
+            api.print(`${idx+1}) ${rec.name} — Level ${rec.level}`);
+          });
+        }
+        api.print('V) Return to Mail Menu');
+        api.hr();
+        const parts = [];
+        if ((list || []).length) parts.push('a number to choose');
+        parts.push('n <name> to search');
+        parts.push('v to return');
+        const hint = parts.length === 1 ? parts[0] : `${parts.slice(0,-1).join(', ')}, or ${parts[parts.length-1]}`;
+        api.print(`Type: ${hint}.`,'dim');
+        return;
+      }
+      if (draft.step === 'subject'){
+        if (draft.subject){
+          api.print(`Current subject: ${draft.subject}`,'dim');
+          api.print('Press Enter to keep it, or type a new subject (max 40 characters).');
+        } else {
+          api.print('Enter a subject (max 40 characters).');
+        }
+        api.print('V) Return to Mail Menu','dim');
+        api.hr();
+        api.print('Type your subject.','dim');
+        return;
+      }
+      if (draft.step === 'body'){
+        api.print(`Subject: ${draft.subject}`,'dim');
+        const remaining = Math.max(0, MAIL_BODY_MAX - (draft.body ? draft.body.length : 0));
+        api.print(`Enter your message (max ${MAIL_BODY_MAX} characters). Remaining: ${remaining}.`);
+        api.print('V) Return to Mail Menu','dim');
+        api.hr();
+        api.print('Type your message.','dim');
+        return;
+      }
+      if (draft.step === 'confirm'){
+        api.print(`To: ${draft.toName}`);
+        api.print(`Subject: ${draft.subject}`);
+        api.print('Body:');
+        if (draft.body){
+          draft.body.split(/\r?\n/).forEach(line => api.print(line));
+        } else {
+          api.print('(No message body)','dim');
+        }
+        api.hr();
+        api.print('S) Send mail');
+        api.print('U) Edit subject');
+        api.print('B) Edit body');
+        api.print('V) Cancel');
+        api.hr();
+        api.print('Type: s to send, u to edit subject, b to edit body, or v to cancel.','dim');
+        return;
+      }
+      draft.step = 'recipient';
+      composeMailFlow(p);
+    }
     function conjugalityMenu(p){ printHeader('Conjugality List'); showStatus(p);
       const pairs = getMarriedPairs();
       if (!pairs.length){ api.print('No unions are recorded in the town ledger.','dim'); }
@@ -1152,7 +1521,20 @@ module.exports = {
       if (isMarried(p)){ api.print(`D) Divorce — penalty ${DIVORCE_CHARM_COST} charm, ${DIVORCE_GOLD_COST} gold`); }
       api.print('V) Return to Town Square'); api.hr();
       api.print(isMarried(p) ? 'Type: d or v' : 'Type: v','dim'); }
-    function announceMenu(p){ stubMenu('Town Announcements', p); }
+    function announcePrompt(p){
+      printHeader('Town Announcement');
+      showStatus(p);
+      if (p.daily?.announced){
+        api.print('You already made an announcement today.','yellow');
+        api.print('V) Return to Town Square');
+        api.hr();
+        api.print('Type: v','dim');
+        return;
+      }
+      api.print('Share a short announcement with the town (max 60 characters).');
+      api.print('Type your announcement, or V to cancel.','dim');
+      api.hr();
+    }
     function peopleMenu(p){ stubMenu('People Online', p); }
 
     // Combat
@@ -1763,7 +2145,207 @@ module.exports = {
       return render(p);
     }
     function onNews(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
-    function onMail(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
+    function onMail(p,t){
+      const raw = String(t || '').trim();
+      const k = raw.toLowerCase();
+      if (!raw){ return mailMenu(p); }
+      if (k === 'v' || k === 'town'){ clearMailTemp(p); p.screen='town'; return render(p); }
+      if (k === 'i' || k.startsWith('inbox')){ p.screen='mail:inbox'; return render(p); }
+      if (k === 'c' || k.startsWith('comp') || k.startsWith('write')){
+        const limit = Math.max(0, MAIL_SEND_DAILY_LIMIT || 0);
+        const used = Math.max(0, p.daily?.mailSent || 0);
+        if (limit > 0 && used >= limit){
+          api.print('You have already sent the maximum amount of mail today.','yellow');
+          return;
+        }
+        const mailTemp = getMailTemp(p);
+        mailTemp.draft = {
+          step:'recipient',
+          searchTerm:'',
+          recipients:[],
+          toId:null,
+          toName:null,
+          subject:'',
+          body:''
+        };
+        p.screen='mail:compose';
+        return render(p);
+      }
+      api.print('Options: I) Inbox, C) Compose, or V) Return.','dim');
+    }
+    function onInbox(p,t){
+      const mailTemp = getMailTemp(p);
+      const raw = String(t || '').trim();
+      const k = raw.toLowerCase();
+      if (!raw){ return inboxMenu(p); }
+      if (k === 'v'){ p.screen='mail'; return render(p); }
+      const list = Array.isArray(mailTemp.inbox) ? mailTemp.inbox : getInboxMessages(p);
+      const idx = parseInt(raw, 10);
+      if (Number.isNaN(idx) || idx < 1 || idx > list.length){
+        api.print('Choose a number from the list, or v to return.','dim');
+        return;
+      }
+      const chosen = list[idx-1];
+      if (!chosen){
+        api.print('That message is no longer available.','yellow');
+        mailTemp.inbox = getInboxMessages(p);
+        return render(p);
+      }
+      const mail = getMailByIdForPlayer(p, chosen.id);
+      if (!mail){
+        api.print('That message is no longer available.','yellow');
+        mailTemp.inbox = getInboxMessages(p);
+        return render(p);
+      }
+      if (mail.unread){
+        markMailRead(mail.id);
+        mail.unread = 0;
+        chosen.unread = 0;
+      }
+      mailTemp.current = mail;
+      p.screen='mail:read';
+      return render(p);
+    }
+    function onReadMail(p,t){
+      const mailTemp = getMailTemp(p);
+      const mail = mailTemp.current;
+      const raw = String(t || '').trim();
+      const k = raw.toLowerCase();
+      if (!raw || k === 'v' || k === 'i'){ mailTemp.current = null; p.screen='mail:inbox'; return render(p); }
+      if (k === 'r' || k.startsWith('reply')){
+        if (!mail || !mail.fromId || String(mail.fromId) === String(p.userId)){
+          return api.print('No reply target available.','yellow');
+        }
+        const target = getPlayerByIdRaw(mail.fromId);
+        if (!target){
+          return api.print('That adventurer is no longer here to receive your reply.','yellow');
+        }
+        const baseSubject = mail.subject || '';
+        const hasPrefix = baseSubject.toLowerCase().startsWith('re:');
+        const proposed = hasPrefix ? baseSubject : `Re: ${baseSubject}`;
+        const replySubject = sanitizeMailSubject(proposed) || 'Re: (no subject)';
+        const mailTempState = getMailTemp(p);
+        mailTempState.draft = {
+          step:'subject',
+          searchTerm:'',
+          recipients:[],
+          toId:String(target.userId),
+          toName:safeName(target.name),
+          subject:replySubject,
+          body:''
+        };
+        p.screen='mail:compose';
+        return render(p);
+      }
+      api.print('Type r to reply, or v to return to the inbox.','dim');
+    }
+    function onComposeMail(p,t){
+      const mailTemp = getMailTemp(p);
+      const draft = ensureMailDraft(p);
+      const raw = String(t || '');
+      const trimmed = raw.trim();
+      const k = trimmed.toLowerCase();
+      const limit = Math.max(0, MAIL_SEND_DAILY_LIMIT || 0);
+      const used = Math.max(0, p.daily?.mailSent || 0);
+      if (k === 'v'){ delete mailTemp.draft; mailTemp.recipients = []; p.screen='mail'; return render(p); }
+      if (limit > 0 && used >= limit){
+        api.print('You have already sent the maximum amount of mail today.','yellow');
+        delete mailTemp.draft;
+        mailTemp.recipients = [];
+        p.screen='mail';
+        return render(p);
+      }
+      if (draft.step === 'recipient'){
+        if (!trimmed){ return composeMailFlow(p); }
+        const match = trimmed.match(/^(n|name)\s*(.*)$/i);
+        if (match){
+          draft.searchTerm = match[2] ? match[2].trim() : '';
+          return render(p);
+        }
+        const list = Array.isArray(mailTemp.recipients) ? mailTemp.recipients : listMailRecipients(p, draft.searchTerm || '');
+        const idx = parseInt(trimmed, 10);
+        if (Number.isNaN(idx) || idx < 1 || idx > list.length){
+          api.print('Choose a number from the list, N <name> to search, or V to cancel.','dim');
+          return;
+        }
+        const choice = list[idx-1];
+        if (!choice){
+          api.print('That adventurer is no longer available.','yellow');
+          mailTemp.recipients = listMailRecipients(p, draft.searchTerm || '');
+          return render(p);
+        }
+        if (String(choice.userId) === String(p.userId)){
+          api.print('You cannot send mail to yourself.','yellow');
+          return;
+        }
+        const target = getPlayerByIdRaw(choice.userId);
+        if (!target){
+          api.print('That adventurer slips away.','yellow');
+          mailTemp.recipients = listMailRecipients(p, draft.searchTerm || '');
+          return render(p);
+        }
+        draft.toId = String(target.userId);
+        draft.toName = safeName(target.name);
+        draft.step = 'subject';
+        draft.subject = draft.subject || '';
+        draft.body = '';
+        mailTemp.recipients = [];
+        return render(p);
+      }
+      if (draft.step === 'subject'){
+        if (!trimmed && draft.subject){ draft.step='body'; return render(p); }
+        const subject = sanitizeMailSubject(trimmed);
+        if (!subject){
+          api.print('Subject cannot be blank.','yellow');
+          return;
+        }
+        const original = stripControls(trimmed, false).trim();
+        if (subject.length < original.length){ api.print('Subject truncated to 40 characters.','dim'); }
+        draft.subject = subject;
+        draft.step = 'body';
+        return render(p);
+      }
+      if (draft.step === 'body'){
+        if (!trimmed && draft.body){ draft.step='confirm'; return render(p); }
+        const cleaned = stripControls(raw, true).trim();
+        const body = sanitizeMailBody(raw);
+        if (!body){
+          api.print('Message cannot be blank.','yellow');
+          return;
+        }
+        if (body.length < cleaned.length){ api.print('Message truncated to 500 characters.','dim'); }
+        draft.body = body;
+        draft.step = 'confirm';
+        return render(p);
+      }
+      if (draft.step === 'confirm'){
+        if (k === 's' || k === 'send' || k === 'y'){
+          if (!draft.toId || !draft.toName){ draft.step='recipient'; return render(p); }
+          const subject = sanitizeMailSubject(draft.subject);
+          const body = sanitizeMailBody(draft.body);
+          if (!subject){ draft.step='subject'; api.print('Subject cannot be blank.','yellow'); return; }
+          if (!body){ draft.step='body'; api.print('Message cannot be blank.','yellow'); return; }
+          if (String(draft.toId) === String(p.userId)){ api.print('You cannot send mail to yourself.','yellow'); draft.step='recipient'; draft.toId=null; draft.toName=null; return; }
+          const target = getPlayerByIdRaw(draft.toId);
+          if (!target){ api.print('That adventurer is no longer around.','yellow'); draft.step='recipient'; draft.toId=null; draft.toName=null; return render(p); }
+          addMailRecord(p, target, subject, body);
+          const nextUsed = used + 1;
+          p.daily.mailSent = limit > 0 ? Math.min(limit, nextUsed) : nextUsed;
+          savePlayer(p);
+          api.print(`You send your message to ${draft.toName}.`,'green');
+          delete mailTemp.draft;
+          mailTemp.recipients = [];
+          p.screen='mail';
+          return render(p);
+        }
+        if (k === 'u' || k.startsWith('subject')){ draft.step='subject'; return render(p); }
+        if (k === 'b' || k.startsWith('body')){ draft.step='body'; return render(p); }
+        api.print('Type s to send, u to edit subject, b to edit body, or v to cancel.','dim');
+        return;
+      }
+      draft.step = 'recipient';
+      return render(p);
+    }
     function handleDivorce(p){
       if (!isMarried(p)) return api.print('You are not married.','yellow');
       const spouseKey = p.spouseId ? String(p.spouseId) : null;
@@ -1789,7 +2371,35 @@ module.exports = {
       if (raw==='v'){ p.screen='town'; return render(p); }
       if (raw==='d'){ if (!isMarried(p)) return api.print('You are not married.','yellow'); return handleDivorce(p); }
       api.print(isMarried(p) ? 'Type d to divorce, or v to return.' : 'Type v to return.','dim'); }
-    function onAnnounce(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
+    function onAnnounce(p,t){
+      const raw = String(t || '');
+      const trimmed = raw.trim();
+      const k = trimmed.toLowerCase();
+      if (k === 'v'){ p.screen='town'; return render(p); }
+      if (p.daily?.announced){
+        api.print('You already made an announcement today.','yellow');
+        return;
+      }
+      if (!trimmed){
+        api.print('Enter your announcement, or type v to cancel.','dim');
+        return;
+      }
+      const subject = sanitizeAnnouncement(raw);
+      if (!subject){
+        api.print('Announcement cannot be blank.','yellow');
+        return;
+      }
+      const cleaned = stripControls(raw, false).trim();
+      if (subject.length < cleaned.length){ api.print('Announcement truncated to 60 characters.','dim'); }
+      if (typeof addNews === 'function'){
+        try { addNews(`${p.name} announces: ${subject}`); } catch (err) { console.error('[lord] addNews failed:', err); }
+      }
+      p.daily.announced = true;
+      savePlayer(p);
+      api.print('Your words echo through the town square.','green');
+      p.screen='town';
+      return render(p);
+    }
     function onPeople(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
 
     // Render multiplexer
@@ -1821,8 +2431,11 @@ module.exports = {
         case 'training:class': return classMenu(p);
         case 'news':       return newsMenu(p);
         case 'mail':       return mailMenu(p);
+        case 'mail:inbox': return inboxMenu(p);
+        case 'mail:read':  return readMailView(p);
+        case 'mail:compose': return composeMailFlow(p);
         case 'conjugality':return conjugalityMenu(p);
-        case 'announce':   return announceMenu(p);
+        case 'announce':   return announcePrompt(p);
         case 'people':     return peopleMenu(p);
         case 'combat':     return renderCombat(p);
         default:           p.screen='town'; return townSquareMenu(p);
@@ -1923,6 +2536,9 @@ module.exports = {
         case 'training:class': onClass(p, raw);  break;
         case 'news':       onNews(p, raw);       break;
         case 'mail':       onMail(p, raw);       break;
+        case 'mail:inbox': onInbox(p, raw);      break;
+        case 'mail:read':  onReadMail(p, raw);   break;
+        case 'mail:compose': onComposeMail(p, raw); break;
         case 'conjugality':onConjugality(p, raw);break;
         case 'announce':   onAnnounce(p, raw);   break;
         case 'people':     onPeople(p, raw);     break;
