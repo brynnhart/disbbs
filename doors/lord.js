@@ -255,6 +255,34 @@ module.exports = {
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const nowEpoch = () => Math.floor(Date.now() / 1000);
     const ONLINE_WINDOW_SEC = 300;
+
+    // ─────────────────────────────────────────────────────────────
+    // BALANCE / ECONOMY CONSTANTS
+    const ECON_DEBUG_LOG = (process.env.ECON_DEBUG_LOG === 'true');
+    const INTEREST_RATE = 0.01;
+    const DUEL_GOLD_TAKE_RATE = 0.05;
+    const SEARCH_GOLD_MIN = 2;
+    const SEARCH_GOLD_MAX = 15;
+    const FOREST_EVENT_CHANCE = 0.20;
+    const DRAGON_LEVEL_REQ = 12;
+    const DRAGON_FIND_CHANCE = 0.15;
+    const DRAGON_GOLD_MIN = 500;
+    const DRAGON_GOLD_MAX = 700;
+    const CHARM_MAX = 10;
+    const HEALER_COST_PER_HP = 2;
+    const TRAINING_SPARRING_COST = 80;
+    const TRAINING_SPARRING_XP = 10;
+    const TRAINING_ENDURANCE_COST = 120;
+    const TRAINING_ENDURANCE_HP = 3;
+    const TRAINING_SWAGGER_COST = 60;
+    const TRAINING_SWAGGER_CHARM = 1;
+    const MAX_GOLD_DELTA_COMBAT = 400;
+    const MAX_GOLD_DELTA_EVENT = 150;
+    const MAX_GOLD_DELTA_DUEL = 1000;
+    const MAX_GOLD_DELTA_DRAGON = 1000;
+    const MAX_XP_DELTA_COMBAT = 50;
+    const MAX_XP_DELTA_EVENT = 30;
+
     const STARTING_GOLD = 50;
     const STARTING_HP = 30;
     const STARTING_CHARM = 0;
@@ -267,22 +295,16 @@ module.exports = {
     const JEWELER_DAILY_LIMIT = 3;
     const HEARTSTONE_HP = 2;
     const RING_CHARM_INC = 1;
-    const CHARM_MAX = 10;
     const FLIRT_GOLD_MAX = 20;
     const FLIRT_XP_MAX = 10;
     const PROPOSAL_DAILY_LIMIT = 1;
     const DIVORCE_GOLD_COST = 25;
     const DIVORCE_CHARM_COST = 1;
-    const DRAGON_LEVEL_REQ = 12;
-    const DRAGON_FIND_CHANCE = 0.15;
-    const DRAGON_GOLD_MIN = 500;
-    const DRAGON_GOLD_MAX = 700;
     const CAMP_HEAL_PCT = 0.30;
     const DAILY_HEALS = 2;
     const BARD_XP = 10;
     const BARD_BANK_RATE = 0.005;
     const BARD_ENABLED = true;
-    const FOREST_EVENT_CHANCE = 0.20;
     const EVENT_HP_MAX = 8;
     const EVENT_GOLD_MAX = 25;
     const EVENT_XP_MAX = 12;
@@ -328,6 +350,105 @@ module.exports = {
     function sanitizeAnnouncement(text){
       const cleaned = stripControls(text, false).trim();
       return cleaned.slice(0, ANNOUNCE_SUBJECT_MAX);
+    }
+    const GOLD_DELTA_CAPS = {
+      combat: MAX_GOLD_DELTA_COMBAT,
+      event: MAX_GOLD_DELTA_EVENT,
+      search: MAX_GOLD_DELTA_EVENT,
+      duel: MAX_GOLD_DELTA_DUEL,
+      dragon: MAX_GOLD_DELTA_DRAGON,
+    };
+    const XP_DELTA_CAPS = {
+      combat: MAX_XP_DELTA_COMBAT,
+      event: MAX_XP_DELTA_EVENT,
+      duel: MAX_XP_DELTA_COMBAT,
+      'duel:silent': MAX_XP_DELTA_COMBAT,
+      training: MAX_XP_DELTA_EVENT,
+    };
+    function guardLog(player, source, type, requested, applied, extra){
+      if (!ECON_DEBUG_LOG) return;
+      if (requested === applied) return;
+      const payload = { userId: player?.userId, source: source || 'unknown', type, requested, applied };
+      if (extra) Object.assign(payload, extra);
+      console.warn('[LORD:GUARD]', payload);
+    }
+    function safeAddGold(player, delta, source){
+      if (!player || typeof delta !== 'number' || !delta) return 0;
+      const current = typeof player.gold === 'number' ? player.gold : 0;
+      const cap = GOLD_DELTA_CAPS[source];
+      let applied = delta;
+      if (typeof cap === 'number'){
+        const limited = clamp(delta, -cap, cap);
+        guardLog(player, source, 'gold', delta, limited, { reason:'cap' });
+        applied = limited;
+      }
+      let target = current + applied;
+      if (target < 0){
+        const corrected = -current;
+        guardLog(player, source, 'gold', applied, corrected, { reason:'negative-total' });
+        applied = corrected;
+        target = 0;
+      }
+      player.gold = target;
+      return applied;
+    }
+    function safeAddXP(player, delta, source){
+      const result = { applied:0, leveled:false, levelDelta:0, hpGain:0 };
+      if (!player || typeof delta !== 'number' || !delta) return result;
+      const current = typeof player.xp === 'number' ? player.xp : 0;
+      const cap = XP_DELTA_CAPS[source];
+      let applied = delta;
+      if (typeof cap === 'number'){
+        const limited = clamp(delta, -cap, cap);
+        guardLog(player, source, 'xp', delta, limited, { reason:'cap' });
+        applied = limited;
+      }
+      let target = current + applied;
+      if (target < 0){
+        const corrected = -current;
+        guardLog(player, source, 'xp', applied, corrected, { reason:'negative-total' });
+        applied = corrected;
+        target = 0;
+      }
+      player.xp = target;
+      result.applied = applied;
+      const levelBefore = typeof player.level === 'number' ? player.level : 1;
+      const maxHpBefore = typeof player.maxHp === 'number' ? player.maxHp : 0;
+      const wantsSilent = source === 'event' || (typeof source === 'string' && source.includes('silent'));
+      const leveled = wantsSilent ? applyLevelUpsSilent(player) : applyLevelUps(player);
+      result.leveled = leveled;
+      result.levelDelta = (typeof player.level === 'number' ? player.level : levelBefore) - levelBefore;
+      result.hpGain = (typeof player.maxHp === 'number' ? player.maxHp : maxHpBefore) - maxHpBefore;
+      return result;
+    }
+    function safeAddHP(player, delta, source){
+      if (!player || typeof delta !== 'number' || !delta) return 0;
+      const current = typeof player.hp === 'number' ? player.hp : 0;
+      const maxHp = Math.max(0, typeof player.maxHp === 'number' ? player.maxHp : 0);
+      const target = clamp(current + delta, 0, maxHp);
+      const applied = target - current;
+      guardLog(player, source, 'hp', delta, applied, { reason:'clamp' });
+      player.hp = target;
+      return applied;
+    }
+    function safeAddCharm(player, delta, source){
+      if (!player || typeof delta !== 'number' || !delta) return 0;
+      const current = typeof player.charm === 'number' ? player.charm : 0;
+      const target = clamp(current + delta, 0, CHARM_MAX);
+      const applied = target - current;
+      guardLog(player, source, 'charm', delta, applied, { reason:'clamp' });
+      player.charm = target;
+      return applied;
+    }
+    function safeAddGems(player, delta, source){
+      if (!FEATURE_GEMS) return 0;
+      if (!player || typeof delta !== 'number' || !delta) return 0;
+      const current = typeof player.gems === 'number' ? player.gems : 0;
+      const target = Math.max(0, current + delta);
+      const applied = target - current;
+      guardLog(player, source, 'gems', delta, applied, { reason:'clamp' });
+      player.gems = target;
+      return applied;
     }
     function formatDate(epoch){
       if (!epoch) return 'unknown';
@@ -570,44 +691,26 @@ module.exports = {
       return parts.length ? `(${parts.join(', ')})` : '';
     }
     function applyForestEventDeltas(p, deltas){
-      const start={ hp:p.hp, gold:p.gold, xp:p.xp, charm:p.charm, level:p.level, maxHp:p.maxHp, gems:p.gems || 0 };
-      let xpApplied = 0;
-      if (deltas){
-        if (typeof deltas.hp === 'number') p.hp = clamp(start.hp + deltas.hp, 0, p.maxHp);
-        if (typeof deltas.gold === 'number') p.gold = Math.max(0, start.gold + deltas.gold);
-        if (typeof deltas.xp === 'number'){
-          const targetXp = Math.max(0, start.xp + deltas.xp);
-          xpApplied = targetXp - start.xp;
-          p.xp = targetXp;
-        }
-        if (typeof deltas.charm === 'number') p.charm = clamp((start.charm || 0) + deltas.charm, 0, CHARM_MAX);
-        if (FEATURE_GEMS && typeof deltas.gems === 'number'){
-          const current = typeof p.gems === 'number' ? p.gems : 0;
-          const target = Math.max(0, current + deltas.gems);
-          p.gems = target;
-        }
-      }
+      const actual={ hp:0, gold:0, xp:0, charm:0, gems:0 };
       let levelInfo=null;
-      if (deltas && typeof deltas.xp === 'number' && deltas.xp > 0){
-        const levelBefore=p.level;
-        const maxHpBefore=p.maxHp;
-        const leveled=applyLevelUpsSilent(p);
-        if (leveled){
-          levelInfo={ level:p.level, hpGain:p.maxHp - maxHpBefore, levels:p.level - levelBefore };
+      if (deltas){
+        if (typeof deltas.hp === 'number') actual.hp = safeAddHP(p, deltas.hp, 'event');
+        if (typeof deltas.gold === 'number') actual.gold = safeAddGold(p, deltas.gold, 'event');
+        if (typeof deltas.xp === 'number'){
+          const xpRes = safeAddXP(p, deltas.xp, 'event');
+          actual.xp = xpRes.applied;
+          if (xpRes.levelDelta > 0){
+            levelInfo = { level:p.level, hpGain:xpRes.hpGain, levels:xpRes.levelDelta };
+          }
         }
+        if (typeof deltas.charm === 'number') actual.charm = safeAddCharm(p, deltas.charm, 'event');
+        if (FEATURE_GEMS && typeof deltas.gems === 'number') actual.gems = safeAddGems(p, deltas.gems, 'event');
       }
-      const actual={
-        hp:p.hp - start.hp,
-        gold:p.gold - start.gold,
-        xp:xpApplied,
-        charm:(p.charm||0) - (start.charm||0),
-        gems:(p.gems||0) - (start.gems||0)
-      };
-      return { actual, levelUp:levelInfo };
+      return { actual, levelInfo };
     }
     function resolveForestEventOutcome(p, outcome){
       const deltas = outcome && outcome.deltas ? outcome.deltas : {};
-      const { actual, levelUp } = applyForestEventDeltas(p, deltas);
+      const { actual, levelInfo } = applyForestEventDeltas(p, deltas);
       let lines=[];
       if (outcome){
         if (typeof outcome.lines === 'function'){
@@ -624,8 +727,8 @@ module.exports = {
         const change = formatApplied(actual);
         lines.push(change ? `The moment passes ${change}.` : 'The moment passes quietly.');
       }
-      if (levelUp && levelUp.levels>0){
-        lines.push(`You reach Level ${p.level}! Max HP +${levelUp.hpGain}.`);
+      if (levelInfo && levelInfo.levels>0){
+        lines.push(`You reach Level ${p.level}! Max HP +${levelInfo.hpGain}.`);
       }
       return { lines, actual };
     }
@@ -729,7 +832,7 @@ module.exports = {
     function applyBankInterest(p, dateKey){
       const key = dateKey || todayKey();
       if (p.daily.interestDate === key) return null;
-      const interest = Math.floor(p.bank * 0.01);
+      const interest = Math.floor(p.bank * INTEREST_RATE);
       p.bank += interest;
       p.daily.interestDate = key;
       if (interest > 0 && typeof addNews === 'function') addNews(`${p.name} earned ${interest} gold interest in the bank.`);
@@ -813,8 +916,42 @@ module.exports = {
         r.user_id
       );
     }
+    function enforcePlayerInvariants(p){
+      if (!p) return;
+      const toInt = (val) => {
+        const num = Number(val);
+        return Number.isFinite(num) ? Math.floor(num) : 0;
+      };
+      const maxHpOriginal = p.maxHp;
+      const maxHpNormalized = Math.max(0, toInt(p.maxHp));
+      if (maxHpNormalized !== maxHpOriginal) guardLog(p, 'save', 'maxHp', maxHpOriginal, maxHpNormalized, { reason:'invariant' });
+      p.maxHp = maxHpNormalized;
+      const goldOriginal = p.gold;
+      const goldNormalized = Math.max(0, toInt(p.gold));
+      if (goldNormalized !== goldOriginal) guardLog(p, 'save', 'gold', goldOriginal, goldNormalized, { reason:'invariant' });
+      p.gold = goldNormalized;
+      const xpOriginal = p.xp;
+      const xpNormalized = Math.max(0, toInt(p.xp));
+      if (xpNormalized !== xpOriginal) guardLog(p, 'save', 'xp', xpOriginal, xpNormalized, { reason:'invariant' });
+      p.xp = xpNormalized;
+      const hpOriginal = p.hp;
+      const hpNormalized = clamp(toInt(p.hp), 0, p.maxHp);
+      if (hpNormalized !== hpOriginal) guardLog(p, 'save', 'hp', hpOriginal, hpNormalized, { reason:'invariant' });
+      p.hp = hpNormalized;
+      const charmOriginal = p.charm;
+      const charmNormalized = clamp(toInt(p.charm), 0, CHARM_MAX);
+      if (charmNormalized !== charmOriginal) guardLog(p, 'save', 'charm', charmOriginal, charmNormalized, { reason:'invariant' });
+      p.charm = charmNormalized;
+      if (FEATURE_GEMS){
+        const gemsOriginal = p.gems;
+        const gemsNormalized = Math.max(0, toInt(p.gems));
+        if (gemsNormalized !== gemsOriginal) guardLog(p, 'save', 'gems', gemsOriginal, gemsNormalized, { reason:'invariant' });
+        p.gems = gemsNormalized;
+      }
+    }
     function savePlayer(p){
       if (!p) return;
+      enforcePlayerInvariants(p);
       p.updatedAt = nowEpoch();
       if (typeof p.lastSeen !== 'number') p.lastSeen = nowEpoch();
       const exists = !!dbGetPlayer();
@@ -844,6 +981,7 @@ module.exports = {
     }
     function putPlayerRaw(player){
       if (!player) return;
+      enforcePlayerInvariants(player);
       player.updatedAt = nowEpoch();
       if (typeof player.lastSeen !== 'number') player.lastSeen = nowEpoch();
       if (useDB){
@@ -1558,7 +1696,7 @@ module.exports = {
       if (result.attackerWon){
         api.print(`You defeat ${result.opponent}!`,'green');
         if (result.goldWon) api.print(`You claim ${result.goldWon} gold.`, 'cyan');
-        api.print(`You earn ${result.xpGain} xp.`, 'cyan');
+        if (result.xpGain) api.print(`You earn ${result.xpGain} xp.`, 'cyan');
       } else {
         api.print(`${result.winnerName} bests you in the duel.`, 'yellow');
         if (result.goldLost) api.print(`You lose ${result.goldLost} gold.`, 'yellow');
@@ -1577,9 +1715,9 @@ module.exports = {
     function trainingMenu(p){
       printHeader(`Turgon's Warrior Training`);
       showStatus(p);
-      api.print('S) Sparring — hone your edge (+10 xp) — Cost: 80 gold');
-      api.print('E) Endurance drills — toughen up (+3 Max HP) — Cost: 120 gold');
-      api.print('W) Swagger lessons — polish your charm (+1 Charm, cap 10) — Cost: 60 gold');
+      api.print(`S) Sparring — hone your edge (+${TRAINING_SPARRING_XP} xp) — Cost: ${TRAINING_SPARRING_COST} gold`);
+      api.print(`E) Endurance drills — toughen up (+${TRAINING_ENDURANCE_HP} Max HP) — Cost: ${TRAINING_ENDURANCE_COST} gold`);
+      api.print(`W) Swagger lessons — polish your charm (+${TRAINING_SWAGGER_CHARM} Charm, cap ${CHARM_MAX}) — Cost: ${TRAINING_SWAGGER_COST} gold`);
       if (CLASS_ENABLED){
         const classInfo = getClassInfo(p.classId);
         if (classInfo){
@@ -1919,20 +2057,24 @@ module.exports = {
       if (e.hp<=0){
         p.kills++;
         if (e.boss){
-          const gold=randInt(DRAGON_GOLD_MIN, DRAGON_GOLD_MAX);
-          const xp=randInt(80,120)+p.level*randInt(6,10);
-          p.gold+=gold; p.xp+=xp;
-          const newCharm=clamp(p.charm+1,0,10); const charmGain=newCharm-p.charm; p.charm=newCharm;
+          const gold = randInt(DRAGON_GOLD_MIN, DRAGON_GOLD_MAX);
+          const xp = randInt(80,120) + p.level * randInt(6,10);
+          const goldApplied = safeAddGold(p, gold, 'dragon');
+          const xpResult = safeAddXP(p, xp, 'dragon');
+          const charmGain = safeAddCharm(p, 1, 'dragon');
           api.print('You have slain the Ancient Dragon!','magenta');
-          api.print(`You claim ${gold} gold and earn ${xp} xp.`, 'cyan');
+          api.print(`You claim ${goldApplied} gold and earn ${xpResult.applied} xp.`, 'cyan');
           if (charmGain>0) api.print('Your legend grows. Charm +1.','green');
           if (typeof addNews === 'function') addNews(`${p.name} slew the Ancient Dragon!`);
         } else {
-          const gold=randInt(10,20)+p.level*randInt(5,10); const xp=randInt(8,12)+p.level*randInt(2,4);
-          p.daily.forestTurns=Math.max(0, p.daily.forestTurns-1); p.gold+=gold; p.xp+=xp; api.print(`Victory! You gain ${gold} gold and ${xp} xp.`,'cyan');
+          const gold = randInt(10,20) + p.level * randInt(5,10);
+          const xp = randInt(8,12) + p.level * randInt(2,4);
+          p.daily.forestTurns=Math.max(0, p.daily.forestTurns-1);
+          const goldApplied = safeAddGold(p, gold, 'combat');
+          const xpResult = safeAddXP(p, xp, 'combat');
+          api.print(`Victory! You gain ${goldApplied} gold and ${xpResult.applied} xp.`,'cyan');
         }
         maybeApplyMysticHeal(p);
-        applyLevelUps(p);
         clearCombatState(p);
         p.combat=null; savePlayer(p); api.hr(); p.screen='forest'; return render(p); }
       const dmgToYou=Math.max(1, e.atk + randInt(0,3) - ARMOR[p.armorIdx].def);
@@ -2030,7 +2172,7 @@ module.exports = {
       }
       if (k.startsWith('s')||k==='s'){
         if (startForestEvent(p, 'search')) return render(p);
-        let gold=randInt(2,15)+randInt(0,p.level);
+        let gold=randInt(SEARCH_GOLD_MIN, SEARCH_GOLD_MAX)+randInt(0,p.level);
         if (CLASS_ENABLED && p.classId === 'thief'){
           const rate = Math.max(0, THIEF_SEARCH_BONUS_RATE || 0);
           const adjusted = Math.floor(gold * (1 + rate));
@@ -2039,11 +2181,11 @@ module.exports = {
           gold = Math.max(0, gold);
         }
         p.daily.forestTurns--;
-        p.gold+=gold;
-        api.print(`You find ${gold} gold.`,'green');
+        const goldApplied = safeAddGold(p, gold, 'search');
+        api.print(`You find ${goldApplied} gold.`,'green');
         if (FEATURE_GEMS && GEM_DROP_RATE_SEARCH > 0 && Math.random() < GEM_DROP_RATE_SEARCH){
-          p.gems = Math.max(0, (p.gems || 0) + 1);
-          api.print('A glint catches your eye — you pocket a rare gem!','magenta');
+          const gemGain = safeAddGems(p, 1, 'search');
+          if (gemGain > 0) api.print('A glint catches your eye — you pocket a rare gem!','magenta');
         }
         savePlayer(p);
         return render(p);
@@ -2136,7 +2278,7 @@ module.exports = {
         if (a.def<=ARMOR[p.armorIdx].def) return api.print('That would not improve your defense.','yellow');
         p.gold-=a.cost; p.armorIdx=i; api.print(`You purchase the ${a.name}.`,'green'); savePlayer(p); return render(p); }
       api.print('Choose a number or V to return.','dim'); }
-    function onHealer(p,t){ const k=t.toLowerCase(); if (k==='v'){ p.screen='town'; return render(p); } if (k==='h'){ const missing=p.maxHp-p.hp; if (missing<=0) return api.print('You are already healthy.'); const cost=missing*2; if (p.gold<cost) return api.print('You lack the gold.','yellow'); p.gold-=cost; p.hp=p.maxHp; api.print('You are fully healed.','green'); savePlayer(p); return render(p); } api.print('Type h to heal (cost), or v to return.','dim'); }
+    function onHealer(p,t){ const k=t.toLowerCase(); if (k==='v'){ p.screen='town'; return render(p); } if (k==='h'){ const missing=p.maxHp-p.hp; if (missing<=0) return api.print('You are already healthy.'); const cost=missing*HEALER_COST_PER_HP; if (p.gold<cost) return api.print('You lack the gold.','yellow'); p.gold-=cost; p.hp=p.maxHp; api.print('You are fully healed.','green'); savePlayer(p); return render(p); } api.print('Type h to heal (cost), or v to return.','dim'); }
     function onBank(p,t){ const k=t.toLowerCase(); if (k==='v'){ p.screen='town'; return render(p); } if (k==='d'){ p.screen='bank:dep'; return render(p); } if (k==='w'){ p.screen='bank:wit'; return render(p); } api.print('Type d, w, or v.','dim'); }
     function onBankAmount(p,t){ const k=t.toLowerCase(); if (k==='v'){ p.temp=null; p.screen='town'; return render(p); } const amt=Math.max(0,Math.floor(parseInt(k,10)));
       if (!amt && amt!==0) return api.print('Enter a number, or v to cancel.','dim'); if (!p.temp){ p.screen='town'; return render(p); }
@@ -2398,15 +2540,23 @@ module.exports = {
       }
 
       const xpGain=randInt(8,12);
-      const goldTransfer=Math.max(0, Math.floor(Math.max(0, loser.gold || 0) * 0.05));
+      const goldTransfer=Math.max(0, Math.floor(Math.max(0, loser.gold || 0) * DUEL_GOLD_TAKE_RATE));
+      let goldRemoved = 0;
+      let goldAdded = 0;
       if (goldTransfer>0){
-        loser.gold=Math.max(0, (loser.gold||0) - goldTransfer);
-        winner.gold=(winner.gold||0) + goldTransfer;
+        const lossDelta = safeAddGold(loser, -goldTransfer, 'duel');
+        goldRemoved = Math.abs(lossDelta);
+        if (goldRemoved > 0){
+          goldAdded = safeAddGold(winner, goldRemoved, 'duel');
+        }
       }
       winner.kills=(winner.kills||0)+1;
       loser.deaths=(loser.deaths||0)+1;
-      winner.xp=(winner.xp||0)+xpGain;
-      if (winner===p) applyLevelUps(p); else applyLevelUpsSilent(winner);
+      let xpApplied = 0;
+      if (xpGain>0){
+        const xpRes = safeAddXP(winner, xpGain, winner===p ? 'duel' : 'duel:silent');
+        xpApplied = xpRes.applied;
+      }
 
       p.daily.duelUsed = true;
 
@@ -2415,10 +2565,10 @@ module.exports = {
         rounds,
         attackerWon:winner===p,
         method,
-        xpGain:winner===p?xpGain:0,
-        xpEnemy:winner===defender?xpGain:0,
-        goldWon:winner===p?goldTransfer:0,
-        goldLost:winner===defender?goldTransfer:0,
+        xpGain:winner===p?xpApplied:0,
+        xpEnemy:winner===defender?xpApplied:0,
+        goldWon:winner===p?goldAdded:0,
+        goldLost:winner===defender?goldRemoved:0,
         winnerName:winner.name
       };
 
@@ -2438,21 +2588,25 @@ module.exports = {
       if (k==='v'){ p.screen='town'; return render(p); }
       if (CLASS_ENABLED && (k==='c'||k.startsWith('class'))){ p.screen='training:class'; return render(p); }
       if (k==='s'||k.startsWith('spar')){
-        if (p.gold < 80) return api.print('Turgon grunts: "Come back with more gold."','yellow');
-        p.gold -= 80; p.xp += 10; api.print('You spar with Turgon and feel sharper. (+10 xp)','green');
-        applyLevelUps(p); savePlayer(p); return render(p);
+        if (p.gold < TRAINING_SPARRING_COST) return api.print('Turgon grunts: "Come back with more gold."','yellow');
+        p.gold -= TRAINING_SPARRING_COST;
+        const xpRes = safeAddXP(p, TRAINING_SPARRING_XP, 'training');
+        api.print(`You spar with Turgon and feel sharper. (+${xpRes.applied} xp)`,'green');
+        savePlayer(p); return render(p);
       }
       if (k==='e'||k.startsWith('end')){
-        if (p.gold < 120) return api.print('The drills are not free — earn more coin first.','yellow');
-        p.gold -= 120; p.maxHp += 3; p.hp = Math.min(p.maxHp, p.hp + 3);
+        if (p.gold < TRAINING_ENDURANCE_COST) return api.print('The drills are not free — earn more coin first.','yellow');
+        p.gold -= TRAINING_ENDURANCE_COST; p.maxHp += TRAINING_ENDURANCE_HP;
+        safeAddHP(p, TRAINING_ENDURANCE_HP, 'training');
         api.print('Endurance training leaves you hardier. Max HP +3.','green');
         savePlayer(p); return render(p);
       }
       if (k==='w'||k.startsWith('swag')||k.startsWith('charm')){
         if (p.charm >= CHARM_MAX) return api.print('Turgon laughs: "Your swagger is already legendary."','yellow');
-        if (p.gold < 60) return api.print('Swagger lessons require coin you do not possess.','yellow');
-        p.gold -= 60; p.charm = clamp(p.charm + 1, 0, CHARM_MAX);
-        api.print('You perfect a roguish grin. Charm +1.','green');
+        if (p.gold < TRAINING_SWAGGER_COST) return api.print('Swagger lessons require coin you do not possess.','yellow');
+        p.gold -= TRAINING_SWAGGER_COST;
+        const charmGain = safeAddCharm(p, TRAINING_SWAGGER_CHARM, 'training');
+        api.print(`You perfect a roguish grin. Charm +${charmGain}.`,'green');
         savePlayer(p); return render(p);
       }
       const fallback = CLASS_ENABLED
