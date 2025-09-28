@@ -22,7 +22,8 @@ module.exports = {
     let db = null, selectPlayer = null, insertPlayer = null, updatePlayer = null, topHeroesStmt = null, opponentsStmt = null,
       selectMarriageCandidatesStmt = null, insertProposalStmt = null, selectProposalsForStmt = null, checkProposalStmt = null,
       deleteProposalStmt = null, deleteProposalsByPlayerStmt = null, selectMarriedPairsStmt = null,
-      insertMailStmt = null, selectInboxMailStmt = null, selectMailByIdStmt = null, markMailReadStmt = null;
+      insertMailStmt = null, selectInboxMailStmt = null, selectMailByIdStmt = null, markMailReadStmt = null,
+      selectOnlinePlayersStmt = null;
 
     function lazyInitDB() {
       if (dbReady) return;
@@ -40,6 +41,7 @@ module.exports = {
             gender       TEXT,
             created_at   INTEGER NOT NULL,
             updated_at   INTEGER NOT NULL,
+            last_seen    INTEGER NOT NULL DEFAULT 0,
             level        INTEGER NOT NULL DEFAULT 1,
             xp           INTEGER NOT NULL DEFAULT 0,
             hp           INTEGER NOT NULL DEFAULT 30,
@@ -62,6 +64,7 @@ module.exports = {
             class_id     TEXT
           );
           CREATE INDEX IF NOT EXISTS idx_lord_players_updated ON lord_players(updated_at DESC);
+          CREATE INDEX IF NOT EXISTS idx_lord_players_last_seen ON lord_players(last_seen DESC);
         `);
 
         db.exec(`ALTER TABLE lord_players ADD COLUMN IF NOT EXISTS gems INTEGER NOT NULL DEFAULT 0;`);
@@ -69,6 +72,7 @@ module.exports = {
         db.exec(`ALTER TABLE lord_players ADD COLUMN IF NOT EXISTS spouse_name TEXT;`);
         db.exec(`ALTER TABLE lord_players ADD COLUMN IF NOT EXISTS married_on INTEGER NOT NULL DEFAULT 0;`);
         db.exec(`ALTER TABLE lord_players ADD COLUMN IF NOT EXISTS class_id TEXT;`);
+        db.exec(`ALTER TABLE lord_players ADD COLUMN IF NOT EXISTS last_seen INTEGER NOT NULL DEFAULT 0;`);
         db.exec(`
           CREATE TABLE IF NOT EXISTS lord_proposals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,15 +105,15 @@ module.exports = {
         selectPlayer = db.prepare(`SELECT * FROM lord_players WHERE user_id = ?`);
         insertPlayer = db.prepare(`
           INSERT INTO lord_players (
-            user_id, char_name, gender, created_at, updated_at,
+            user_id, char_name, gender, created_at, updated_at, last_seen,
             level, xp, hp, max_hp, gold, bank, weapon_idx, armor_idx,
             charm, kills, deaths, day_count, daily_json, expert, screen, gems,
             spouse_id, spouse_name, married_on, class_id
-          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         `);
         updatePlayer = db.prepare(`
           UPDATE lord_players
-             SET char_name=?, gender=?, updated_at=?,
+             SET char_name=?, gender=?, updated_at=?, last_seen=?,
                  level=?, xp=?, hp=?, max_hp=?, gold=?, bank=?, weapon_idx=?, armor_idx=?,
                  charm=?, kills=?, deaths=?, day_count=?, daily_json=?, expert=?, screen=?, gems=?,
                  spouse_id=?, spouse_name=?, married_on=?, class_id=?
@@ -175,6 +179,13 @@ module.exports = {
            LIMIT 1
         `);
         markMailReadStmt = db.prepare(`UPDATE lord_mail SET unread = 0 WHERE id = ?`);
+        selectOnlinePlayersStmt = db.prepare(`
+          SELECT user_id, char_name, level, last_seen
+            FROM lord_players
+           WHERE last_seen >= ?
+           ORDER BY last_seen DESC
+           LIMIT 60
+        `);
         useDB = true;
       } catch (e) {
         useDB = false; // fall back silently; don't break DoorManager
@@ -188,6 +199,7 @@ module.exports = {
     const randInt = (a, b) => (a + Math.floor(Math.random() * (b - a + 1)));
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const nowEpoch = () => Math.floor(Date.now() / 1000);
+    const ONLINE_WINDOW_SEC = 300;
     const FEATURE_GEMS = true;
     const GEM_DROP_RATE_SEARCH = 0.01;
     const JEWELER_DAILY_LIMIT = 3;
@@ -675,7 +687,8 @@ module.exports = {
         spouse_id: p.spouseId || null,
         spouse_name: p.spouseName || null,
         married_on: p.marriedOn || 0,
-        class_id: p.classId || null
+        class_id: p.classId || null,
+        last_seen: typeof p.lastSeen === 'number' ? p.lastSeen : 0
       };
     }
     function fromRow(r){
@@ -691,7 +704,8 @@ module.exports = {
         spouseId: r.spouse_id ? String(r.spouse_id) : null,
         spouseName: r.spouse_name || null,
         marriedOn: typeof r.married_on === 'number' ? r.married_on : 0,
-        classId: r.class_id ? String(r.class_id) : null
+        classId: r.class_id ? String(r.class_id) : null,
+        lastSeen: typeof r.last_seen === 'number' ? r.last_seen : 0
       };
     }
 
@@ -708,7 +722,10 @@ module.exports = {
     function dbGetPlayer(){
       if (!useDB){
         const existing = memGet();
-        if (existing) existing.daily = normalizeDaily(existing.daily);
+        if (existing){
+          existing.daily = normalizeDaily(existing.daily);
+          if (typeof existing.lastSeen !== 'number') existing.lastSeen = 0;
+        }
         return existing;
       }
       const r = selectPlayer.get(userId); return r ? fromRow(r) : null;
@@ -717,7 +734,7 @@ module.exports = {
       if (!useDB) return memPut(p);
       const r = toRow(p);
       insertPlayer.run(
-        r.user_id, r.char_name, r.gender, r.created_at, r.updated_at,
+        r.user_id, r.char_name, r.gender, r.created_at, r.updated_at, r.last_seen,
         r.level, r.xp, r.hp, r.max_hp, r.gold, r.bank, r.weapon_idx, r.armor_idx,
         r.charm, r.kills, r.deaths, r.day_count, r.daily_json, r.expert, r.screen, r.gems,
         r.spouse_id, r.spouse_name, r.married_on, r.class_id
@@ -727,14 +744,20 @@ module.exports = {
       if (!useDB) return memPut(p);
       const r = toRow(p);
       updatePlayer.run(
-        r.char_name, r.gender, r.updated_at,
+        r.char_name, r.gender, r.updated_at, r.last_seen,
         r.level, r.xp, r.hp, r.max_hp, r.gold, r.bank, r.weapon_idx, r.armor_idx,
         r.charm, r.kills, r.deaths, r.day_count, r.daily_json, r.expert, r.screen, r.gems,
         r.spouse_id, r.spouse_name, r.married_on, r.class_id,
         r.user_id
       );
     }
-    function savePlayer(p){ p.updatedAt = nowEpoch(); const exists = !!dbGetPlayer(); exists ? dbUpdatePlayer(p) : dbInsertPlayer(p); }
+    function savePlayer(p){
+      if (!p) return;
+      p.updatedAt = nowEpoch();
+      if (typeof p.lastSeen !== 'number') p.lastSeen = nowEpoch();
+      const exists = !!dbGetPlayer();
+      exists ? dbUpdatePlayer(p) : dbInsertPlayer(p);
+    }
     function getOpponentsFor(player){
       if (useDB){
         return opponentsStmt ? opponentsStmt.all(player.userId) : [];
@@ -751,12 +774,16 @@ module.exports = {
         return row ? fromRow(row) : null;
       }
       const mem = memClone(MEM.players.get(id));
-      if (mem) mem.daily = normalizeDaily(mem.daily);
+      if (mem){
+        mem.daily = normalizeDaily(mem.daily);
+        if (typeof mem.lastSeen !== 'number') mem.lastSeen = 0;
+      }
       return mem;
     }
     function putPlayerRaw(player){
       if (!player) return;
       player.updatedAt = nowEpoch();
+      if (typeof player.lastSeen !== 'number') player.lastSeen = nowEpoch();
       if (useDB){
         const row = selectPlayer.get(player.userId);
         if (row) dbUpdatePlayer(player); else dbInsertPlayer(player);
@@ -948,6 +975,77 @@ module.exports = {
       const filtered = term ? normalized.filter(rec => rec.name.toLowerCase().includes(term)) : normalized;
       return filtered.slice(0, 20);
     }
+    function listOnlinePlayers(currentPlayer){
+      const selfId = currentPlayer ? String(currentPlayer.userId ?? '') : '';
+      const provider = G.LORD_PRESENCE_PROVIDER;
+      if (provider && typeof provider.list === 'function'){
+        try {
+          const entries = provider.list();
+          if (Array.isArray(entries)){
+            const seen = new Set();
+            const normalized = [];
+            entries.forEach(entry => {
+              if (!entry) return;
+              const id = typeof entry.userId !== 'undefined' && entry.userId !== null ? String(entry.userId) : '';
+              if (!id || id === selfId) return;
+              if (seen.has(id)) return;
+              seen.add(id);
+              normalized.push({
+                userId: id,
+                name: safeName(entry.name),
+                level: typeof entry.level === 'number' ? entry.level : null
+              });
+            });
+            normalized.sort((a,b) => a.name.localeCompare(b.name));
+            return normalized.slice(0, 30);
+          }
+        } catch (err){
+          console.error('[lord] presence provider list failed:', err && err.message ? err.message : err);
+        }
+      }
+      const cutoff = nowEpoch() - ONLINE_WINDOW_SEC;
+      const seen = new Set();
+      if (useDB){
+        if (!selectOnlinePlayersStmt) return [];
+        const rows = selectOnlinePlayersStmt.all(cutoff);
+        const normalized = [];
+        rows.forEach(row => {
+          if (!row) return;
+          const id = typeof row.user_id !== 'undefined' && row.user_id !== null ? String(row.user_id) : '';
+          if (!id || id === selfId) return;
+          if (seen.has(id)) return;
+          const lastSeen = typeof row.last_seen === 'number' ? row.last_seen : 0;
+          if (lastSeen < cutoff) return;
+          seen.add(id);
+          normalized.push({
+            userId: id,
+            name: safeName(row.char_name),
+            level: typeof row.level === 'number' ? row.level : 1,
+            lastSeen
+          });
+        });
+        normalized.sort((a,b) => (b.lastSeen - a.lastSeen) || a.name.localeCompare(b.name));
+        return normalized.slice(0, 30);
+      }
+      const normalized = [];
+      MEM.players.forEach(player => {
+        if (!player) return;
+        const id = typeof player.userId !== 'undefined' && player.userId !== null ? String(player.userId) : '';
+        if (!id || id === selfId) return;
+        if (seen.has(id)) return;
+        const lastSeen = typeof player.lastSeen === 'number' ? player.lastSeen : 0;
+        if (lastSeen < cutoff) return;
+        seen.add(id);
+        normalized.push({
+          userId: id,
+          name: safeName(player.name),
+          level: typeof player.level === 'number' ? player.level : 1,
+          lastSeen
+        });
+      });
+      normalized.sort((a,b) => (b.lastSeen - a.lastSeen) || a.name.localeCompare(b.name));
+      return normalized.slice(0, 30);
+    }
     function listMarriageCandidates(p){
       if (!p) return [];
       if (useDB){
@@ -1009,6 +1107,7 @@ module.exports = {
         gems:0,
         spouseId:null, spouseName:null, marriedOn:0,
         classId:null,
+        lastSeen: now,
         expert:false, screen:'town', combat:null, temp:null
       };
     }
@@ -1535,7 +1634,22 @@ module.exports = {
       api.print('Type your announcement, or V to cancel.','dim');
       api.hr();
     }
-    function peopleMenu(p){ stubMenu('People Online', p); }
+    function peopleMenu(p){
+      printHeader('People Online');
+      showStatus(p);
+      const online = listOnlinePlayers(p);
+      if (!online.length){
+        api.print('No one else is online.','dim');
+      } else {
+        online.forEach((person, idx) => {
+          const lvl = typeof person.level === 'number' && !Number.isNaN(person.level) ? person.level : '?';
+          api.print(`${idx+1}) ${person.name}  Lv${lvl}`);
+        });
+      }
+      api.print('V) Return to Town Square');
+      api.hr();
+      api.print('Type: v','dim');
+    }
 
     // Combat
     function genEnemy(p){ const idx=clamp(p.level-1+randInt(-1,1),0,ENEMIES.length-1); const name=ENEMIES[idx];
@@ -2475,6 +2589,10 @@ module.exports = {
       const raw=String(text||'').trim(); if (!raw) return true;
       let p = dbGetPlayer();
       if (!p){ p=defaultPlayer(fallbackName,null); p.screen='create:name'; p.temp={ name:fallbackName, step:'name' }; savePlayer(p); }
+
+      const nowTs = nowEpoch();
+      p.lastSeen = nowTs;
+      savePlayer(p);
 
       p.daily = normalizeDaily(p.daily);
       const today = todayKey();
