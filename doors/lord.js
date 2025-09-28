@@ -765,15 +765,34 @@ module.exports = {
       }
       return { lines, actual };
     }
+    function currentForestTurns(p){
+      const turns = p?.daily?.forestTurns;
+      return typeof turns === 'number' ? Math.max(0, Math.floor(turns)) : 0;
+    }
+    function hasTurns(p){
+      return currentForestTurns(p) > 0;
+    }
+    function spendTurn(p, source){
+      if (!hasTurns(p)){
+        api.print('No turns left today.','yellow');
+        return false;
+      }
+      const remaining = currentForestTurns(p);
+      if (!p.daily || typeof p.daily !== 'object') p.daily = normalizeDaily(p.daily);
+      p.daily.forestTurns = Math.max(0, remaining - 1);
+      return true;
+    }
     function startForestEvent(p, origin){
       if (p?.temp?.event) return false;
       if (FOREST_EVENTS.length<=0) return false;
       if (Math.random() >= FOREST_EVENT_CHANCE) return false;
       const event = FOREST_EVENTS[randInt(0, FOREST_EVENTS.length-1)];
       if (!event) return false;
+      if (!spendTurn(p, origin || 'event')) return true;
       if (!p.temp || typeof p.temp !== 'object') p.temp = {};
       p.temp.event = { id:event.id, stage:'choice', origin:origin || null };
       p.screen='forest:event';
+      savePlayer(p);
       return true;
     }
     function clearForestEvent(p){
@@ -2233,7 +2252,6 @@ module.exports = {
         } else {
           const gold = randInt(10,20) + p.level * randInt(5,10);
           const xp = randInt(8,12) + p.level * randInt(2,4);
-          p.daily.forestTurns=Math.max(0, p.daily.forestTurns-1);
           const goldApplied = safeAddGold(p, gold, 'combat');
           const xpResult = safeAddXP(p, xp, 'combat');
           api.print(`Victory! You gain ${goldApplied} gold and ${xpResult.applied} xp.`,'cyan');
@@ -2248,7 +2266,7 @@ module.exports = {
       renderCombat(p); }
     function doFlee(p){ const e=p.combat; if (!e) return;
       const chance=50 - e.fleeAttempts*10 + (p.level*3); const roll=randInt(1,100);
-      if (roll<=chance){ api.print('You escape into the trees!','green'); if (!e.boss) p.daily.forestTurns=Math.max(0, p.daily.forestTurns-1); clearCombatState(p); p.combat=null; savePlayer(p); p.screen='forest'; return render(p); }
+      if (roll<=chance){ api.print('You escape into the trees!','green'); clearCombatState(p); p.combat=null; savePlayer(p); p.screen='forest'; return render(p); }
       e.fleeAttempts++; api.print('You fail to flee!','yellow'); const dmg=Math.max(1, e.atk + randInt(0,2) - ARMOR[p.armorIdx].def);
       p.hp=Math.max(0, p.hp-dmg); api.print(`The ${e.name} punishes your back for ${dmg}.`,'yellow');
       if (p.hp<=0){ api.print('You fall while fleeing…','red'); p.deaths++; const loss=Math.floor(p.gold*0.25); p.gold-=loss; api.print(`You lose ${loss} gold.`,'yellow');
@@ -2322,20 +2340,23 @@ module.exports = {
         return render(p);
       }
       if (wantsHeal){
-        if (raw==='h' && p.daily.forestTurns>0){
+        if (raw==='h' && hasTurns(p)){
           k='hunt';
         } else {
           return api.print('You have no camp heals remaining today.','yellow');
         }
       }
-      if (p.daily.forestTurns<=0) return api.print('No turns left today. Sleep at the Inn.','yellow');
       if (k==='m'||k.startsWith('m')||k.startsWith('hunt')||k.startsWith('fight')){
+        if (!hasTurns(p)) return api.print('No turns left today.','yellow');
         if (startForestEvent(p, 'hunt')) return render(p);
+        if (!spendTurn(p, 'hunt')) return;
         ensureCombatState(p);
-        p.combat=genEnemy(p); p.screen='combat'; return render(p);
+        p.combat=genEnemy(p); p.screen='combat'; savePlayer(p); return render(p);
       }
       if (k.startsWith('s')||k==='s'){
+        if (!hasTurns(p)) return api.print('No turns left today.','yellow');
         if (startForestEvent(p, 'search')) return render(p);
+        if (!spendTurn(p, 'search')) return;
         let gold=randInt(SEARCH_GOLD_MIN, SEARCH_GOLD_MAX)+randInt(0,p.level);
         if (CLASS_ENABLED && p.classId === 'thief'){
           const rate = Math.max(0, THIEF_SEARCH_BONUS_RATE || 0);
@@ -2344,7 +2365,6 @@ module.exports = {
         } else {
           gold = Math.max(0, gold);
         }
-        p.daily.forestTurns--;
         const goldApplied = safeAddGold(p, gold, 'search');
         api.print(`You find ${goldApplied} gold.`,'green');
         if (FEATURE_GEMS && GEM_DROP_RATE_SEARCH > 0 && Math.random() < GEM_DROP_RATE_SEARCH){
@@ -2356,7 +2376,7 @@ module.exports = {
       }
       if (k.startsWith('d')||k==='d'){
         if (p.level < DRAGON_LEVEL_REQ) return api.print('The legends warn that the Dragon is beyond your skill for now.','yellow');
-        p.daily.forestTurns=Math.max(0, p.daily.forestTurns-1);
+        if (!spendTurn(p, 'dragon')) return;
         const dragon=maybeDragon(p);
         if (!dragon){ api.print('You scour the groves but find no sign of the Dragon.','yellow'); savePlayer(p); return render(p); }
         api.print('A thunderous roar shakes the canopy — the Ancient Dragon descends!','red');
@@ -2399,7 +2419,6 @@ module.exports = {
       if (!choice){
         return api.print('Choose one of the options shown.','yellow');
       }
-      p.daily.forestTurns = Math.max(0, p.daily.forestTurns-1);
       const outcome = choice.effect ? choice.effect(p) : null;
       const resolution = resolveForestEventOutcome(p, outcome);
       if (!p.temp) p.temp={};
