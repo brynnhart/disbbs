@@ -14,7 +14,7 @@ module.exports = {
 
     let dbReady = false;
     let useDB = false;
-    let db = null, selectPlayer = null, insertPlayer = null, updatePlayer = null, topHeroesStmt = null;
+    let db = null, selectPlayer = null, insertPlayer = null, updatePlayer = null, topHeroesStmt = null, opponentsStmt = null;
 
     function lazyInitDB() {
       if (dbReady) return;
@@ -72,6 +72,13 @@ module.exports = {
            ORDER BY level DESC, kills DESC, wealth DESC
            LIMIT 20
         `);
+        opponentsStmt = db.prepare(`
+          SELECT user_id, char_name AS name, level, kills, deaths, gold
+            FROM lord_players
+           WHERE user_id != ?
+           ORDER BY level DESC, xp DESC, kills DESC
+           LIMIT 20
+        `);
         useDB = true;
       } catch (e) {
         useDB = false; // fall back silently; don't break DoorManager
@@ -118,6 +125,19 @@ module.exports = {
       }
       return leveled;
     }
+    function applyLevelUpsSilent(p){
+      let leveled = false;
+      while (p.xp >= xpToNext(p.level)){
+        const needed = xpToNext(p.level);
+        p.xp -= needed;
+        p.level += 1;
+        const hpGain = 5 + randInt(0,5);
+        p.maxHp += hpGain;
+        p.hp = p.maxHp;
+        leveled = true;
+      }
+      return leveled;
+    }
 
     // Player identity from BBS
     const userId = state.userId;
@@ -126,16 +146,23 @@ module.exports = {
     // ─────────────────────────────────────────────────────────────
     // Persistence wrappers (DB or MEM)
     function parseDaily(json){ try { return json ? JSON.parse(json) : null; } catch { return null; } }
-    function defaultDaily(){ return { forestTurns:10, tavernDrinks:2, heals:3, slept:false }; }
+    function defaultDaily(){ return { forestTurns:10, tavernDrinks:2, heals:3, slept:false, duelUsed:false }; }
+    function normalizeDaily(d){
+      const base = defaultDaily();
+      if (!d) return base;
+      Object.keys(base).forEach(k=>{ if (typeof d[k] === 'undefined') d[k] = base[k]; });
+      return d;
+    }
 
     function toRow(p){
+      const id = p.userId ?? userId;
       return {
-        user_id: userId, char_name: p.name, gender: p.gender || null,
+        user_id: id, char_name: p.name, gender: p.gender || null,
         created_at: p.createdAt, updated_at: p.updatedAt,
         level: p.level, xp: p.xp, hp: p.hp, max_hp: p.maxHp, gold: p.gold, bank: p.bank,
         weapon_idx: p.weaponIdx, armor_idx: p.armorIdx,
         charm: p.charm, kills: p.kills, deaths: p.deaths,
-        day_count: p.dayCount, daily_json: JSON.stringify(p.daily || defaultDaily()),
+        day_count: p.dayCount, daily_json: JSON.stringify(normalizeDaily(p.daily)),
         expert: p.expert ? 1 : 0, screen: p.screen
       };
     }
@@ -146,13 +173,14 @@ module.exports = {
         level: r.level, xp: r.xp, hp: r.hp, maxHp: r.max_hp, gold: r.gold, bank: r.bank,
         weaponIdx: r.weapon_idx, armorIdx: r.armor_idx,
         charm: r.charm, kills: r.kills, deaths: r.deaths,
-        dayCount: r.day_count, daily: parseDaily(r.daily_json) || defaultDaily(),
+        dayCount: r.day_count, daily: normalizeDaily(parseDaily(r.daily_json)),
         expert: !!r.expert, screen: r.screen || 'town', combat: null, temp: null
       };
     }
 
     function memGet(){ return MEM.players.get(userId) || null; }
-    function memPut(p){ MEM.players.set(userId, p); }
+    function memPut(p){ MEM.players.set(p.userId ?? userId, p); }
+    function memClone(p){ return p ? JSON.parse(JSON.stringify(p)) : null; }
     function memTop(){
       return [...MEM.players.values()]
         .map(p => ({ name:p.name, level:p.level, kills:p.kills, deaths:p.deaths, wealth:(p.gold+p.bank) }))
@@ -161,7 +189,11 @@ module.exports = {
     }
 
     function dbGetPlayer(){
-      if (!useDB) return memGet();
+      if (!useDB){
+        const existing = memGet();
+        if (existing) existing.daily = normalizeDaily(existing.daily);
+        return existing;
+      }
       const r = selectPlayer.get(userId); return r ? fromRow(r) : null;
     }
     function dbInsertPlayer(p){
@@ -184,6 +216,35 @@ module.exports = {
       );
     }
     function savePlayer(p){ p.updatedAt = nowEpoch(); const exists = !!dbGetPlayer(); exists ? dbUpdatePlayer(p) : dbInsertPlayer(p); }
+    function getOpponentsFor(player){
+      if (useDB){
+        return opponentsStmt ? opponentsStmt.all(player.userId) : [];
+      }
+      return [...MEM.players.values()]
+        .filter(other => other.userId !== player.userId)
+        .sort((a,b)=>(b.level-a.level)||(b.xp-a.xp)||(b.kills-a.kills))
+        .slice(0,20)
+        .map(o=>({ user_id:o.userId, name:o.name, level:o.level, kills:o.kills, deaths:o.deaths, gold:o.gold }));
+    }
+    function getPlayerByIdRaw(id){
+      if (useDB){
+        const row = selectPlayer.get(id);
+        return row ? fromRow(row) : null;
+      }
+      const mem = memClone(MEM.players.get(id));
+      if (mem) mem.daily = normalizeDaily(mem.daily);
+      return mem;
+    }
+    function putPlayerRaw(player){
+      if (!player) return;
+      player.updatedAt = nowEpoch();
+      if (useDB){
+        const row = selectPlayer.get(player.userId);
+        if (row) dbUpdatePlayer(player); else dbInsertPlayer(player);
+      } else {
+        MEM.players.set(player.userId, memClone(player));
+      }
+    }
     function topHeroes(){ return useDB ? topHeroesStmt.all() : memTop(); }
 
     // ─────────────────────────────────────────────────────────────
@@ -293,7 +354,55 @@ module.exports = {
       api.print('V) Return to Town Square'); api.hr(); api.print('Type: v','dim'); }
     function stubMenu(title, p){ printHeader(title); showStatus(p);
       api.print('Coming soon.','yellow'); api.print('V) Return to Town Square'); api.hr(); api.print('Type: v','dim'); }
-    function duelsMenu(p){ stubMenu('The Dueling Grounds', p); }
+    function duelsMenu(p){
+      printHeader('The Dueling Grounds');
+      showStatus(p);
+      if (p.daily.duelUsed){
+        api.print('You already fought today. Rest up and return tomorrow.','yellow');
+        api.print('V) Return to Town Square','dim');
+        return;
+      }
+      const opponents = getOpponentsFor(p);
+      if (!opponents.length){
+        api.print('No worthy challengers are here right now.','dim');
+        api.print('V) Return to Town Square','dim');
+        p.temp = { opponents: [] };
+        return;
+      }
+      p.temp = { opponents };
+      opponents.forEach((o,i)=>{
+        api.print(`${i+1}) ${o.name}  Lv${o.level}  K:${o.kills} D:${o.deaths}  Gold:${o.gold}`);
+      });
+      api.hr();
+      api.print('Pick a foe by number, or V to return.','dim');
+    }
+    function duelResultMenu(p){
+      printHeader('Duel Result');
+      const result = p.temp?.duelResult;
+      if (!result){
+        api.print('The duel outcome is unclear.','yellow');
+        api.print('V) Return to Town Square','dim');
+        return;
+      }
+      if (result.attackerWon){
+        api.print(`You defeat ${result.opponent}!`,'green');
+        if (result.goldWon) api.print(`You claim ${result.goldWon} gold.`, 'cyan');
+        api.print(`You earn ${result.xpGain} xp.`, 'cyan');
+      } else {
+        api.print(`${result.winnerName} bests you in the duel.`, 'yellow');
+        if (result.goldLost) api.print(`You lose ${result.goldLost} gold.`, 'yellow');
+        if (result.xpEnemy) api.print(`${result.winnerName} gains ${result.xpEnemy} xp.`, 'dim');
+      }
+      const methodText = result.method==='ko' ? 'Victory by steel.'
+        : result.method==='level' ? 'Tiebreaker: higher level prevails.'
+        : result.method==='charm' ? 'Tiebreaker: greater charm impresses the crowd.'
+        : result.method==='luck' ? 'Tiebreaker: fate flips a coin.'
+        : 'The crowd decides the victor.';
+      api.print(methodText, 'dim');
+      api.print(`Rounds fought: ${result.rounds}`, 'dim');
+      api.hr();
+      api.print('V) Return to Town Square','dim');
+    }
     function trainingMenu(p){
       printHeader(`Turgon's Warrior Training`);
       showStatus(p);
@@ -415,7 +524,94 @@ module.exports = {
       if (k==='d'){ if (p.daily.tavernDrinks<=0) return api.print('No more drinks today.','yellow'); p.daily.tavernDrinks--; const heal=randInt(2,6); p.hp=clamp(p.hp+heal,0,p.maxHp); api.print(`You feel warm. Recovered ${heal} HP.`,'green'); savePlayer(p); return render(p); }
       api.print('Type g (gossip), d (drink), or v.','dim'); }
     function onStatus(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
-    function onDuel(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
+    function onDuel(p,t){
+      const raw=t.trim().toLowerCase();
+      if (raw==='v'){ p.temp=null; p.screen='town'; return render(p); }
+      if (p.daily.duelUsed) return api.print('You already fought today.','yellow');
+      const opponents = Array.isArray(p.temp?.opponents) ? p.temp.opponents : getOpponentsFor(p);
+      if (!opponents.length){ p.temp={ opponents: [] }; return api.print('No challengers stand before you.','dim'); }
+      const choice=parseInt(raw,10);
+      if (Number.isNaN(choice) || choice<1 || choice>opponents.length){ return api.print('Choose a fighter by number, or V to return.','dim'); }
+      const target=opponents[choice-1];
+      const defender=getPlayerByIdRaw(target.user_id);
+      if (!defender){
+        api.print('That challenger has left the grounds.','yellow');
+        p.temp={ opponents: getOpponentsFor(p) };
+        return render(p);
+      }
+      if (defender.userId === p.userId){ return api.print('You cannot duel yourself.','yellow'); }
+
+      const attackerStats={ atk:WEAPONS[p.weaponIdx]?.atk||0, def:ARMOR[p.armorIdx]?.def||0, hp:p.maxHp, level:p.level, charm:p.charm||0 };
+      const defenderStats={ atk:WEAPONS[defender.weaponIdx]?.atk||0, def:ARMOR[defender.armorIdx]?.def||0, hp:defender.maxHp, level:defender.level, charm:defender.charm||0 };
+      let attackerHp=attackerStats.hp;
+      let defenderHp=defenderStats.hp;
+      let rounds=0;
+      while (rounds<20 && attackerHp>0 && defenderHp>0){
+        rounds++;
+        const dmgToDef=Math.max(1, attackerStats.atk + randInt(0,3) - defenderStats.def);
+        defenderHp=Math.max(0, defenderHp - dmgToDef);
+        if (defenderHp<=0) break;
+        const dmgToAtt=Math.max(1, defenderStats.atk + randInt(0,3) - attackerStats.def);
+        attackerHp=Math.max(0, attackerHp - dmgToAtt);
+      }
+
+      let winner=null, loser=null, method='ko';
+      if (attackerHp>0 && defenderHp<=0){
+        winner=p; loser=defender; method='ko';
+      } else if (defenderHp>0 && attackerHp<=0){
+        winner=defender; loser=p; method='ko';
+      } else {
+        if (p.level !== defender.level){
+          winner = p.level > defender.level ? p : defender;
+          loser = winner === p ? defender : p;
+          method='level';
+        } else if ((p.charm||0) !== (defender.charm||0)){
+          winner = (p.charm||0) > (defender.charm||0) ? p : defender;
+          loser = winner === p ? defender : p;
+          method='charm';
+        } else {
+          winner = randInt(0,1) === 0 ? p : defender;
+          loser = winner === p ? defender : p;
+          method='luck';
+        }
+      }
+
+      const xpGain=randInt(8,12);
+      const goldTransfer=Math.max(0, Math.floor(Math.max(0, loser.gold || 0) * 0.05));
+      if (goldTransfer>0){
+        loser.gold=Math.max(0, (loser.gold||0) - goldTransfer);
+        winner.gold=(winner.gold||0) + goldTransfer;
+      }
+      winner.kills=(winner.kills||0)+1;
+      loser.deaths=(loser.deaths||0)+1;
+      winner.xp=(winner.xp||0)+xpGain;
+      if (winner===p) applyLevelUps(p); else applyLevelUpsSilent(winner);
+
+      p.daily.duelUsed = true;
+
+      const result={
+        opponent:defender.name,
+        rounds,
+        attackerWon:winner===p,
+        method,
+        xpGain:winner===p?xpGain:0,
+        xpEnemy:winner===defender?xpGain:0,
+        goldWon:winner===p?goldTransfer:0,
+        goldLost:winner===defender?goldTransfer:0,
+        winnerName:winner.name
+      };
+
+      p.screen='duel:result';
+      p.temp={ duelResult: result };
+
+      if (winner===p){ savePlayer(p); putPlayerRaw(defender); }
+      else { putPlayerRaw(defender); savePlayer(p); }
+      return render(p);
+    }
+    function onDuelResult(p,t){
+      if (t.trim().toLowerCase()==='v'){ p.temp=null; p.screen='town'; return render(p); }
+      api.print('Type v to return.','dim');
+    }
     function onTraining(p,t){
       const k=t.trim().toLowerCase();
       if (k==='v'){ p.screen='town'; return render(p); }
@@ -465,6 +661,7 @@ module.exports = {
         case 'tavern':     return tavernMenu(p);
         case 'status':     return statusMenu(p);
         case 'duel':       return duelsMenu(p);
+        case 'duel:result':return duelResultMenu(p);
         case 'training':   return trainingMenu(p);
         case 'news':       return newsMenu(p);
         case 'mail':       return mailMenu(p);
@@ -543,6 +740,7 @@ module.exports = {
         case 'tavern':     onTavern(p, raw);     break;
         case 'status':     onStatus(p, raw);     break;
         case 'duel':       onDuel(p, raw);       break;
+        case 'duel:result':onDuelResult(p, raw); break;
         case 'training':   onTraining(p, raw);   break;
         case 'news':       onNews(p, raw);       break;
         case 'mail':       onMail(p, raw);       break;
