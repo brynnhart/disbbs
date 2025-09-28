@@ -46,24 +46,27 @@ module.exports = {
             day_count    INTEGER NOT NULL DEFAULT 1,
             daily_json   TEXT,
             expert       INTEGER NOT NULL DEFAULT 0,
-            screen       TEXT
+            screen       TEXT,
+            gems         INTEGER NOT NULL DEFAULT 0
           );
           CREATE INDEX IF NOT EXISTS idx_lord_players_updated ON lord_players(updated_at DESC);
         `);
+
+        db.exec(`ALTER TABLE lord_players ADD COLUMN IF NOT EXISTS gems INTEGER NOT NULL DEFAULT 0;`);
 
         selectPlayer = db.prepare(`SELECT * FROM lord_players WHERE user_id = ?`);
         insertPlayer = db.prepare(`
           INSERT INTO lord_players (
             user_id, char_name, gender, created_at, updated_at,
             level, xp, hp, max_hp, gold, bank, weapon_idx, armor_idx,
-            charm, kills, deaths, day_count, daily_json, expert, screen
-          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            charm, kills, deaths, day_count, daily_json, expert, screen, gems
+          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         `);
         updatePlayer = db.prepare(`
           UPDATE lord_players
              SET char_name=?, gender=?, updated_at=?,
                  level=?, xp=?, hp=?, max_hp=?, gold=?, bank=?, weapon_idx=?, armor_idx=?,
-                 charm=?, kills=?, deaths=?, day_count=?, daily_json=?, expert=?, screen=?
+                 charm=?, kills=?, deaths=?, day_count=?, daily_json=?, expert=?, screen=?, gems=?
            WHERE user_id=?
         `);
         topHeroesStmt = db.prepare(`
@@ -92,6 +95,12 @@ module.exports = {
     const randInt = (a, b) => (a + Math.floor(Math.random() * (b - a + 1)));
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const nowEpoch = () => Math.floor(Date.now() / 1000);
+    const FEATURE_GEMS = true;
+    const GEM_DROP_RATE_SEARCH = 0.01;
+    const JEWELER_DAILY_LIMIT = 3;
+    const HEARTSTONE_HP = 2;
+    const RING_CHARM_INC = 1;
+    const CHARM_MAX = 10;
     const DRAGON_LEVEL_REQ = 12;
     const DRAGON_FIND_CHANCE = 0.15;
     const DRAGON_GOLD_MIN = 500;
@@ -134,7 +143,7 @@ module.exports = {
             label:'Guide them toward the road',
             effect(p){
               const xp = randInt(4, Math.min(EVENT_XP_MAX, 8));
-              const charmGain = p.charm >= 10 ? 0 : 1;
+              const charmGain = p.charm >= CHARM_MAX ? 0 : 1;
               return {
                 deltas:{ xp, charm:charmGain },
                 lines(applied){
@@ -174,11 +183,13 @@ module.exports = {
               if (success){
                 const xp = randInt(6, EVENT_XP_MAX);
                 const gold = randInt(6, Math.min(EVENT_GOLD_MAX, 16));
+                const gems = (FEATURE_GEMS && Math.random() < 0.1) ? 1 : 0;
                 return {
-                  deltas:{ xp, gold },
+                  deltas:{ xp, gold, gems },
                   lines(applied){
                     const change = formatApplied(applied);
-                    return [`Your wit delights the hag.${change ? ` ${change}` : ''}`];
+                    const gemLine = applied.gems > 0 ? ' Among the hag\'s trinkets you spy a flawless gem!' : '';
+                    return [`Your wit delights the hag.${change ? ` ${change}` : ''}${gemLine}`];
                   }
                 };
               }
@@ -255,13 +266,15 @@ module.exports = {
               const blessing = Math.random() < 0.7;
               if (blessing){
                 const xp = randInt(2, Math.min(EVENT_XP_MAX, 5));
-                const charmGain = p.charm >= 10 ? 0 : 1;
+                const charmGain = p.charm >= CHARM_MAX ? 0 : 1;
+                const gems = (FEATURE_GEMS && Math.random() < 0.1) ? 1 : 0;
                 return {
-                  deltas:{ xp, charm:charmGain },
+                  deltas:{ xp, charm:charmGain, gems },
                   lines(applied){
                     const change = formatApplied(applied);
                     const extra = applied.charm === 0 && applied.xp === 0 ? ' The warmth fades before it settles.' : '';
-                    return [`Fragrant petals whirl around you.${change ? ` ${change}` : ''}${extra}`];
+                    const gemLine = applied.gems > 0 ? ' A radiant gem blossoms in your hand.' : '';
+                    return [`Fragrant petals whirl around you.${change ? ` ${change}` : ''}${extra}${gemLine}`];
                   }
                 };
               }
@@ -315,7 +328,7 @@ module.exports = {
     function getForestEvent(id){ return id ? FOREST_EVENT_INDEX[id] || null : null; }
     function formatApplied(applied){
       if (!applied) return '';
-      const labels={ hp:'HP', gold:'gold', xp:'XP', charm:'Charm' };
+      const labels={ hp:'HP', gold:'gold', xp:'XP', charm:'Charm', gems:'Gems' };
       const parts=[];
       for (const key of Object.keys(labels)){
         const val = applied[key];
@@ -326,7 +339,7 @@ module.exports = {
       return parts.length ? `(${parts.join(', ')})` : '';
     }
     function applyForestEventDeltas(p, deltas){
-      const start={ hp:p.hp, gold:p.gold, xp:p.xp, charm:p.charm, level:p.level, maxHp:p.maxHp };
+      const start={ hp:p.hp, gold:p.gold, xp:p.xp, charm:p.charm, level:p.level, maxHp:p.maxHp, gems:p.gems || 0 };
       let xpApplied = 0;
       if (deltas){
         if (typeof deltas.hp === 'number') p.hp = clamp(start.hp + deltas.hp, 0, p.maxHp);
@@ -336,7 +349,12 @@ module.exports = {
           xpApplied = targetXp - start.xp;
           p.xp = targetXp;
         }
-        if (typeof deltas.charm === 'number') p.charm = clamp((start.charm || 0) + deltas.charm, 0, 10);
+        if (typeof deltas.charm === 'number') p.charm = clamp((start.charm || 0) + deltas.charm, 0, CHARM_MAX);
+        if (FEATURE_GEMS && typeof deltas.gems === 'number'){
+          const current = typeof p.gems === 'number' ? p.gems : 0;
+          const target = Math.max(0, current + deltas.gems);
+          p.gems = target;
+        }
       }
       let levelInfo=null;
       if (deltas && typeof deltas.xp === 'number' && deltas.xp > 0){
@@ -351,7 +369,8 @@ module.exports = {
         hp:p.hp - start.hp,
         gold:p.gold - start.gold,
         xp:xpApplied,
-        charm:(p.charm||0) - (start.charm||0)
+        charm:(p.charm||0) - (start.charm||0),
+        gems:(p.gems||0) - (start.gems||0)
       };
       return { actual, levelUp:levelInfo };
     }
@@ -444,7 +463,17 @@ module.exports = {
     }
     function defaultDaily(baseDate){
       const key = baseDate || todayKey();
-      return { forestTurns:10, tavernDrinks:2, heals:DAILY_HEALS, slept:false, duelUsed:false, bard:false, lastDate:key, interestDate:null };
+      return {
+        forestTurns:10,
+        tavernDrinks:2,
+        heals:DAILY_HEALS,
+        slept:false,
+        duelUsed:false,
+        bard:false,
+        lastDate:key,
+        interestDate:null,
+        jewelerPurchases:0
+      };
     }
     function normalizeDaily(d){
       const today = todayKey();
@@ -457,6 +486,7 @@ module.exports = {
       if (typeof d.bard === 'undefined') d.bard = false;
       if (!d.lastDate || typeof d.lastDate !== 'string') d.lastDate = today;
       if (typeof d.interestDate === 'undefined') d.interestDate = null;
+      if (typeof d.jewelerPurchases !== 'number') d.jewelerPurchases = 0;
       return d;
     }
     function applyBankInterest(p, dateKey){
@@ -478,7 +508,7 @@ module.exports = {
         weapon_idx: p.weaponIdx, armor_idx: p.armorIdx,
         charm: p.charm, kills: p.kills, deaths: p.deaths,
         day_count: p.dayCount, daily_json: JSON.stringify(normalizeDaily(p.daily)),
-        expert: p.expert ? 1 : 0, screen: p.screen
+        expert: p.expert ? 1 : 0, screen: p.screen, gems: p.gems || 0
       };
     }
     function fromRow(r){
@@ -489,7 +519,8 @@ module.exports = {
         weaponIdx: r.weapon_idx, armorIdx: r.armor_idx,
         charm: r.charm, kills: r.kills, deaths: r.deaths,
         dayCount: r.day_count, daily: normalizeDaily(parseDaily(r.daily_json)),
-        expert: !!r.expert, screen: r.screen || 'town', combat: null, temp: null
+        expert: !!r.expert, screen: r.screen || 'town', combat: null, temp: null,
+        gems: typeof r.gems === 'number' ? r.gems : 0
       };
     }
 
@@ -517,7 +548,7 @@ module.exports = {
       insertPlayer.run(
         r.user_id, r.char_name, r.gender, r.created_at, r.updated_at,
         r.level, r.xp, r.hp, r.max_hp, r.gold, r.bank, r.weapon_idx, r.armor_idx,
-        r.charm, r.kills, r.deaths, r.day_count, r.daily_json, r.expert, r.screen
+        r.charm, r.kills, r.deaths, r.day_count, r.daily_json, r.expert, r.screen, r.gems
       );
     }
     function dbUpdatePlayer(p){
@@ -526,7 +557,7 @@ module.exports = {
       updatePlayer.run(
         r.char_name, r.gender, r.updated_at,
         r.level, r.xp, r.hp, r.max_hp, r.gold, r.bank, r.weapon_idx, r.armor_idx,
-        r.charm, r.kills, r.deaths, r.day_count, r.daily_json, r.expert, r.screen,
+        r.charm, r.kills, r.deaths, r.day_count, r.daily_json, r.expert, r.screen, r.gems,
         r.user_id
       );
     }
@@ -571,6 +602,7 @@ module.exports = {
         createdAt: now, updatedAt: now,
         level:1, xp:0, hp:30, maxHp:30, gold:50, bank:0, weaponIdx:0, armorIdx:0,
         charm:0, kills:0, deaths:0, dayCount:1, daily: defaultDaily(),
+        gems:0,
         expert:false, screen:'town', combat:null, temp:null
       };
     }
@@ -584,7 +616,9 @@ module.exports = {
       const w=WEAPONS[p.weaponIdx], a=ARMOR[p.armorIdx];
       api.print(`Name: ${p.name}   Level: ${p.level} (${p.xp}/${xpToNext(p.level)} xp)`, 'cyan');
       api.print(`HP: ${p.hp}/${p.maxHp}   ATK: ${w.atk} (${w.name})   DEF: ${a.def} (${a.name})`);
-      api.print(`Gold: ${p.gold}  Bank: ${p.bank}  Kills: ${p.kills}  Deaths: ${p.deaths}`);
+      const gems = FEATURE_GEMS ? (p.gems || 0) : 0;
+      const gemText = FEATURE_GEMS ? `  Gems: ${gems}` : '';
+      api.print(`Gold: ${p.gold}  Bank: ${p.bank}${gemText}  Kills: ${p.kills}  Deaths: ${p.deaths}`);
       api.print(`Turns: Forest ${p.daily.forestTurns}  Heals ${p.daily.heals}  Drinks ${p.daily.tavernDrinks}`, 'dim'); api.hr();
     }
     function townHeader(){ api.batch(b=>{ b.clear(); b.print('Legend Of The Redux Dragon - Town Square','green'); b.print('=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=','green'); }); }
@@ -624,10 +658,19 @@ module.exports = {
         row('W','rite Mail','D','aily News');
         row('C','onjugality List','O','ther Places');
         row('X','pert Mode','M','ake Announcement');
-        row('P','eople Online','Q','uit to Fields');
-        api.hr(); api.print('The Town Square    (? for menu)','magenta'); api.print('(F,S,K,A,H,V,I,T,Y,L,W,D,C,O,X,M,P,Q)','dim');
+        if (FEATURE_GEMS){
+          row('P','eople Online','J','eweler');
+          row('Q','uit to Fields',' ',' ');
+        } else {
+          row('P','eople Online','Q','uit to Fields');
+        }
+        api.hr();
+        api.print('The Town Square    (? for menu)','magenta');
+        const menuKeys = FEATURE_GEMS ? '(F,S,K,A,H,V,I,T,Y,L,W,D,C,O,X,M,P,Q,J)' : '(F,S,K,A,H,V,I,T,Y,L,W,D,C,O,X,M,P,Q)';
+        api.print(menuKeys,'dim');
       } else {
-        api.print('[Expert Mode] F S K A H V I T Y L W D C O X M P Q','magenta');
+        const expertOpts = FEATURE_GEMS ? '[Expert Mode] F S K A H V I T Y L W D C O X M P Q J' : '[Expert Mode] F S K A H V I T Y L W D C O X M P Q';
+        api.print(expertOpts,'magenta');
         api.print('Type a single letter (e.g., F, K, A, V) — /help for help','dim');
       }
       api.hr(); api.print(`Your command, ${p.name}? [${timeLeftMMSS()}] :`,'cyan');
@@ -698,6 +741,19 @@ module.exports = {
       api.print('H) Heal to full'); api.print('V) Return to Town Square'); api.hr(); api.print('Type: h or v','dim'); }
     function bankMenu(p){ printHeader('The Bank of Redux'); showStatus(p);
       api.print('D) Deposit gold'); api.print('W) Withdraw gold'); api.print('V) Return to Town Square'); api.hr(); api.print('Type: d, w, or v','dim'); }
+    function jewelerMenu(p){ printHeader('The Jeweler'); showStatus(p);
+      if (!FEATURE_GEMS){ api.print('The jeweler\'s stall is closed today.'); api.print('V) Return to Town Square'); api.hr(); api.print('Type: v','dim'); return; }
+      const gems = p.gems || 0;
+      const purchases = p.daily.jewelerPurchases || 0;
+      if (JEWELER_DAILY_LIMIT > 0){
+        const remaining = Math.max(0, JEWELER_DAILY_LIMIT - purchases);
+        api.print(`Daily purchases remaining: ${remaining}/${JEWELER_DAILY_LIMIT}`,'dim');
+      }
+      api.print(`You cradle ${gems} precious gem${gems===1?'':'s'}.`);
+      api.print(`R) Ring of Swagger — Cost: 1 gem — +${RING_CHARM_INC} Charm (cap ${CHARM_MAX})`);
+      api.print(`H) Heartstone — Cost: 1 gem — +${HEARTSTONE_HP} Max HP (restores to full)`);
+      api.print('V) Return to Town Square'); api.hr(); api.print('Type: r, h, or v','dim');
+    }
     function bankDepositPrompt(p){ printHeader('Bank — Deposit'); showStatus(p);
       api.print(`You carry ${p.gold} gold. How much to deposit?`,'cyan'); api.hr(); api.print('Type a number, or v to cancel.','dim'); p.temp={mode:'deposit'}; }
     function bankWithdrawPrompt(p){ printHeader('Bank — Withdraw'); showStatus(p);
@@ -771,7 +827,7 @@ module.exports = {
       api.print('S) Sparring — hone your edge (+10 xp) — Cost: 80 gold');
       api.print('E) Endurance drills — toughen up (+3 Max HP) — Cost: 120 gold');
       api.print('W) Swagger lessons — polish your charm (+1 Charm, cap 10) — Cost: 60 gold');
-      if (p.charm >= 10) api.print('Your charm already dazzles the realm; further swagger is impossible.','dim');
+      if (p.charm >= CHARM_MAX) api.print('Your charm already dazzles the realm; further swagger is impossible.','dim');
       api.print('V) Return to Town Square');
       api.hr();
       api.print('Type: s, e, w, or v.','dim');
@@ -847,6 +903,7 @@ module.exports = {
       if (k==='l'){ p.screen='rankings'; return render(p); }
       if (k==='w'){ p.screen='mail'; return render(p); }
       if (k==='d'){ p.screen='news'; return render(p); }
+      if (FEATURE_GEMS && k==='j'){ p.screen='jeweler'; return render(p); }
       if (k==='c'){ p.screen='conjugality'; return render(p); }
       if (k==='o'){ p.screen='tavern'; return render(p); }
       if (k==='x'){ p.expert=!p.expert; savePlayer(p); return render(p); }
@@ -860,6 +917,7 @@ module.exports = {
       if (k.startsWith('inn')){ p.screen='inn'; return render(p); }
       if (k.startsWith('bank')||k==='ye'||k.startsWith('ye old')){ p.screen='bank'; return render(p); }
       if (k.startsWith('rank')){ p.screen='rankings'; return render(p); }
+      if (FEATURE_GEMS && (k.startsWith('jewel')||k==='jeweler')){ p.screen='jeweler'; return render(p); }
       if (k.startsWith('status')||k.startsWith('view')){ p.screen='status'; return render(p); }
       if (k.startsWith('tav')||k.startsWith('other')){ p.screen='tavern'; return render(p); }
       if (k.startsWith('train')){ p.screen='training'; return render(p); }
@@ -900,7 +958,16 @@ module.exports = {
       }
       if (k.startsWith('s')||k==='s'){
         if (startForestEvent(p, 'search')) return render(p);
-        const gold=randInt(2,15)+randInt(0,p.level); p.daily.forestTurns--; p.gold+=gold; api.print(`You find ${gold} gold.`,'green'); savePlayer(p); return render(p);
+        const gold=randInt(2,15)+randInt(0,p.level);
+        p.daily.forestTurns--;
+        p.gold+=gold;
+        api.print(`You find ${gold} gold.`,'green');
+        if (FEATURE_GEMS && GEM_DROP_RATE_SEARCH > 0 && Math.random() < GEM_DROP_RATE_SEARCH){
+          p.gems = Math.max(0, (p.gems || 0) + 1);
+          api.print('A glint catches your eye — you pocket a rare gem!','magenta');
+        }
+        savePlayer(p);
+        return render(p);
       }
       if (k.startsWith('d')||k==='d'){
         if (p.level < DRAGON_LEVEL_REQ) return api.print('The legends warn that the Dragon is beyond your skill for now.','yellow');
@@ -996,6 +1063,47 @@ module.exports = {
       if (p.temp.mode==='deposit'){ if (amt>p.gold) return api.print('You do not have that much.','yellow'); p.gold-=amt; p.bank+=amt; api.print(`Deposited ${amt} gold.`,'green'); }
       else if (p.temp.mode==='withdraw'){ if (amt>p.bank) return api.print('You do not have that much in the bank.','yellow'); p.bank-=amt; p.gold+=amt; api.print(`Withdrew ${amt} gold.`,'green'); }
       p.temp=null; savePlayer(p); p.screen='town'; return render(p); }
+    function onJeweler(p,t){
+      const raw=t.trim().toLowerCase();
+      if (raw==='v'){ p.screen='town'; return render(p); }
+      if (!FEATURE_GEMS){ api.print('The jeweler has shuttered their stall for now.','yellow'); return; }
+      const gems = typeof p.gems === 'number' ? p.gems : 0;
+      const purchases = p.daily.jewelerPurchases || 0;
+      const limit = Math.max(0, Math.floor(JEWELER_DAILY_LIMIT || 0));
+      const limitReached = limit > 0 && purchases >= limit;
+      if (raw==='r' || raw.startsWith('ring') || raw.startsWith('swagger')){
+        if (limitReached){ return api.print('"Only so many treasures per day," the jeweler reminds you.','yellow'); }
+        if (gems < 1) return api.print('You lack the gem to pay for that finery.','yellow');
+        if (p.charm >= CHARM_MAX) return api.print('The jeweler smiles: "Your charm needs no further polish."','yellow');
+        const newCharm = clamp(p.charm + RING_CHARM_INC, 0, CHARM_MAX);
+        const gain = newCharm - p.charm;
+        if (gain <= 0) return api.print('The ring would do nothing for you — best save your gem.','yellow');
+        p.gems = Math.max(0, gems - 1);
+        p.charm = newCharm;
+        const nextPurchases = purchases + 1;
+        p.daily.jewelerPurchases = limit > 0 ? Math.min(limit, nextPurchases) : nextPurchases;
+        api.print(`You slip on the Ring of Swagger. Charm +${gain}.`,'green');
+        if (typeof addNews === 'function') addNews(`${p.name} purchased a Ring of Swagger from the Jeweler.`);
+        savePlayer(p);
+        return render(p);
+      }
+      if (raw==='h' || raw.startsWith('heart')){
+        if (limitReached){ return api.print('"Only so many treasures per day," the jeweler reminds you.','yellow'); }
+        if (gems < 1) return api.print('You lack the gem to pay for that relic.','yellow');
+        const hpGain = Math.max(0, HEARTSTONE_HP);
+        if (hpGain <= 0) return api.print('The Heartstone hums faintly but offers no benefit today.','yellow');
+        p.gems = Math.max(0, gems - 1);
+        p.maxHp += hpGain;
+        p.hp = p.maxHp;
+        const nextPurchases = purchases + 1;
+        p.daily.jewelerPurchases = limit > 0 ? Math.min(limit, nextPurchases) : nextPurchases;
+        api.print(`The Heartstone pulses warmly. Max HP +${hpGain}. You feel completely restored.`,'green');
+        if (typeof addNews === 'function') addNews(`${p.name} purchased a Heartstone from the Jeweler.`);
+        savePlayer(p);
+        return render(p);
+      }
+      api.print('Type r for a Ring of Swagger, h for a Heartstone, or v to return.','dim');
+    }
     function onRankings(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
     function onTavern(p,t){ const k=t.toLowerCase(); if (k==='v'){ p.screen='town'; return render(p); }
       if (k==='g'){ const rumors=['They say a dragon’s hoard lies deep in the forest…','The Blacksmith sharpens for free if you’re charming — or so they say.','A hidden grove yields gold to those who listen to the wind.','Beware the Black Knight past the old bridge.']; api.print(rumors[randInt(0,rumors.length-1)],'cyan'); return; }
@@ -1145,9 +1253,9 @@ module.exports = {
         savePlayer(p); return render(p);
       }
       if (k==='w'||k.startsWith('swag')||k.startsWith('charm')){
-        if (p.charm >= 10) return api.print('Turgon laughs: "Your swagger is already legendary."','yellow');
+        if (p.charm >= CHARM_MAX) return api.print('Turgon laughs: "Your swagger is already legendary."','yellow');
         if (p.gold < 60) return api.print('Swagger lessons require coin you do not possess.','yellow');
-        p.gold -= 60; p.charm = clamp(p.charm + 1, 0, 10);
+        p.gold -= 60; p.charm = clamp(p.charm + 1, 0, CHARM_MAX);
         api.print('You perfect a roguish grin. Charm +1.','green');
         savePlayer(p); return render(p);
       }
@@ -1176,6 +1284,7 @@ module.exports = {
         case 'bank':       return bankMenu(p);
         case 'bank:dep':   return bankDepositPrompt(p);
         case 'bank:wit':   return bankWithdrawPrompt(p);
+        case 'jeweler':    return jewelerMenu(p);
         case 'rankings':   return rankingsMenu();
         case 'tavern':     return tavernMenu(p);
         case 'status':     return statusMenu(p);
@@ -1240,6 +1349,7 @@ module.exports = {
         } else {
           p.daily.lastDate = today;
         }
+        if (p.daily) p.daily.jewelerPurchases = 0;
         savePlayer(p);
       }
 
@@ -1273,6 +1383,7 @@ module.exports = {
         case 'bank':       onBank(p, raw);       break;
         case 'bank:dep':
         case 'bank:wit':   onBankAmount(p, raw); break;
+        case 'jeweler':    onJeweler(p, raw);    break;
         case 'rankings':   onRankings(p, raw);   break;
         case 'tavern':     onTavern(p, raw);     break;
         case 'status':     onStatus(p, raw);     break;
