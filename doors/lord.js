@@ -92,6 +92,10 @@ module.exports = {
     const randInt = (a, b) => (a + Math.floor(Math.random() * (b - a + 1)));
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const nowEpoch = () => Math.floor(Date.now() / 1000);
+    const DRAGON_LEVEL_REQ = 12;
+    const DRAGON_FIND_CHANCE = 0.15;
+    const DRAGON_GOLD_MIN = 500;
+    const DRAGON_GOLD_MAX = 700;
     function timeLeftMMSS() {
       const now = new Date(); const end = new Date(now); end.setHours(23,59,59,999);
       const s = Math.max(0, Math.floor((end - now)/1000));
@@ -349,8 +353,13 @@ module.exports = {
     // Other screens
     function forestMenu(p){ printHeader('The Forest'); showStatus(p);
       if (p.daily.forestTurns<=0) api.print('You are out of turns for today. Sleep at the Inn.','yellow');
-      else { api.print('H) Hunt for monsters'); api.print('S) Search for gold'); }
-      api.print('V) Return to Town Square'); api.hr(); api.print('Type: h, s, or v.','dim'); }
+      else {
+        api.print('H) Hunt for monsters'); api.print('S) Search for gold');
+        if (p.level >= DRAGON_LEVEL_REQ) api.print('D) Search for the Dragon');
+      }
+      api.print('V) Return to Town Square'); api.hr();
+      const prompt=(p.level>=DRAGON_LEVEL_REQ && p.daily.forestTurns>0)?'Type: h, s, d, or v.':'Type: h, s, or v.';
+      api.print(prompt,'dim'); }
     function innMenu(p){ printHeader('The Dark Cloak Inn'); showStatus(p);
       api.print('R) Rent a room and sleep (end your day, restore HP, refresh turns)'); api.print('V) Return to Town Square'); api.hr(); api.print('Type: r or v','dim'); }
     function smithMenu(p){ printHeader('The Blacksmith'); showStatus(p);
@@ -452,14 +461,36 @@ module.exports = {
     function genEnemy(p){ const idx=clamp(p.level-1+randInt(-1,1),0,ENEMIES.length-1); const name=ENEMIES[idx];
       const base=Math.max(1, p.level+randInt(0,2));
       return { name, hp:10+base*5+randInt(-3,3), maxHp:10+base*5, atk:Math.max(2, base*2+randInt(0,2)), def:Math.max(1, base+randInt(0,1)), fleeAttempts:0 }; }
+    function maybeDragon(p){
+      if (p.level < DRAGON_LEVEL_REQ) return null;
+      if (Math.random() > DRAGON_FIND_CHANCE) return null;
+      const levelBonus = Math.max(0, p.level - DRAGON_LEVEL_REQ);
+      const maxHp = clamp(170 + levelBonus * 10, 160, 240);
+      const atk = 22 + levelBonus * 2;
+      const def = 14 + Math.floor(levelBonus * 1.5);
+      return { name:'Ancient Dragon', hp:maxHp, maxHp, atk, def, fleeAttempts:0, boss:true };
+    }
     function renderCombat(p){ const e=p.combat; if (!e){ p.screen='forest'; return render(p); }
       printHeader('Battle!'); api.print(`${p.name} vs ${e.name}`); api.print(`Your HP: ${p.hp}/${p.maxHp}   Enemy HP: ${e.hp}/${e.maxHp}`,'cyan');
       api.hr(); api.print('A) Attack   F) Flee   I) Inspect','dim'); }
     function doAttackRound(p){ const e=p.combat; if (!e) return;
       const dmgToEnemy=Math.max(1, WEAPONS[p.weaponIdx].atk + randInt(0,3) - e.def);
       e.hp=Math.max(0, e.hp-dmgToEnemy); api.print(`You strike the ${e.name} for ${dmgToEnemy}.`,'green');
-      if (e.hp<=0){ const gold=randInt(10,20)+p.level*randInt(5,10); const xp=randInt(8,12)+p.level*randInt(2,4);
-        p.kills++; p.daily.forestTurns=Math.max(0, p.daily.forestTurns-1); p.gold+=gold; p.xp+=xp; api.print(`Victory! You gain ${gold} gold and ${xp} xp.`,'cyan');
+      if (e.hp<=0){
+        p.kills++;
+        if (e.boss){
+          const gold=randInt(DRAGON_GOLD_MIN, DRAGON_GOLD_MAX);
+          const xp=randInt(80,120)+p.level*randInt(6,10);
+          p.gold+=gold; p.xp+=xp;
+          const newCharm=clamp(p.charm+1,0,10); const charmGain=newCharm-p.charm; p.charm=newCharm;
+          api.print('You have slain the Ancient Dragon!','magenta');
+          api.print(`You claim ${gold} gold and earn ${xp} xp.`, 'cyan');
+          if (charmGain>0) api.print('Your legend grows. Charm +1.','green');
+          if (typeof addNews === 'function') addNews(`${p.name} slew the Ancient Dragon!`);
+        } else {
+          const gold=randInt(10,20)+p.level*randInt(5,10); const xp=randInt(8,12)+p.level*randInt(2,4);
+          p.daily.forestTurns=Math.max(0, p.daily.forestTurns-1); p.gold+=gold; p.xp+=xp; api.print(`Victory! You gain ${gold} gold and ${xp} xp.`,'cyan');
+        }
         applyLevelUps(p);
         p.combat=null; savePlayer(p); api.hr(); p.screen='forest'; return render(p); }
       const dmgToYou=Math.max(1, e.atk + randInt(0,3) - ARMOR[p.armorIdx].def);
@@ -469,7 +500,7 @@ module.exports = {
       renderCombat(p); }
     function doFlee(p){ const e=p.combat; if (!e) return;
       const chance=50 - e.fleeAttempts*10 + (p.level*3); const roll=randInt(1,100);
-      if (roll<=chance){ api.print('You escape into the trees!','green'); p.daily.forestTurns=Math.max(0, p.daily.forestTurns-1); p.combat=null; savePlayer(p); p.screen='forest'; return render(p); }
+      if (roll<=chance){ api.print('You escape into the trees!','green'); if (!e.boss) p.daily.forestTurns=Math.max(0, p.daily.forestTurns-1); p.combat=null; savePlayer(p); p.screen='forest'; return render(p); }
       e.fleeAttempts++; api.print('You fail to flee!','yellow'); const dmg=Math.max(1, e.atk + randInt(0,2) - ARMOR[p.armorIdx].def);
       p.hp=Math.max(0, p.hp-dmg); api.print(`The ${e.name} punishes your back for ${dmg}.`,'yellow');
       if (p.hp<=0){ api.print('You fall while fleeing…','red'); p.deaths++; const loss=Math.floor(p.gold*0.25); p.gold-=loss; api.print(`You lose ${loss} gold.`,'yellow');
@@ -521,7 +552,16 @@ module.exports = {
       if (p.daily.forestTurns<=0) return api.print('No turns left today. Sleep at the Inn.','yellow');
       if (k.startsWith('h')||k==='h'){ p.combat=genEnemy(p); p.screen='combat'; return render(p); }
       if (k.startsWith('s')||k==='s'){ const gold=randInt(2,15)+randInt(0,p.level); p.daily.forestTurns--; p.gold+=gold; api.print(`You find ${gold} gold.`,'green'); savePlayer(p); return render(p); }
-      api.print('Type h, s, or v.','dim');
+      if (k.startsWith('d')||k==='d'){
+        if (p.level < DRAGON_LEVEL_REQ) return api.print('The legends warn that the Dragon is beyond your skill for now.','yellow');
+        p.daily.forestTurns=Math.max(0, p.daily.forestTurns-1);
+        const dragon=maybeDragon(p);
+        if (!dragon){ api.print('You scour the groves but find no sign of the Dragon.','yellow'); savePlayer(p); return render(p); }
+        api.print('A thunderous roar shakes the canopy — the Ancient Dragon descends!','red');
+        p.combat=dragon; p.screen='combat'; savePlayer(p); return render(p);
+      }
+      const opts=(p.level>=DRAGON_LEVEL_REQ)?'Type h, s, d, or v.':'Type h, s, or v.';
+      api.print(opts,'dim');
     }
     function onCombat(p,t){ const k=t.toLowerCase(); if (k==='a'||k.startsWith('att')) return doAttackRound(p); if (k==='f'||k.startsWith('fl')) return doFlee(p); if (k==='i'){ renderCombat(p); return; } api.print('Options: A)ttack, F)lee, I)nspect','dim'); }
     function onInn(p,t){
