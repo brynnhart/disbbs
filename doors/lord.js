@@ -3043,30 +3043,74 @@ module.exports = {
       draft.step = 'recipient';
       return render(p);
     }
+    function clearDivorcePrompt(p){
+      if (p && p.temp && typeof p.temp === 'object'){
+        delete p.temp.divorceConfirm;
+        if (Object.keys(p.temp).length === 0) p.temp = null;
+      }
+    }
     function handleDivorce(p){
-      if (!isMarried(p)) return api.print('You are not married.','yellow');
+      if (!isMarried(p)){
+        clearDivorcePrompt(p);
+        return api.print('You are not married.','yellow');
+      }
+      const goldCost = Math.max(0, DIVORCE_GOLD_COST || 0);
+      const charmCost = Math.max(0, DIVORCE_CHARM_COST || 0);
+      const currentGold = Math.max(0, typeof p.gold === 'number' ? Math.floor(p.gold) : 0);
+      if (goldCost > currentGold){
+        clearDivorcePrompt(p);
+        api.print('You cannot afford the divorce fees right now.','yellow');
+        return;
+      }
       const spouseKey = p.spouseId ? String(p.spouseId) : null;
       const spouse = spouseKey ? getPlayerByIdRaw(spouseKey) : null;
       const spouseName = safeName(p.spouseName || (spouse?.name) || 'Unknown');
-      const goldCost = Math.max(0, DIVORCE_GOLD_COST || 0);
-      const charmCost = Math.max(0, DIVORCE_CHARM_COST || 0);
+      if (goldCost > 0) safeAddGold(p, -goldCost, 'divorce');
+      if (charmCost > 0) safeAddCharm(p, -charmCost, 'divorce');
       p.spouseId = null;
       p.spouseName = null;
       p.marriedOn = 0;
-      if (goldCost > 0) p.gold = Math.max(0, (p.gold || 0) - goldCost);
-      if (charmCost > 0) p.charm = clamp((p.charm || 0) - charmCost, 0, CHARM_MAX);
       savePlayer(p);
-      if (spouse){ spouse.spouseId = null; spouse.spouseName = null; spouse.marriedOn = 0; putPlayerRaw(spouse); }
+      if (spouse){
+        spouse.spouseId = null;
+        spouse.spouseName = null;
+        spouse.marriedOn = 0;
+        putPlayerRaw(spouse);
+      }
       clearProposalsFor(p.userId);
       if (spouseKey) clearProposalsFor(spouseKey);
+      clearDivorcePrompt(p);
       api.print(`You part ways with ${spouseName}.`, 'yellow');
-      if (goldCost > 0 || charmCost > 0){ const parts=[]; if (goldCost>0) parts.push(`-${goldCost} gold`); if (charmCost>0) parts.push(`-${charmCost} charm`); api.print(`Penalty: ${parts.join(', ')}.`, 'dim'); }
+      if (goldCost > 0 || charmCost > 0){
+        const parts = [];
+        if (goldCost > 0) parts.push(`-${goldCost} gold`);
+        if (charmCost > 0) parts.push(`-${charmCost} charm`);
+        api.print(`Penalty: ${parts.join(', ')}.`, 'dim');
+      }
       if (typeof addNews === 'function') addNews(`${safeName(p.name)} and ${spouseName} parted ways.`);
       return render(p);
     }
     function onConjugality(p,t){ const raw=t.trim().toLowerCase();
-      if (raw==='v'){ p.screen='town'; return render(p); }
-      if (raw==='d'){ if (!isMarried(p)) return api.print('You are not married.','yellow'); return handleDivorce(p); }
+      if (p?.temp?.divorceConfirm){
+        if (raw==='y' || raw==='yes') return handleDivorce(p);
+        if (raw==='n' || raw==='no' || raw==='v'){ clearDivorcePrompt(p); api.print('You decide to stay together.','dim'); return; }
+        api.print('Type Y to confirm, or N to cancel.','dim');
+        return;
+      }
+      if (raw==='v'){ clearDivorcePrompt(p); p.screen='town'; return render(p); }
+      if (raw==='d'){
+        if (!isMarried(p)) return api.print('You are not married.','yellow');
+        if (!p.temp || typeof p.temp !== 'object') p.temp = {};
+        p.temp.divorceConfirm = true;
+        const spouseKey = p.spouseId ? String(p.spouseId) : null;
+        const spouse = spouseKey ? getPlayerByIdRaw(spouseKey) : null;
+        const spouseName = safeName(p.spouseName || (spouse?.name) || 'Unknown');
+        const goldCost = Math.max(0, DIVORCE_GOLD_COST || 0);
+        const charmCost = Math.max(0, DIVORCE_CHARM_COST || 0);
+        api.print(`Divorce ${spouseName}? Penalty ${charmCost} charm, ${goldCost} gold. (Y/N)`,'yellow');
+        api.print('Type Y to confirm, or N to cancel.','dim');
+        return;
+      }
       api.print(isMarried(p) ? 'Type d to divorce, or v to return.' : 'Type v to return.','dim'); }
     function onAnnounce(p,t){
       const raw = String(t || '');
