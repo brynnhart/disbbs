@@ -101,6 +101,10 @@ module.exports = {
     const BARD_XP = 10;
     const BARD_BANK_RATE = 0.005;
     const BARD_ENABLED = true;
+    const FOREST_EVENT_CHANCE = 0.20;
+    const EVENT_HP_MAX = 8;
+    const EVENT_GOLD_MAX = 25;
+    const EVENT_XP_MAX = 12;
     function timeLeftMMSS() {
       const now = new Date(); const end = new Date(now); end.setHours(23,59,59,999);
       const s = Math.max(0, Math.floor((end - now)/1000));
@@ -119,6 +123,279 @@ module.exports = {
       { name:'Chain', def:5, cost:220 }, { name:'Plate', def:8, cost:700 },
       { name:'Knight', def:11, cost:1600 }, { name:'Dragon Scale', def:15, cost:3600 },
     ];
+    const FOREST_EVENTS = [
+      {
+        id:'lost_traveler',
+        title:'The Lost Traveler',
+        description:['A weary traveler stumbles through the brush, map in tatters.'],
+        options:[
+          {
+            key:'a',
+            label:'Guide them toward the road',
+            effect(p){
+              const xp = randInt(4, Math.min(EVENT_XP_MAX, 8));
+              const charmGain = p.charm >= 10 ? 0 : 1;
+              return {
+                deltas:{ xp, charm:charmGain },
+                lines(applied){
+                  const change = formatApplied(applied);
+                  return [`You guide them safely to the road.${change ? ` ${change}` : ''}`];
+                }
+              };
+            }
+          },
+          {
+            key:'b',
+            label:'Wave them off and keep moving',
+            effect(){
+              const foundPouch = Math.random() < 0.5;
+              const gold = foundPouch ? randInt(5, Math.min(EVENT_GOLD_MAX, 12)) : 0;
+              return {
+                deltas:{ gold },
+                lines(applied){
+                  if (applied.gold > 0) return [`You pocket ${applied.gold} gold from a dropped pouch.`];
+                  return ['You leave them to their fate and gain nothing.'];
+                }
+              };
+            }
+          }
+        ]
+      },
+      {
+        id:'old_hag_riddle',
+        title:"The Old Hag's Riddle",
+        description:['An old hag blocks the path, croaking out a riddle with a wicked grin.'],
+        options:[
+          {
+            key:'a',
+            label:'Answer boldly',
+            effect(){
+              const success = Math.random() < 0.55;
+              if (success){
+                const xp = randInt(6, EVENT_XP_MAX);
+                const gold = randInt(6, Math.min(EVENT_GOLD_MAX, 16));
+                return {
+                  deltas:{ xp, gold },
+                  lines(applied){
+                    const change = formatApplied(applied);
+                    return [`Your wit delights the hag.${change ? ` ${change}` : ''}`];
+                  }
+                };
+              }
+              const hpLoss = randInt(2, Math.min(EVENT_HP_MAX, 5));
+              const xpLoss = randInt(2, 4);
+              return {
+                deltas:{ hp:-hpLoss, xp:-xpLoss },
+                lines(applied){
+                  const change = formatApplied(applied);
+                  return [`Her curse stings you for guessing poorly.${change ? ` ${change}` : ''}`];
+                }
+              };
+            }
+          },
+          {
+            key:'b',
+            label:'Play it safe and flatter her',
+            effect(){
+              const xp = randInt(2, Math.min(EVENT_XP_MAX, 4));
+              const gold = randInt(3, Math.min(EVENT_GOLD_MAX, 7));
+              return {
+                deltas:{ xp, gold },
+                lines(applied){
+                  const change = formatApplied(applied);
+                  return [`You compliment her stories until she waves you by.${change ? ` ${change}` : ''}`];
+                }
+              };
+            }
+          }
+        ]
+      },
+      {
+        id:'collapsed_tunnel',
+        title:'The Collapsed Tunnel',
+        description:['A hidden tunnel promises riches beyond, but rubble blocks the way.'],
+        options:[
+          {
+            key:'a',
+            label:'Dig through the rubble',
+            effect(){
+              const hpLoss = randInt(3, Math.min(EVENT_HP_MAX, 6));
+              const gold = randInt(9, Math.min(EVENT_GOLD_MAX, 18));
+              const xp = randInt(3, Math.min(EVENT_XP_MAX, 7));
+              return {
+                deltas:{ hp:-hpLoss, gold, xp },
+                lines(applied){
+                  const change = formatApplied(applied);
+                  return [`Sweat and bruises reveal a hidden stash.${change ? ` ${change}` : ''}`];
+                }
+              };
+            }
+          },
+          {
+            key:'b',
+            label:'Take a safer detour',
+            effect(){
+              return {
+                deltas:{},
+                lines:['You take the long path around; nothing ventured, nothing gained.']
+              };
+            }
+          }
+        ]
+      },
+      {
+        id:'shrines_thorn_bloom',
+        title:'Shrines of Thorn and Bloom',
+        description:['Twin shrines—one of twisting thorns, one of gentle blooms—glow beside the trail.'],
+        options:[
+          {
+            key:'a',
+            label:'Bow before the Shrine of Bloom',
+            effect(p){
+              const blessing = Math.random() < 0.7;
+              if (blessing){
+                const xp = randInt(2, Math.min(EVENT_XP_MAX, 5));
+                const charmGain = p.charm >= 10 ? 0 : 1;
+                return {
+                  deltas:{ xp, charm:charmGain },
+                  lines(applied){
+                    const change = formatApplied(applied);
+                    const extra = applied.charm === 0 && applied.xp === 0 ? ' The warmth fades before it settles.' : '';
+                    return [`Fragrant petals whirl around you.${change ? ` ${change}` : ''}${extra}`];
+                  }
+                };
+              }
+              const hpLoss = randInt(1, Math.min(EVENT_HP_MAX, 3));
+              const xp = randInt(2, Math.min(EVENT_XP_MAX, 4));
+              return {
+                deltas:{ hp:-hpLoss, xp },
+                lines(applied){
+                  const change = formatApplied(applied);
+                  return [`Hidden thorns prick your hand.${change ? ` ${change}` : ''}`];
+                }
+              };
+            }
+          },
+          {
+            key:'b',
+            label:'Kneel at the Shrine of Thorn',
+            effect(){
+              const xp = randInt(4, Math.min(EVENT_XP_MAX, 7));
+              const hpLoss = randInt(1, Math.min(EVENT_HP_MAX, 3));
+              return {
+                deltas:{ xp, hp:-hpLoss },
+                lines(applied){
+                  const change = formatApplied(applied);
+                  return [`Pain sharpens your focus.${change ? ` ${change}` : ''}`];
+                }
+              };
+            }
+          },
+          {
+            key:'c',
+            label:'Leave the shrines undisturbed',
+            effect(){
+              const xp = randInt(1, Math.min(EVENT_XP_MAX, 3));
+              return {
+                deltas:{ xp },
+                lines(applied){
+                  const change = formatApplied(applied);
+                  return [`You nod respectfully and walk on.${change ? ` ${change}` : ''}`];
+                }
+              };
+            }
+          }
+        ]
+      }
+    ];
+    const FOREST_EVENT_INDEX = FOREST_EVENTS.reduce((acc, evt) => {
+      acc[evt.id] = evt;
+      return acc;
+    }, {});
+    function getForestEvent(id){ return id ? FOREST_EVENT_INDEX[id] || null : null; }
+    function formatApplied(applied){
+      if (!applied) return '';
+      const labels={ hp:'HP', gold:'gold', xp:'XP', charm:'Charm' };
+      const parts=[];
+      for (const key of Object.keys(labels)){
+        const val = applied[key];
+        if (!val) continue;
+        const sign = val>0?'+':'';
+        parts.push(`${sign}${val} ${labels[key]}`);
+      }
+      return parts.length ? `(${parts.join(', ')})` : '';
+    }
+    function applyForestEventDeltas(p, deltas){
+      const start={ hp:p.hp, gold:p.gold, xp:p.xp, charm:p.charm, level:p.level, maxHp:p.maxHp };
+      let xpApplied = 0;
+      if (deltas){
+        if (typeof deltas.hp === 'number') p.hp = clamp(start.hp + deltas.hp, 0, p.maxHp);
+        if (typeof deltas.gold === 'number') p.gold = Math.max(0, start.gold + deltas.gold);
+        if (typeof deltas.xp === 'number'){
+          const targetXp = Math.max(0, start.xp + deltas.xp);
+          xpApplied = targetXp - start.xp;
+          p.xp = targetXp;
+        }
+        if (typeof deltas.charm === 'number') p.charm = clamp((start.charm || 0) + deltas.charm, 0, 10);
+      }
+      let levelInfo=null;
+      if (deltas && typeof deltas.xp === 'number' && deltas.xp > 0){
+        const levelBefore=p.level;
+        const maxHpBefore=p.maxHp;
+        const leveled=applyLevelUpsSilent(p);
+        if (leveled){
+          levelInfo={ level:p.level, hpGain:p.maxHp - maxHpBefore, levels:p.level - levelBefore };
+        }
+      }
+      const actual={
+        hp:p.hp - start.hp,
+        gold:p.gold - start.gold,
+        xp:xpApplied,
+        charm:(p.charm||0) - (start.charm||0)
+      };
+      return { actual, levelUp:levelInfo };
+    }
+    function resolveForestEventOutcome(p, outcome){
+      const deltas = outcome && outcome.deltas ? outcome.deltas : {};
+      const { actual, levelUp } = applyForestEventDeltas(p, deltas);
+      let lines=[];
+      if (outcome){
+        if (typeof outcome.lines === 'function'){
+          const res = outcome.lines(actual);
+          if (Array.isArray(res)) lines = res.map(String);
+          else if (res) lines = [String(res)];
+        } else if (Array.isArray(outcome.lines)){
+          lines = outcome.lines.map(String);
+        } else if (typeof outcome.text === 'string'){
+          lines = [outcome.text];
+        }
+      }
+      if (!lines.length){
+        const change = formatApplied(actual);
+        lines.push(change ? `The moment passes ${change}.` : 'The moment passes quietly.');
+      }
+      if (levelUp && levelUp.levels>0){
+        lines.push(`You reach Level ${p.level}! Max HP +${levelUp.hpGain}.`);
+      }
+      return { lines, actual };
+    }
+    function startForestEvent(p, origin){
+      if (p?.temp?.event) return false;
+      if (FOREST_EVENTS.length<=0) return false;
+      if (Math.random() >= FOREST_EVENT_CHANCE) return false;
+      const event = FOREST_EVENTS[randInt(0, FOREST_EVENTS.length-1)];
+      if (!event) return false;
+      if (!p.temp || typeof p.temp !== 'object') p.temp = {};
+      p.temp.event = { id:event.id, stage:'choice', origin:origin || null };
+      p.screen='forest:event';
+      return true;
+    }
+    function clearForestEvent(p){
+      if (p?.temp && p.temp.event){
+        delete p.temp.event;
+        if (!Object.keys(p.temp).length) p.temp=null;
+      }
+    }
     const xpToNext = (level) => 20 + level * 15;
     function applyLevelUps(p){
       let leveled = false;
@@ -375,6 +652,36 @@ module.exports = {
           ? `${prompts[0]} or ${prompts[1]}`
           : `${prompts.slice(0, -1).join(', ')}, or ${prompts[prompts.length - 1]}`;
       api.print(`Type: ${promptList}.`,'dim'); }
+    function renderForestEvent(p){
+      const state = p.temp?.event;
+      const event = getForestEvent(state?.id);
+      if (!state || !event){
+        clearForestEvent(p);
+        p.screen='forest';
+        return render(p);
+      }
+      printHeader('Forest Event!');
+      showStatus(p);
+      api.print(`[Event] ${event.title}`,'yellow');
+      event.description.forEach(line => api.print(line,'cyan'));
+      api.hr();
+      if (state.stage === 'result'){
+        const lines = Array.isArray(state.resultLines) ? state.resultLines : [];
+        lines.forEach(line => api.print(line));
+        api.hr();
+        api.print('Press Enter to return to the Forest.','dim');
+        return;
+      }
+      event.options.forEach(opt => api.print(`(${opt.key.toUpperCase()}) ${opt.label}`));
+      api.hr();
+      const keys = event.options.map(opt => opt.key);
+      const promptList = keys.length === 1
+        ? keys[0]
+        : keys.length === 2
+          ? `${keys[0]} or ${keys[1]}`
+          : `${keys.slice(0, -1).join(', ')}, or ${keys[keys.length - 1]}`;
+      api.print(`Choose: ${promptList}.`,'dim');
+    }
     function innMenu(p){ printHeader('The Dark Cloak Inn'); showStatus(p);
       api.print('R) Rent a room and sleep (end your day, restore HP, refresh turns)'); api.print('V) Return to Town Square'); api.hr(); api.print('Type: r or v','dim'); }
     function smithMenu(p){ printHeader('The Blacksmith'); showStatus(p);
@@ -587,8 +894,14 @@ module.exports = {
         }
       }
       if (p.daily.forestTurns<=0) return api.print('No turns left today. Sleep at the Inn.','yellow');
-      if (k==='m'||k.startsWith('m')||k.startsWith('hunt')||k.startsWith('fight')){ p.combat=genEnemy(p); p.screen='combat'; return render(p); }
-      if (k.startsWith('s')||k==='s'){ const gold=randInt(2,15)+randInt(0,p.level); p.daily.forestTurns--; p.gold+=gold; api.print(`You find ${gold} gold.`,'green'); savePlayer(p); return render(p); }
+      if (k==='m'||k.startsWith('m')||k.startsWith('hunt')||k.startsWith('fight')){
+        if (startForestEvent(p, 'hunt')) return render(p);
+        p.combat=genEnemy(p); p.screen='combat'; return render(p);
+      }
+      if (k.startsWith('s')||k==='s'){
+        if (startForestEvent(p, 'search')) return render(p);
+        const gold=randInt(2,15)+randInt(0,p.level); p.daily.forestTurns--; p.gold+=gold; api.print(`You find ${gold} gold.`,'green'); savePlayer(p); return render(p);
+      }
       if (k.startsWith('d')||k==='d'){
         if (p.level < DRAGON_LEVEL_REQ) return api.print('The legends warn that the Dragon is beyond your skill for now.','yellow');
         p.daily.forestTurns=Math.max(0, p.daily.forestTurns-1);
@@ -610,6 +923,35 @@ module.exports = {
           ? `${options[0]} or ${options[1]}`
           : `${options.slice(0, -1).join(', ')}, or ${options[options.length - 1]}`;
       api.print(`Type: ${optsText}.`,'dim');
+    }
+    function onForestEvent(p,t){
+      const state = p.temp?.event;
+      const event = getForestEvent(state?.id);
+      if (!state || !event){
+        clearForestEvent(p);
+        p.screen='forest';
+        return render(p);
+      }
+      const raw=t.trim().toLowerCase();
+      if (state.stage === 'result'){
+        if (raw===''||raw==='v'||raw==='continue'||raw==='c'){
+          p.screen='forest';
+          clearForestEvent(p);
+          savePlayer(p);
+          return render(p);
+        }
+        return api.print('Press Enter to return to the Forest.','yellow');
+      }
+      const choice = event.options.find(opt => raw === opt.key || raw === opt.key.toLowerCase());
+      if (!choice){
+        return api.print('Choose one of the options shown.','yellow');
+      }
+      p.daily.forestTurns = Math.max(0, p.daily.forestTurns-1);
+      const outcome = choice.effect ? choice.effect(p) : null;
+      const resolution = resolveForestEventOutcome(p, outcome);
+      if (!p.temp) p.temp={};
+      p.temp.event = { id:event.id, stage:'result', resultLines:resolution.lines, origin:state.origin || null };
+      return render(p);
     }
     function onCombat(p,t){ const k=t.toLowerCase(); if (k==='a'||k.startsWith('att')) return doAttackRound(p); if (k==='f'||k.startsWith('fl')) return doFlee(p); if (k==='i'){ renderCombat(p); return; } api.print('Options: A)ttack, F)lee, I)nspect','dim'); }
     function onInn(p,t){
@@ -826,6 +1168,7 @@ module.exports = {
         case 'create:confirm':  return renderCreateConfirm(p.temp?.name || fallbackName, p.temp?.gender || null);
         case 'town':       return townSquareMenu(p);
         case 'forest':     return forestMenu(p);
+        case 'forest:event': return renderForestEvent(p);
         case 'inn':        return innMenu(p);
         case 'blacksmith': return smithMenu(p);
         case 'armorer':    return armorerMenu(p);
@@ -921,6 +1264,7 @@ module.exports = {
       switch (p.screen){
         case 'town':       onTown(p, raw);       break;
         case 'forest':     onForest(p, raw);     break;
+        case 'forest:event': onForestEvent(p, raw); break;
         case 'combat':     onCombat(p, raw);     break;
         case 'inn':        onInn(p, raw);        break;
         case 'blacksmith': onSmith(p, raw);      break;
