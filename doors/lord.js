@@ -277,6 +277,15 @@ module.exports = {
       api.print('V) Return to Town Square'); api.hr(); api.print('Type: g, d, or v','dim'); }
     function statusMenu(p){ printHeader('Your Status'); showStatus(p);
       api.print('V) Return to Town Square'); api.hr(); api.print('Type: v','dim'); }
+    function stubMenu(title, p){ printHeader(title); showStatus(p);
+      api.print('Coming soon.','yellow'); api.print('V) Return to Town Square'); api.hr(); api.print('Type: v','dim'); }
+    function duelsMenu(p){ stubMenu('The Dueling Grounds', p); }
+    function trainingMenu(p){ stubMenu('Warrior Training', p); }
+    function newsMenu(p){ stubMenu('Daily News', p); }
+    function mailMenu(p){ stubMenu('Write Mail', p); }
+    function conjugalityMenu(p){ stubMenu('Conjugality List', p); }
+    function announceMenu(p){ stubMenu('Town Announcements', p); }
+    function peopleMenu(p){ stubMenu('People Online', p); }
 
     // Combat
     function genEnemy(p){ const idx=clamp(p.level-1+randInt(-1,1),0,ENEMIES.length-1); const name=ENEMIES[idx];
@@ -310,16 +319,23 @@ module.exports = {
     function onTown(p,t){
       const k=t.trim().toLowerCase();
       if (k==='f'){ p.screen='forest'; return render(p); }
+      if (k==='s'){ p.screen='duel'; return render(p); }
       if (k==='k'){ p.screen='blacksmith'; return render(p); }
       if (k==='a'){ p.screen='armorer'; return render(p); }
       if (k==='h'){ p.screen='healer'; return render(p); }
+      if (k==='v'){ p.screen='status'; return render(p); }
       if (k==='i'){ p.screen='inn'; return render(p); }
+      if (k==='t'){ p.screen='training'; return render(p); }
       if (k==='y'){ p.screen='bank'; return render(p); }
       if (k==='l'){ p.screen='rankings'; return render(p); }
-      if (k==='v'){ p.screen='status'; return render(p); }
+      if (k==='w'){ p.screen='mail'; return render(p); }
+      if (k==='d'){ p.screen='news'; return render(p); }
+      if (k==='c'){ p.screen='conjugality'; return render(p); }
       if (k==='o'){ p.screen='tavern'; return render(p); }
       if (k==='x'){ p.expert=!p.expert; savePlayer(p); return render(p); }
-      if (['s','t','w','d','c','m','p','q'].includes(k)){ if (k==='q') api.print('Use /leave to return to the BBS.','yellow'); else api.print('That feature is not yet implemented in Redux edition.','yellow'); return; }
+      if (k==='m'){ p.screen='announce'; return render(p); }
+      if (k==='p'){ p.screen='people'; return render(p); }
+      if (k==='q'){ p.screen='town'; savePlayer(p); leave(); return; }
       if (k.startsWith('forest')){ p.screen='forest'; return render(p); }
       if (k.startsWith('black')){ p.screen='blacksmith'; return render(p); }
       if (k.startsWith('armor')){ p.screen='armorer'; return render(p); }
@@ -329,6 +345,13 @@ module.exports = {
       if (k.startsWith('rank')){ p.screen='rankings'; return render(p); }
       if (k.startsWith('status')||k.startsWith('view')){ p.screen='status'; return render(p); }
       if (k.startsWith('tav')||k.startsWith('other')){ p.screen='tavern'; return render(p); }
+      if (k.startsWith('train')){ p.screen='training'; return render(p); }
+      if (k.startsWith('duel')){ p.screen='duel'; return render(p); }
+      if (k.startsWith('mail')||k.startsWith('write')){ p.screen='mail'; return render(p); }
+      if (k.startsWith('news')){ p.screen='news'; return render(p); }
+      if (k.startsWith('conj')){ p.screen='conjugality'; return render(p); }
+      if (k.startsWith('announ')){ p.screen='announce'; return render(p); }
+      if (k.startsWith('people')||k.startsWith('online')){ p.screen='people'; return render(p); }
       api.print('Try a letter like F,K,A,V or a place name (forest, inn, bank…).','dim');
     }
     function onForest(p,t){
@@ -368,6 +391,13 @@ module.exports = {
       if (k==='d'){ if (p.daily.tavernDrinks<=0) return api.print('No more drinks today.','yellow'); p.daily.tavernDrinks--; const heal=randInt(2,6); p.hp=clamp(p.hp+heal,0,p.maxHp); api.print(`You feel warm. Recovered ${heal} HP.`,'green'); savePlayer(p); return render(p); }
       api.print('Type g (gossip), d (drink), or v.','dim'); }
     function onStatus(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
+    function onDuel(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
+    function onTraining(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
+    function onNews(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
+    function onMail(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
+    function onConjugality(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
+    function onAnnounce(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
+    function onPeople(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
 
     // Render multiplexer
     function render(p){
@@ -388,6 +418,13 @@ module.exports = {
         case 'rankings':   return rankingsMenu();
         case 'tavern':     return tavernMenu(p);
         case 'status':     return statusMenu(p);
+        case 'duel':       return duelsMenu(p);
+        case 'training':   return trainingMenu(p);
+        case 'news':       return newsMenu(p);
+        case 'mail':       return mailMenu(p);
+        case 'conjugality':return conjugalityMenu(p);
+        case 'announce':   return announceMenu(p);
+        case 'people':     return peopleMenu(p);
         case 'combat':     return renderCombat(p);
         default:           p.screen='town'; return townSquareMenu(p);
       }
@@ -459,6 +496,13 @@ module.exports = {
         case 'rankings':   onRankings(p, raw);   break;
         case 'tavern':     onTavern(p, raw);     break;
         case 'status':     onStatus(p, raw);     break;
+        case 'duel':       onDuel(p, raw);       break;
+        case 'training':   onTraining(p, raw);   break;
+        case 'news':       onNews(p, raw);       break;
+        case 'mail':       onMail(p, raw);       break;
+        case 'conjugality':onConjugality(p, raw);break;
+        case 'announce':   onAnnounce(p, raw);   break;
+        case 'people':     onPeople(p, raw);     break;
         default:           p.screen='town'; render(p);
       }
       return true;
