@@ -9,7 +9,7 @@ module.exports = {
     // Safe/lazy DB — fallback to memory if anything fails
     const G = (globalThis || global);
     const MEMKEY = '__LORD_MEM_STORE__';
-    if (!G[MEMKEY]) G[MEMKEY] = { players: new Map(), proposals: [], nextProposalId: 1, mail: [], nextMailId: 1, hof: [], nextHofId: 1 };
+    if (!G[MEMKEY]) G[MEMKEY] = { players: new Map(), proposals: [], nextProposalId: 1, mail: [], nextMailId: 1, hof: [], nextHofId: 1, news: [] };
     const MEM = G[MEMKEY];
     if (!MEM.players) MEM.players = new Map();
     if (!Array.isArray(MEM.proposals)) MEM.proposals = [];
@@ -18,6 +18,7 @@ module.exports = {
     if (typeof MEM.nextMailId !== 'number') MEM.nextMailId = 1;
     if (!Array.isArray(MEM.hof)) MEM.hof = [];
     if (typeof MEM.nextHofId !== 'number') MEM.nextHofId = 1;
+    if (!Array.isArray(MEM.news)) MEM.news = [];
 
     let dbReady = false;
     let useDB = false;
@@ -26,7 +27,7 @@ module.exports = {
       deleteProposalStmt = null, deleteProposalsByPlayerStmt = null, selectMarriedPairsStmt = null,
       insertMailStmt = null, selectInboxMailStmt = null, selectMailByIdStmt = null, markMailReadStmt = null,
       selectOnlinePlayersStmt = null, insertHofStmt = null, selectRecentHofStmt = null, topSeasonSnapshotStmt = null,
-      resetAllPlayersStmt = null;
+      resetAllPlayersStmt = null, insertNewsStmt = null, selectRecentNewsStmt = null;
 
     function lazyInitDB() {
       if (dbReady) return;
@@ -116,6 +117,14 @@ module.exports = {
           );
         `);
         db.exec(`CREATE INDEX IF NOT EXISTS idx_lord_hof_ts ON lord_hof(ts DESC);`);
+
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS lord_news (
+            ts   INTEGER NOT NULL,
+            text TEXT NOT NULL
+          );
+        `);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_lord_news_ts ON lord_news(ts DESC);`);
 
         selectPlayer = db.prepare(`SELECT * FROM lord_players WHERE user_id = ?`);
         insertPlayer = db.prepare(`
@@ -216,6 +225,16 @@ module.exports = {
             FROM lord_players
            ORDER BY level DESC, xp DESC, kills DESC, (gold + bank) DESC
            LIMIT 10
+        `);
+        insertNewsStmt = db.prepare(`
+          INSERT INTO lord_news (ts, text)
+          VALUES (?, ?)
+        `);
+        selectRecentNewsStmt = db.prepare(`
+          SELECT ts, text
+            FROM lord_news
+           ORDER BY ts DESC
+           LIMIT ? OFFSET ?
         `);
         resetAllPlayersStmt = db.prepare(`
           UPDATE lord_players
@@ -327,6 +346,8 @@ module.exports = {
     ];
     const CLASS_LOOKUP = CLASS_OPTIONS.reduce((acc,opt)=>{ acc[opt.id] = opt; return acc; }, {});
     const CLASS_KEY_LOOKUP = CLASS_OPTIONS.reduce((acc,opt)=>{ acc[opt.key] = opt; acc[opt.name.toLowerCase()] = opt; return acc; }, {});
+    const NEWS_PAGE_SIZE = 50;
+    const NEWS_MEM_MAX = 100;
     function timeLeftMMSS() {
       const now = new Date(); const end = new Date(now); end.setHours(23,59,59,999);
       const s = Math.max(0, Math.floor((end - now)/1000));
@@ -352,6 +373,10 @@ module.exports = {
     function sanitizeAnnouncement(text){
       const cleaned = stripControls(text, false).trim();
       return cleaned.slice(0, ANNOUNCE_SUBJECT_MAX);
+    }
+    function sanitizeNewsText(text){
+      const cleaned = stripControls(text, false).trim();
+      return cleaned;
     }
     const GOLD_DELTA_CAPS = {
       combat: MAX_GOLD_DELTA_COMBAT,
@@ -471,6 +496,12 @@ module.exports = {
       const h = String(d.getHours()).padStart(2,'0');
       const min = String(d.getMinutes()).padStart(2,'0');
       return `${y}-${m}-${day} ${h}:${min}`;
+    }
+    function formatNewsTimestamp(epoch){
+      if (!epoch) return 'unknown';
+      const d = new Date(epoch * 1000);
+      if (Number.isNaN(d.getTime())) return 'unknown';
+      return d.toLocaleString();
     }
     function getClassInfo(id){ return id ? CLASS_LOOKUP[id] || null : null; }
     function getClassName(id){ const info = getClassInfo(id); return info ? info.name : null; }
@@ -787,9 +818,22 @@ module.exports = {
     // ─────────────────────────────────────────────────────────────
     // Persistence wrappers (DB or MEM)
     function parseDaily(json){ try { return json ? JSON.parse(json) : null; } catch { return null; } }
-    const addNews = (typeof state?.addNews === 'function') ? state.addNews
+    const hostAddNews = (typeof state?.addNews === 'function') ? state.addNews
       : (typeof meta?.addNews === 'function') ? meta.addNews
       : (typeof api?.addNews === 'function') ? api.addNews : null;
+    const addNews = (text) => {
+      const cleaned = sanitizeNewsText(text);
+      if (!cleaned) return;
+      const ts = nowEpoch();
+      recordNewsEntry(ts, cleaned);
+      if (typeof hostAddNews === 'function'){
+        try {
+          hostAddNews(cleaned);
+        } catch (err){
+          console.error('[lord] addNews relay failed:', err);
+        }
+      }
+    };
     function todayKey(){
       const d = new Date();
       const y = d.getFullYear();
@@ -1301,6 +1345,67 @@ module.exports = {
       }
       const entry = MEM.mail.find(m => m.id === idNum);
       if (entry) entry.unread = 0;
+    }
+    function recordNewsEntry(ts, text){
+      if (!text) return;
+      if (useDB && insertNewsStmt){
+        try {
+          insertNewsStmt.run(ts, text);
+        } catch (err){
+          console.error('[lord] insertNews failed:', err);
+        }
+      }
+      MEM.news.unshift({ ts, text });
+      if (MEM.news.length > NEWS_MEM_MAX){
+        MEM.news.length = NEWS_MEM_MAX;
+      }
+    }
+    function getNewsPage(limit, offset){
+      const perPage = Math.max(1, Number.isFinite(limit) ? Math.floor(limit) : NEWS_PAGE_SIZE);
+      const safeOffsetRaw = Number.isFinite(offset) ? Math.floor(offset) : 0;
+      const safeOffset = Math.max(0, safeOffsetRaw);
+      const fetchLimit = perPage + 1;
+      if (useDB && selectRecentNewsStmt){
+        try {
+          const rows = selectRecentNewsStmt.all(fetchLimit, safeOffset);
+          const entries = rows.slice(0, perPage).map(row => ({
+            ts: typeof row.ts === 'number' ? row.ts : 0,
+            text: sanitizeNewsText(row.text)
+          })).filter(entry => entry.text);
+          const hasMore = rows.length > perPage;
+          return { entries, hasMore };
+        } catch (err){
+          console.error('[lord] selectRecentNews failed:', err);
+        }
+      }
+      const slice = MEM.news.slice(safeOffset, safeOffset + fetchLimit);
+      const entries = slice.slice(0, perPage).map(entry => ({
+        ts: typeof entry.ts === 'number' ? entry.ts : 0,
+        text: sanitizeNewsText(entry.text)
+      })).filter(entry => entry.text);
+      const hasMore = slice.length > perPage;
+      return { entries, hasMore };
+    }
+    function getNewsOffset(p){
+      if (!p){
+        return 0;
+      }
+      if (!p.temp || typeof p.temp !== 'object') p.temp = {};
+      const raw = Number(p.temp.newsOffset);
+      if (!Number.isFinite(raw) || raw < 0){
+        p.temp.newsOffset = 0;
+        return 0;
+      }
+      const normalized = Math.floor(raw / NEWS_PAGE_SIZE) * NEWS_PAGE_SIZE;
+      p.temp.newsOffset = normalized;
+      return normalized;
+    }
+    function setNewsOffset(p, value){
+      if (!p) return;
+      if (!p.temp || typeof p.temp !== 'object') p.temp = {};
+      const raw = Number(value);
+      const normalized = Math.max(0, Number.isFinite(raw) ? Math.floor(raw / NEWS_PAGE_SIZE) * NEWS_PAGE_SIZE : 0);
+      p.temp.newsOffset = normalized;
     }
     function listMailRecipients(player, searchTerm){
       if (!player) return [];
@@ -1826,7 +1931,40 @@ module.exports = {
       }
       return mailTemp.draft;
     }
-    function newsMenu(p){ stubMenu('Daily News', p); }
+    function newsMenu(p){
+      const offset = getNewsOffset(p);
+      const page = getNewsPage(NEWS_PAGE_SIZE, offset);
+      if (offset > 0 && page.entries.length === 0){
+        const previousOffset = Math.max(0, offset - NEWS_PAGE_SIZE);
+        setNewsOffset(p, previousOffset);
+        return newsMenu(p);
+      }
+      printHeader('Daily News');
+      showStatus(p);
+      if (!page.entries.length){
+        api.print('No news yet.','dim');
+        api.print('V) Return to Town Square');
+        api.hr();
+        api.print('Type: v','dim');
+        return;
+      }
+      page.entries.forEach(entry => {
+        const when = formatNewsTimestamp(entry.ts);
+        api.print(`[${when}] ${entry.text}`);
+      });
+      api.hr();
+      const hasPrev = offset > 0;
+      if (hasPrev) api.print('P) Previous page');
+      if (page.hasMore) api.print('N) Next page');
+      api.print('V) Return to Town Square');
+      api.hr();
+      const hints = [];
+      if (hasPrev) hints.push('p');
+      if (page.hasMore) hints.push('n');
+      hints.push('v');
+      const hint = hints.length === 1 ? hints[0] : `${hints.slice(0,-1).join(', ')}, or ${hints[hints.length-1]}`;
+      api.print(`Type: ${hint}.`,'dim');
+    }
     function mailMenu(p){
       getMailTemp(p);
       printHeader('Town Mail Service');
@@ -2132,7 +2270,7 @@ module.exports = {
       if (k==='y'){ p.screen='bank'; return render(p); }
       if (k==='l'){ p.screen='rankings'; return render(p); }
       if (k==='w'){ p.screen='mail'; return render(p); }
-      if (k==='d'){ p.screen='news'; return render(p); }
+      if (k==='d'){ setNewsOffset(p, 0); p.screen='news'; return render(p); }
       if (FEATURE_GEMS && k==='j'){ p.screen='jeweler'; return render(p); }
       if (k==='c'){ p.screen='conjugality'; return render(p); }
       if (k==='o'){ p.screen='tavern'; return render(p); }
@@ -2162,7 +2300,7 @@ module.exports = {
       if (k.startsWith('train')){ p.screen='training'; return render(p); }
       if (k.startsWith('duel')){ p.screen='duel'; return render(p); }
       if (k.startsWith('mail')||k.startsWith('write')){ p.screen='mail'; return render(p); }
-      if (k.startsWith('news')){ p.screen='news'; return render(p); }
+      if (k.startsWith('news')){ setNewsOffset(p, 0); p.screen='news'; return render(p); }
       if (k.startsWith('conj')){ p.screen='conjugality'; return render(p); }
       if (k.startsWith('announ')){ p.screen='announce'; return render(p); }
       if (k.startsWith('people')||k.startsWith('online')){ p.screen='people'; return render(p); }
@@ -2674,7 +2812,36 @@ module.exports = {
       api.print(`You embrace the path of the ${option.name}.`,'green');
       return render(p);
     }
-    function onNews(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
+    function onNews(p,t){
+      const raw = String(t || '').trim();
+      if (!raw){
+        return newsMenu(p);
+      }
+      const k = raw.toLowerCase();
+      if (k === 'v' || k === 'town'){
+        p.screen='town';
+        return render(p);
+      }
+      const offset = getNewsOffset(p);
+      const page = getNewsPage(NEWS_PAGE_SIZE, offset);
+      if ((k === 'n' || k === 'next') && page.hasMore){
+        setNewsOffset(p, offset + NEWS_PAGE_SIZE);
+        return newsMenu(p);
+      }
+      if ((k === 'p' || k === 'prev' || k === 'previous') && offset > 0){
+        setNewsOffset(p, offset - NEWS_PAGE_SIZE);
+        return newsMenu(p);
+      }
+      if (k === 'n' || k === 'next'){
+        api.print('No further news on the next page.','dim');
+        return;
+      }
+      if (k === 'p' || k === 'prev' || k === 'previous'){
+        api.print('You are already viewing the latest headlines.','dim');
+        return;
+      }
+      api.print('Type N for next page, P for previous, or V to return.','dim');
+    }
     function onMail(p,t){
       const raw = String(t || '').trim();
       const k = raw.toLowerCase();
