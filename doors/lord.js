@@ -9,12 +9,14 @@ module.exports = {
     // Safe/lazy DB — fallback to memory if anything fails
     const G = (globalThis || global);
     const MEMKEY = '__LORD_MEM_STORE__';
-    if (!G[MEMKEY]) G[MEMKEY] = { players: new Map() };
+    if (!G[MEMKEY]) G[MEMKEY] = { players: new Map(), news: [] };
     const MEM = G[MEMKEY];
+    if (!MEM.players) MEM.players = new Map();
+    if (!Array.isArray(MEM.news)) MEM.news = [];
 
     let dbReady = false;
     let useDB = false;
-    let db = null, selectPlayer = null, insertPlayer = null, updatePlayer = null, topHeroesStmt = null, opponentsStmt = null;
+    let db = null, selectPlayer = null, insertPlayer = null, updatePlayer = null, topHeroesStmt = null, opponentsStmt = null, insertNewsStmt = null, selectNewsStmt = null;
 
     function lazyInitDB() {
       if (dbReady) return;
@@ -49,6 +51,11 @@ module.exports = {
             screen       TEXT
           );
           CREATE INDEX IF NOT EXISTS idx_lord_players_updated ON lord_players(updated_at DESC);
+          CREATE TABLE IF NOT EXISTS lord_news (
+            ts    INTEGER NOT NULL,
+            text  TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_lord_news_ts ON lord_news(ts DESC);
         `);
 
         selectPlayer = db.prepare(`SELECT * FROM lord_players WHERE user_id = ?`);
@@ -78,6 +85,16 @@ module.exports = {
            WHERE user_id != ?
            ORDER BY level DESC, xp DESC, kills DESC
            LIMIT 20
+        `);
+        insertNewsStmt = db.prepare(`
+          INSERT INTO lord_news (ts, text)
+          VALUES (?, ?)
+        `);
+        selectNewsStmt = db.prepare(`
+          SELECT ts, text
+            FROM lord_news
+           ORDER BY ts DESC
+           LIMIT 50
         `);
         useDB = true;
       } catch (e) {
@@ -120,6 +137,7 @@ module.exports = {
         const hpGain = 5 + randInt(0,5);
         p.maxHp += hpGain;
         p.hp = p.maxHp;
+        maybeLogLevelMilestone(p);
         api.print(`You reach Level ${p.level}! Max HP +${hpGain}.`,'magenta');
         leveled = true;
       }
@@ -134,6 +152,7 @@ module.exports = {
         const hpGain = 5 + randInt(0,5);
         p.maxHp += hpGain;
         p.hp = p.maxHp;
+        maybeLogLevelMilestone(p);
         leveled = true;
       }
       return leveled;
@@ -181,6 +200,15 @@ module.exports = {
     function memGet(){ return MEM.players.get(userId) || null; }
     function memPut(p){ MEM.players.set(p.userId ?? userId, p); }
     function memClone(p){ return p ? JSON.parse(JSON.stringify(p)) : null; }
+    function memAddNews(ts, text){
+      MEM.news.push({ ts, text });
+      if (MEM.news.length > 100) MEM.news.splice(0, MEM.news.length - 100);
+    }
+    function memListNews(){
+      return [...MEM.news]
+        .sort((a,b)=> (b.ts - a.ts))
+        .slice(0, 50);
+    }
     function memTop(){
       return [...MEM.players.values()]
         .map(p => ({ name:p.name, level:p.level, kills:p.kills, deaths:p.deaths, wealth:(p.gold+p.bank) }))
@@ -246,6 +274,32 @@ module.exports = {
       }
     }
     function topHeroes(){ return useDB ? topHeroesStmt.all() : memTop(); }
+
+    function addNews(text){
+      const ts = nowEpoch();
+      if (!dbReady) lazyInitDB();
+      if (useDB && insertNewsStmt){
+        try { insertNewsStmt.run(ts, text); }
+        catch (err){ console.error('[lord] Failed to insert news:', err && err.message ? err.message : err); memAddNews(ts, text); }
+      } else {
+        memAddNews(ts, text);
+      }
+    }
+    function listNews(){
+      if (!dbReady) lazyInitDB();
+      if (useDB && selectNewsStmt){
+        try { return selectNewsStmt.all(); }
+        catch (err){ console.error('[lord] Failed to load news:', err && err.message ? err.message : err); }
+      }
+      return memListNews();
+    }
+
+    const LEVEL_NEWS_THRESHOLDS = new Set([5, 10, 12]);
+    function maybeLogLevelMilestone(player){
+      if (LEVEL_NEWS_THRESHOLDS.has(player.level)){
+        addNews(`${player.name} reached level ${player.level}.`);
+      }
+    }
 
     // ─────────────────────────────────────────────────────────────
     // Character creation
@@ -414,7 +468,20 @@ module.exports = {
       api.hr();
       api.print('Type: s, e, w, or v.','dim');
     }
-    function newsMenu(p){ stubMenu('Daily News', p); }
+    function newsMenu(){
+      printHeader('Daily News');
+      const entries = listNews();
+      if (!entries.length){
+        api.print('The town crier has no news to share.','dim');
+      } else {
+        entries.forEach(e => {
+          const stamp = new Date((e.ts || 0) * 1000).toLocaleString();
+          api.print(`[${stamp}] ${e.text}`);
+        });
+      }
+      api.hr();
+      api.print('V) Return to Town Square','dim');
+    }
     function mailMenu(p){ stubMenu('Write Mail', p); }
     function conjugalityMenu(p){ stubMenu('Conjugality List', p); }
     function announceMenu(p){ stubMenu('Town Announcements', p); }
@@ -604,6 +671,10 @@ module.exports = {
       p.screen='duel:result';
       p.temp={ duelResult: result };
 
+      if (winner && loser && winner.name && loser.name){
+        addNews(`${winner.name} defeated ${loser.name} in a duel.`);
+      }
+
       if (winner===p){ savePlayer(p); putPlayerRaw(defender); }
       else { putPlayerRaw(defender); savePlayer(p); }
       return render(p);
@@ -663,7 +734,7 @@ module.exports = {
         case 'duel':       return duelsMenu(p);
         case 'duel:result':return duelResultMenu(p);
         case 'training':   return trainingMenu(p);
-        case 'news':       return newsMenu(p);
+        case 'news':       return newsMenu();
         case 'mail':       return mailMenu(p);
         case 'conjugality':return conjugalityMenu(p);
         case 'announce':   return announceMenu(p);
