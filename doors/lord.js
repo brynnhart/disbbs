@@ -55,7 +55,8 @@ module.exports = {
             gems         INTEGER NOT NULL DEFAULT 0,
             spouse_id    TEXT,
             spouse_name  TEXT,
-            married_on   INTEGER NOT NULL DEFAULT 0
+            married_on   INTEGER NOT NULL DEFAULT 0,
+            class_id     TEXT
           );
           CREATE INDEX IF NOT EXISTS idx_lord_players_updated ON lord_players(updated_at DESC);
         `);
@@ -64,6 +65,7 @@ module.exports = {
         db.exec(`ALTER TABLE lord_players ADD COLUMN IF NOT EXISTS spouse_id TEXT;`);
         db.exec(`ALTER TABLE lord_players ADD COLUMN IF NOT EXISTS spouse_name TEXT;`);
         db.exec(`ALTER TABLE lord_players ADD COLUMN IF NOT EXISTS married_on INTEGER NOT NULL DEFAULT 0;`);
+        db.exec(`ALTER TABLE lord_players ADD COLUMN IF NOT EXISTS class_id TEXT;`);
         db.exec(`
           CREATE TABLE IF NOT EXISTS lord_proposals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,15 +83,15 @@ module.exports = {
             user_id, char_name, gender, created_at, updated_at,
             level, xp, hp, max_hp, gold, bank, weapon_idx, armor_idx,
             charm, kills, deaths, day_count, daily_json, expert, screen, gems,
-            spouse_id, spouse_name, married_on
-          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            spouse_id, spouse_name, married_on, class_id
+          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         `);
         updatePlayer = db.prepare(`
           UPDATE lord_players
              SET char_name=?, gender=?, updated_at=?,
                  level=?, xp=?, hp=?, max_hp=?, gold=?, bank=?, weapon_idx=?, armor_idx=?,
                  charm=?, kills=?, deaths=?, day_count=?, daily_json=?, expert=?, screen=?, gems=?,
-                 spouse_id=?, spouse_name=?, married_on=?
+                 spouse_id=?, spouse_name=?, married_on=?, class_id=?
            WHERE user_id=?
         `);
         topHeroesStmt = db.prepare(`
@@ -171,6 +173,19 @@ module.exports = {
     const EVENT_HP_MAX = 8;
     const EVENT_GOLD_MAX = 25;
     const EVENT_XP_MAX = 12;
+    const CLASS_ENABLED = true;
+    const THIEF_SEARCH_BONUS_RATE = 0.10;
+    const MYSTIC_VICTORY_HEAL = 2;
+    const DEATHKNIGHT_FIRST_STRIKE_BONUS = 1;
+    const ALLOW_CLASS_RESPEC = false;
+    const RESPEC_COST_GOLD = 500;
+    const CLASS_OPTIONS = [
+      { id:'thief', key:'t', name:'Thief', description:'Cunning and quick. Finds a bit more gold while Searching.' },
+      { id:'mystic', key:'m', name:'Mystic', description:'Calm and attuned. Heals slightly after victorious combat.' },
+      { id:'deathknight', key:'d', name:'Death Knight', description:'Relentless. Strikes harder on the first blow each combat.' },
+    ];
+    const CLASS_LOOKUP = CLASS_OPTIONS.reduce((acc,opt)=>{ acc[opt.id] = opt; return acc; }, {});
+    const CLASS_KEY_LOOKUP = CLASS_OPTIONS.reduce((acc,opt)=>{ acc[opt.key] = opt; acc[opt.name.toLowerCase()] = opt; return acc; }, {});
     function timeLeftMMSS() {
       const now = new Date(); const end = new Date(now); end.setHours(23,59,59,999);
       const s = Math.max(0, Math.floor((end - now)/1000));
@@ -190,6 +205,8 @@ module.exports = {
       const day = String(d.getDate()).padStart(2,'0');
       return `${y}-${m}-${day}`;
     }
+    function getClassInfo(id){ return id ? CLASS_LOOKUP[id] || null : null; }
+    function getClassName(id){ const info = getClassInfo(id); return info ? info.name : null; }
 
     const ENEMIES = ['Rat','Mangy Wolf','Highway Thief','Goblin','Skeleton','Bandit','Ogre','Wraith','Warlock','Black Knight'];
     const WEAPONS = [
@@ -583,7 +600,8 @@ module.exports = {
         expert: p.expert ? 1 : 0, screen: p.screen, gems: p.gems || 0,
         spouse_id: p.spouseId || null,
         spouse_name: p.spouseName || null,
-        married_on: p.marriedOn || 0
+        married_on: p.marriedOn || 0,
+        class_id: p.classId || null
       };
     }
     function fromRow(r){
@@ -598,7 +616,8 @@ module.exports = {
         gems: typeof r.gems === 'number' ? r.gems : 0,
         spouseId: r.spouse_id ? String(r.spouse_id) : null,
         spouseName: r.spouse_name || null,
-        marriedOn: typeof r.married_on === 'number' ? r.married_on : 0
+        marriedOn: typeof r.married_on === 'number' ? r.married_on : 0,
+        classId: r.class_id ? String(r.class_id) : null
       };
     }
 
@@ -627,7 +646,7 @@ module.exports = {
         r.user_id, r.char_name, r.gender, r.created_at, r.updated_at,
         r.level, r.xp, r.hp, r.max_hp, r.gold, r.bank, r.weapon_idx, r.armor_idx,
         r.charm, r.kills, r.deaths, r.day_count, r.daily_json, r.expert, r.screen, r.gems,
-        r.spouse_id, r.spouse_name, r.married_on
+        r.spouse_id, r.spouse_name, r.married_on, r.class_id
       );
     }
     function dbUpdatePlayer(p){
@@ -637,7 +656,7 @@ module.exports = {
         r.char_name, r.gender, r.updated_at,
         r.level, r.xp, r.hp, r.max_hp, r.gold, r.bank, r.weapon_idx, r.armor_idx,
         r.charm, r.kills, r.deaths, r.day_count, r.daily_json, r.expert, r.screen, r.gems,
-        r.spouse_id, r.spouse_name, r.married_on,
+        r.spouse_id, r.spouse_name, r.married_on, r.class_id,
         r.user_id
       );
     }
@@ -802,6 +821,7 @@ module.exports = {
         charm:0, kills:0, deaths:0, dayCount:1, daily: defaultDaily(),
         gems:0,
         spouseId:null, spouseName:null, marriedOn:0,
+        classId:null,
         expert:false, screen:'town', combat:null, temp:null
       };
     }
@@ -818,6 +838,10 @@ module.exports = {
       const gems = FEATURE_GEMS ? (p.gems || 0) : 0;
       const gemText = FEATURE_GEMS ? `  Gems: ${gems}` : '';
       api.print(`Gold: ${p.gold}  Bank: ${p.bank}${gemText}  Kills: ${p.kills}  Deaths: ${p.deaths}`);
+      if (CLASS_ENABLED){
+        const className = getClassName(p.classId);
+        if (className) api.print(`Class: ${className}`);
+      }
       api.print(`Turns: Forest ${p.daily.forestTurns}  Heals ${p.daily.heals}  Drinks ${p.daily.tavernDrinks}`, 'dim'); api.hr();
     }
     function townHeader(){ api.batch(b=>{ b.clear(); b.print('Legend Of The Redux Dragon - Town Square','green'); b.print('=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=','green'); }); }
@@ -1062,10 +1086,61 @@ module.exports = {
       api.print('S) Sparring — hone your edge (+10 xp) — Cost: 80 gold');
       api.print('E) Endurance drills — toughen up (+3 Max HP) — Cost: 120 gold');
       api.print('W) Swagger lessons — polish your charm (+1 Charm, cap 10) — Cost: 60 gold');
+      if (CLASS_ENABLED){
+        const classInfo = getClassInfo(p.classId);
+        if (classInfo){
+          api.print(`Class: ${classInfo.name} — ${classInfo.description}`);
+          if (ALLOW_CLASS_RESPEC){
+            const cost = Math.max(0, RESPEC_COST_GOLD || 0);
+            const note = cost > 0 ? ` (Respec cost: ${cost} gold)` : '';
+            api.print(`C) Review or respec your class${note}`);
+          } else {
+            api.print('C) Review your class (selection is permanent)');
+          }
+        } else {
+          api.print('C) Choose Class — embrace a unique perk for your adventures');
+        }
+      }
       if (p.charm >= CHARM_MAX) api.print('Your charm already dazzles the realm; further swagger is impossible.','dim');
       api.print('V) Return to Town Square');
       api.hr();
-      api.print('Type: s, e, w, or v.','dim');
+      const trainHint = CLASS_ENABLED ? 'Type: s, e, w, c, or v.' : 'Type: s, e, w, or v.';
+      api.print(trainHint,'dim');
+    }
+    function classMenu(p){
+      printHeader('Choose Your Class');
+      showStatus(p);
+      if (!CLASS_ENABLED){
+        api.print('Classes are not available right now.','yellow');
+        api.print('V) Return to Training');
+        api.hr();
+        api.print('Type: v','dim');
+        return;
+      }
+      const current = getClassInfo(p.classId);
+      if (current){
+        api.print(`Current Class: ${current.name}`,'cyan');
+        api.print(`Perk: ${current.description}`);
+        if (ALLOW_CLASS_RESPEC){
+          const cost = Math.max(0, RESPEC_COST_GOLD || 0);
+          const costNote = cost > 0 ? ` (Cost: ${cost} gold)` : '';
+          api.print(`R) Respec — reset your class choice${costNote}`);
+        } else {
+          api.print('Class selection cannot be changed.','yellow');
+        }
+        api.print('V) Return to Training');
+        api.hr();
+        const hint = ALLOW_CLASS_RESPEC ? 'Type: r to respec, or v to return.' : 'Type: v to return.';
+        api.print(hint,'dim');
+        return;
+      }
+      CLASS_OPTIONS.forEach(opt => {
+        api.print(`${opt.key.toUpperCase()}) ${opt.name} — ${opt.description}`);
+      });
+      api.print('Choose wisely; this decision is final.','yellow');
+      api.print('V) Return to Training');
+      api.hr();
+      api.print('Type the letter of your chosen class, or v to return.','dim');
     }
     function newsMenu(p){ stubMenu('Daily News', p); }
     function mailMenu(p){ stubMenu('Write Mail', p); }
@@ -1084,6 +1159,32 @@ module.exports = {
     function genEnemy(p){ const idx=clamp(p.level-1+randInt(-1,1),0,ENEMIES.length-1); const name=ENEMIES[idx];
       const base=Math.max(1, p.level+randInt(0,2));
       return { name, hp:10+base*5+randInt(-3,3), maxHp:10+base*5, atk:Math.max(2, base*2+randInt(0,2)), def:Math.max(1, base+randInt(0,1)), fleeAttempts:0 }; }
+    function ensureCombatState(p){
+      if (!p.temp) p.temp = {};
+      if (!p.temp.combat) p.temp.combat = {};
+      p.temp.combat.firstStrikeUsed = false;
+    }
+    function markFirstStrikeUsed(p){
+      if (!p.temp) p.temp = {};
+      if (!p.temp.combat) p.temp.combat = {};
+      p.temp.combat.firstStrikeUsed = true;
+    }
+    function hasUsedFirstStrike(p){ return !!(p.temp && p.temp.combat && p.temp.combat.firstStrikeUsed); }
+    function clearCombatState(p){
+      if (p.temp && p.temp.combat){
+        delete p.temp.combat;
+        if (Object.keys(p.temp).length === 0) p.temp = null;
+      }
+    }
+    function maybeApplyMysticHeal(p){
+      if (!CLASS_ENABLED || p.classId !== 'mystic') return;
+      const heal = Math.max(0, Math.floor(MYSTIC_VICTORY_HEAL || 0));
+      if (heal <= 0) return;
+      const before = p.hp;
+      p.hp = clamp(p.hp + heal, 0, p.maxHp);
+      const gained = p.hp - before;
+      if (gained > 0) api.print(`Mystic calm restores ${gained} HP.`, 'green');
+    }
     function maybeDragon(p){
       if (p.level < DRAGON_LEVEL_REQ) return null;
       if (Math.random() > DRAGON_FIND_CHANCE) return null;
@@ -1097,8 +1198,20 @@ module.exports = {
       printHeader('Battle!'); api.print(`${p.name} vs ${e.name}`); api.print(`Your HP: ${p.hp}/${p.maxHp}   Enemy HP: ${e.hp}/${e.maxHp}`,'cyan');
       api.hr(); api.print('A) Attack   F) Flee   I) Inspect','dim'); }
     function doAttackRound(p){ const e=p.combat; if (!e) return;
-      const dmgToEnemy=Math.max(1, WEAPONS[p.weaponIdx].atk + randInt(0,3) - e.def);
+      if (!p.temp || !p.temp.combat) ensureCombatState(p);
+      const weapon = WEAPONS[p.weaponIdx];
+      let dmgToEnemy=Math.max(1, weapon.atk + randInt(0,3) - e.def);
+      let bonusApplied = 0;
+      if (CLASS_ENABLED && p.classId === 'deathknight' && !hasUsedFirstStrike(p)){
+        const bonus = Math.max(0, Math.floor(DEATHKNIGHT_FIRST_STRIKE_BONUS || 0));
+        if (bonus > 0){
+          bonusApplied = bonus;
+          dmgToEnemy += bonus;
+        }
+        markFirstStrikeUsed(p);
+      }
       e.hp=Math.max(0, e.hp-dmgToEnemy); api.print(`You strike the ${e.name} for ${dmgToEnemy}.`,'green');
+      if (bonusApplied > 0) api.print(`Your relentless first blow deals +${bonusApplied} damage!`,'magenta');
       if (e.hp<=0){
         p.kills++;
         if (e.boss){
@@ -1114,20 +1227,22 @@ module.exports = {
           const gold=randInt(10,20)+p.level*randInt(5,10); const xp=randInt(8,12)+p.level*randInt(2,4);
           p.daily.forestTurns=Math.max(0, p.daily.forestTurns-1); p.gold+=gold; p.xp+=xp; api.print(`Victory! You gain ${gold} gold and ${xp} xp.`,'cyan');
         }
+        maybeApplyMysticHeal(p);
         applyLevelUps(p);
+        clearCombatState(p);
         p.combat=null; savePlayer(p); api.hr(); p.screen='forest'; return render(p); }
       const dmgToYou=Math.max(1, e.atk + randInt(0,3) - ARMOR[p.armorIdx].def);
       p.hp=Math.max(0, p.hp-dmgToYou); api.print(`The ${e.name} hits you for ${dmgToYou}.`,'yellow');
       if (p.hp<=0){ api.print('You fall in battle…','red'); p.deaths++; const loss=Math.floor(p.gold*0.25); p.gold-=loss; api.print(`You lose ${loss} gold. You are carried back to the Inn.`,'yellow');
-        p.hp=Math.ceil(p.maxHp/2); p.daily.forestTurns=0; p.combat=null; savePlayer(p); api.hr(); p.screen='inn'; return render(p); }
+        p.hp=Math.ceil(p.maxHp/2); p.daily.forestTurns=0; clearCombatState(p); p.combat=null; savePlayer(p); api.hr(); p.screen='inn'; return render(p); }
       renderCombat(p); }
     function doFlee(p){ const e=p.combat; if (!e) return;
       const chance=50 - e.fleeAttempts*10 + (p.level*3); const roll=randInt(1,100);
-      if (roll<=chance){ api.print('You escape into the trees!','green'); if (!e.boss) p.daily.forestTurns=Math.max(0, p.daily.forestTurns-1); p.combat=null; savePlayer(p); p.screen='forest'; return render(p); }
+      if (roll<=chance){ api.print('You escape into the trees!','green'); if (!e.boss) p.daily.forestTurns=Math.max(0, p.daily.forestTurns-1); clearCombatState(p); p.combat=null; savePlayer(p); p.screen='forest'; return render(p); }
       e.fleeAttempts++; api.print('You fail to flee!','yellow'); const dmg=Math.max(1, e.atk + randInt(0,2) - ARMOR[p.armorIdx].def);
       p.hp=Math.max(0, p.hp-dmg); api.print(`The ${e.name} punishes your back for ${dmg}.`,'yellow');
       if (p.hp<=0){ api.print('You fall while fleeing…','red'); p.deaths++; const loss=Math.floor(p.gold*0.25); p.gold-=loss; api.print(`You lose ${loss} gold.`,'yellow');
-        p.hp=Math.ceil(p.maxHp/2); p.daily.forestTurns=0; p.combat=null; savePlayer(p); p.screen='inn'; return render(p); }
+        p.hp=Math.ceil(p.maxHp/2); p.daily.forestTurns=0; clearCombatState(p); p.combat=null; savePlayer(p); p.screen='inn'; return render(p); }
       renderCombat(p); }
 
     // Input routers
@@ -1196,11 +1311,19 @@ module.exports = {
       if (p.daily.forestTurns<=0) return api.print('No turns left today. Sleep at the Inn.','yellow');
       if (k==='m'||k.startsWith('m')||k.startsWith('hunt')||k.startsWith('fight')){
         if (startForestEvent(p, 'hunt')) return render(p);
+        ensureCombatState(p);
         p.combat=genEnemy(p); p.screen='combat'; return render(p);
       }
       if (k.startsWith('s')||k==='s'){
         if (startForestEvent(p, 'search')) return render(p);
-        const gold=randInt(2,15)+randInt(0,p.level);
+        let gold=randInt(2,15)+randInt(0,p.level);
+        if (CLASS_ENABLED && p.classId === 'thief'){
+          const rate = Math.max(0, THIEF_SEARCH_BONUS_RATE || 0);
+          const adjusted = Math.floor(gold * (1 + rate));
+          gold = Math.max(0, adjusted);
+        } else {
+          gold = Math.max(0, gold);
+        }
         p.daily.forestTurns--;
         p.gold+=gold;
         api.print(`You find ${gold} gold.`,'green');
@@ -1217,6 +1340,7 @@ module.exports = {
         const dragon=maybeDragon(p);
         if (!dragon){ api.print('You scour the groves but find no sign of the Dragon.','yellow'); savePlayer(p); return render(p); }
         api.print('A thunderous roar shakes the canopy — the Ancient Dragon descends!','red');
+        ensureCombatState(p);
         p.combat=dragon; p.screen='combat'; savePlayer(p); return render(p);
       }
       const options=[];
@@ -1580,6 +1704,7 @@ module.exports = {
     function onTraining(p,t){
       const k=t.trim().toLowerCase();
       if (k==='v'){ p.screen='town'; return render(p); }
+      if (CLASS_ENABLED && (k==='c'||k.startsWith('class'))){ p.screen='training:class'; return render(p); }
       if (k==='s'||k.startsWith('spar')){
         if (p.gold < 80) return api.print('Turgon grunts: "Come back with more gold."','yellow');
         p.gold -= 80; p.xp += 10; api.print('You spar with Turgon and feel sharper. (+10 xp)','green');
@@ -1598,7 +1723,44 @@ module.exports = {
         api.print('You perfect a roguish grin. Charm +1.','green');
         savePlayer(p); return render(p);
       }
-      api.print('Type s (sparring), e (endurance), w (swagger), or v to return.','dim');
+      const fallback = CLASS_ENABLED
+        ? 'Type s (sparring), e (endurance), w (swagger), c (class), or v to return.'
+        : 'Type s (sparring), e (endurance), w (swagger), or v to return.';
+      api.print(fallback,'dim');
+    }
+    function onClass(p,t){
+      const raw=t.trim().toLowerCase();
+      if (raw==='v'){ p.screen='training'; return render(p); }
+      if (!CLASS_ENABLED){
+        api.print('Classes are not available right now.','yellow');
+        return;
+      }
+      const current = getClassInfo(p.classId);
+      if (current){
+        if (ALLOW_CLASS_RESPEC && raw==='r'){
+          const cost = Math.max(0, RESPEC_COST_GOLD || 0);
+          if (cost > 0 && p.gold < cost) return api.print(`You need ${cost} gold to respec.`, 'yellow');
+          if (cost > 0) p.gold -= cost;
+          p.classId = null;
+          if (p.temp && p.temp.combat) delete p.temp.combat;
+          api.print('You set aside your former path. Choose a new calling.','green');
+          savePlayer(p);
+          return render(p);
+        }
+        const reminder = ALLOW_CLASS_RESPEC ? 'Type r to respec, or v to return.' : 'Type v to return.';
+        api.print(reminder,'dim');
+        return;
+      }
+      const option = CLASS_KEY_LOOKUP[raw];
+      if (!option){
+        api.print('Choose one of the classes shown, or type v to return.','yellow');
+        return;
+      }
+      p.classId = option.id;
+      p.screen = 'training';
+      savePlayer(p);
+      api.print(`You embrace the path of the ${option.name}.`,'green');
+      return render(p);
     }
     function onNews(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
     function onMail(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
@@ -1656,6 +1818,7 @@ module.exports = {
         case 'duel':       return duelsMenu(p);
         case 'duel:result':return duelResultMenu(p);
         case 'training':   return trainingMenu(p);
+        case 'training:class': return classMenu(p);
         case 'news':       return newsMenu(p);
         case 'mail':       return mailMenu(p);
         case 'conjugality':return conjugalityMenu(p);
@@ -1757,6 +1920,7 @@ module.exports = {
         case 'duel':       onDuel(p, raw);       break;
         case 'duel:result':onDuelResult(p, raw); break;
         case 'training':   onTraining(p, raw);   break;
+        case 'training:class': onClass(p, raw);  break;
         case 'news':       onNews(p, raw);       break;
         case 'mail':       onMail(p, raw);       break;
         case 'conjugality':onConjugality(p, raw);break;
