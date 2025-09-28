@@ -506,7 +506,29 @@ module.exports = {
     function getClassInfo(id){ return id ? CLASS_LOOKUP[id] || null : null; }
     function getClassName(id){ const info = getClassInfo(id); return info ? info.name : null; }
 
-    const ENEMIES = ['Rat','Mangy Wolf','Highway Thief','Goblin','Skeleton','Bandit','Ogre','Wraith','Warlock','Black Knight'];
+    const ENEMY_TIER_BREAKS = { t1Max:3, t2Max:6, t3Max:9 };
+    const ENEMY_TIERS = [
+      { maxLevel: ENEMY_TIER_BREAKS.t1Max, names:['Rat','Mangy Wolf','Highway Thief','Goblin'] },
+      { maxLevel: ENEMY_TIER_BREAKS.t2Max, names:['Skeleton','Bandit','Orc','Cultist'] },
+      { maxLevel: ENEMY_TIER_BREAKS.t3Max, names:['Wraith','Ogre','Harpy','Warlock'] },
+      { maxLevel: Infinity, names:['Black Knight','Lich Acolyte','Minotaur','Revenant'] },
+    ];
+    const ELITE_CHANCE = 0.10;
+    const ELITE_HP_MULT = 1.15;
+    const ELITE_ATK_BONUS = 1;
+    const ELITE_DEF_BONUS = 1;
+    const MINIBOSS_LEVEL_REQ = 9;
+    const MINIBOSS_CHANCE = 0.06;
+    const MINIBOSS_HP_MULT = 1.25;
+    const MINIBOSS_ATK_BONUS = 2;
+    const MINIBOSS_DEF_BONUS = 1;
+    const MINIBOSS_GOLD_BONUS_MIN = 20;
+    const MINIBOSS_GOLD_BONUS_MAX = 60;
+    const MINIBOSS_XP_BONUS_MIN = 6;
+    const MINIBOSS_XP_BONUS_MAX = 12;
+    const EPITHET_CHANCE = 0.35;
+    const EPITHETS = ['Fierce','Cunning','Grim','Venomous','Dire','Veteran'];
+    const MINIBOSS_PREFIXES = ['Champion','Dread'];
     const WEAPONS = [
       { name:'Dagger', atk:3, cost:0 }, { name:'Shortsword', atk:5, cost:75 },
       { name:'Broadsword', atk:7, cost:200 }, { name:'Battle Axe', atk:10, cost:600 },
@@ -2181,9 +2203,46 @@ module.exports = {
     }
 
     // Combat
-    function genEnemy(p){ const idx=clamp(p.level-1+randInt(-1,1),0,ENEMIES.length-1); const name=ENEMIES[idx];
-      const base=Math.max(1, p.level+randInt(0,2));
-      return { name, hp:10+base*5+randInt(-3,3), maxHp:10+base*5, atk:Math.max(2, base*2+randInt(0,2)), def:Math.max(1, base+randInt(0,1)), fleeAttempts:0 }; }
+    function genEnemy(p){
+      const level = typeof p.level === 'number' ? p.level : 1;
+      const tier = ENEMY_TIERS.find(entry => level <= entry.maxLevel) || ENEMY_TIERS[ENEMY_TIERS.length-1];
+      const baseName = tier.names[randInt(0, tier.names.length-1)];
+      const base = Math.max(1, level + randInt(0,2));
+      const enemy = {
+        name: baseName,
+        hp: 10 + base * 5 + randInt(-3,3),
+        maxHp: 10 + base * 5,
+        atk: Math.max(2, base * 2 + randInt(0,2)),
+        def: Math.max(1, base + randInt(0,1)),
+        fleeAttempts: 0,
+        elite: false,
+        miniboss: false,
+      };
+      if (level >= MINIBOSS_LEVEL_REQ && Math.random() < MINIBOSS_CHANCE){
+        const prefix = MINIBOSS_PREFIXES[randInt(0, MINIBOSS_PREFIXES.length-1)] || 'Champion';
+        enemy.name = `${prefix} ${enemy.name}`;
+        enemy.maxHp = Math.max(1, Math.ceil(enemy.maxHp * MINIBOSS_HP_MULT));
+        enemy.hp = clamp(Math.ceil(enemy.hp * MINIBOSS_HP_MULT), 1, enemy.maxHp);
+        enemy.atk += MINIBOSS_ATK_BONUS;
+        enemy.def += MINIBOSS_DEF_BONUS;
+        enemy.miniboss = true;
+        return enemy;
+      }
+      if (Math.random() < ELITE_CHANCE){
+        enemy.name = `Elite ${enemy.name}`;
+        enemy.maxHp = Math.max(1, Math.ceil(enemy.maxHp * ELITE_HP_MULT));
+        enemy.hp = clamp(Math.ceil(enemy.hp * ELITE_HP_MULT), 1, enemy.maxHp);
+        enemy.atk += ELITE_ATK_BONUS;
+        enemy.def += ELITE_DEF_BONUS;
+        enemy.elite = true;
+        return enemy;
+      }
+      if (Math.random() < EPITHET_CHANCE){
+        const epithet = EPITHETS[randInt(0, EPITHETS.length-1)];
+        if (epithet) enemy.name = `${epithet} ${enemy.name}`;
+      }
+      return enemy;
+    }
     function ensureCombatState(p){
       if (!p.temp) p.temp = {};
       if (!p.temp.combat) p.temp.combat = {};
@@ -2255,6 +2314,14 @@ module.exports = {
           const goldApplied = safeAddGold(p, gold, 'combat');
           const xpResult = safeAddXP(p, xp, 'combat');
           api.print(`Victory! You gain ${goldApplied} gold and ${xpResult.applied} xp.`,'cyan');
+          if (e.miniboss){
+            api.print('You vanquish the foe\'s champion!','magenta');
+            const bonusGold = randInt(MINIBOSS_GOLD_BONUS_MIN, MINIBOSS_GOLD_BONUS_MAX);
+            const bonusXp = randInt(MINIBOSS_XP_BONUS_MIN, MINIBOSS_XP_BONUS_MAX);
+            const bonusGoldApplied = safeAddGold(p, bonusGold, 'miniboss');
+            const bonusXpResult = safeAddXP(p, bonusXp, 'miniboss');
+            api.print(`Bonus spoils: +${bonusGoldApplied} gold, +${bonusXpResult.applied} xp.`, 'magenta');
+          }
         }
         maybeApplyMysticHeal(p);
         clearCombatState(p);
