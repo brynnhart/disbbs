@@ -146,12 +146,40 @@ module.exports = {
     // ─────────────────────────────────────────────────────────────
     // Persistence wrappers (DB or MEM)
     function parseDaily(json){ try { return json ? JSON.parse(json) : null; } catch { return null; } }
-    function defaultDaily(){ return { forestTurns:10, tavernDrinks:2, heals:3, slept:false, duelUsed:false }; }
+    const addNews = (typeof state?.addNews === 'function') ? state.addNews
+      : (typeof meta?.addNews === 'function') ? meta.addNews
+      : (typeof api?.addNews === 'function') ? api.addNews : null;
+    function todayKey(){
+      const d = new Date();
+      const y = d.getFullYear();
+      const m = String(d.getMonth()+1).padStart(2,'0');
+      const day = String(d.getDate()).padStart(2,'0');
+      return `${y}${m}${day}`;
+    }
+    function defaultDaily(baseDate){
+      const key = baseDate || todayKey();
+      return { forestTurns:10, tavernDrinks:2, heals:3, slept:false, duelUsed:false, lastDate:key, interestDate:null };
+    }
     function normalizeDaily(d){
-      const base = defaultDaily();
-      if (!d) return base;
-      Object.keys(base).forEach(k=>{ if (typeof d[k] === 'undefined') d[k] = base[k]; });
+      const today = todayKey();
+      if (!d) return defaultDaily(today);
+      if (typeof d.forestTurns === 'undefined') d.forestTurns = 10;
+      if (typeof d.tavernDrinks === 'undefined') d.tavernDrinks = 2;
+      if (typeof d.heals === 'undefined') d.heals = 3;
+      if (typeof d.slept === 'undefined') d.slept = false;
+      if (typeof d.duelUsed === 'undefined') d.duelUsed = false;
+      if (!d.lastDate || typeof d.lastDate !== 'string') d.lastDate = today;
+      if (typeof d.interestDate === 'undefined') d.interestDate = null;
       return d;
+    }
+    function applyBankInterest(p, dateKey){
+      const key = dateKey || todayKey();
+      if (p.daily.interestDate === key) return null;
+      const interest = Math.floor(p.bank * 0.01);
+      p.bank += interest;
+      p.daily.interestDate = key;
+      if (interest > 0 && typeof addNews === 'function') addNews(`${p.name} earned ${interest} gold interest in the bank.`);
+      return interest;
     }
 
     function toRow(p){
@@ -496,7 +524,27 @@ module.exports = {
       api.print('Type h, s, or v.','dim');
     }
     function onCombat(p,t){ const k=t.toLowerCase(); if (k==='a'||k.startsWith('att')) return doAttackRound(p); if (k==='f'||k.startsWith('fl')) return doFlee(p); if (k==='i'){ renderCombat(p); return; } api.print('Options: A)ttack, F)lee, I)nspect','dim'); }
-    function onInn(p,t){ const k=t.toLowerCase(); if (k==='v'){ p.screen='town'; return render(p); } if (k==='r'){ p.dayCount++; p.hp=p.maxHp; p.daily=defaultDaily(); api.print('You sleep soundly. A new day dawns.','green'); savePlayer(p); p.screen='town'; return render(p); } api.print('Type r to sleep, or v to return.','dim'); }
+    function onInn(p,t){
+      const k=t.toLowerCase();
+      if (k==='v'){ p.screen='town'; return render(p); }
+      if (k==='r'){
+        const today = todayKey();
+        const targetDate = p.daily.lastDate || today;
+        let interest = applyBankInterest(p, targetDate);
+        if (interest === null) interest = 0;
+        api.print(`Your bank earns ${interest} gold interest.`, interest>0 ? 'green' : 'dim');
+        p.dayCount++;
+        p.hp=p.maxHp;
+        const nextDaily = defaultDaily(today);
+        nextDaily.interestDate = today;
+        p.daily = nextDaily;
+        api.print('You sleep soundly. A new day dawns.','green');
+        savePlayer(p);
+        p.screen='town';
+        return render(p);
+      }
+      api.print('Type r to sleep, or v to return.','dim');
+    }
     function onSmith(p,t){ const k=t.toLowerCase(); if (k==='v'){ p.screen='town'; return render(p); } const idx=parseInt(k,10);
       if (!Number.isNaN(idx)&&idx>=1&&idx<=WEAPONS.length){ const i=idx-1, w=WEAPONS[i];
         if (i===p.weaponIdx) return api.print('You already own that weapon.','dim');
@@ -706,6 +754,23 @@ module.exports = {
       const raw=String(text||'').trim(); if (!raw) return true;
       let p = dbGetPlayer();
       if (!p){ p=defaultPlayer(fallbackName,null); p.screen='create:name'; p.temp={ name:fallbackName, step:'name' }; savePlayer(p); }
+
+      p.daily = normalizeDaily(p.daily);
+      const today = todayKey();
+      if (p.daily.lastDate !== today){
+        const lastDate = p.daily.lastDate;
+        if (p.daily.interestDate !== lastDate){
+          api.print('A new day has begun. Your turns are refreshed.','green');
+          let interest = applyBankInterest(p, lastDate || today);
+          if (interest === null) interest = 0;
+          api.print(`Your bank earns ${interest} gold interest.`, interest>0 ? 'green' : 'dim');
+          const refreshed = defaultDaily(today);
+          p.daily = refreshed;
+        } else {
+          p.daily.lastDate = today;
+        }
+        savePlayer(p);
+      }
 
       // Creation flow
       if (p.screen==='create:name'){ const name = raw || fallbackName; p.temp={ name, step:'gender' }; p.screen='create:gender'; savePlayer(p); render(p); return true; }
