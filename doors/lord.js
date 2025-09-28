@@ -98,6 +98,9 @@ module.exports = {
     const DRAGON_GOLD_MAX = 700;
     const CAMP_HEAL_PCT = 0.30;
     const DAILY_HEALS = 2;
+    const BARD_XP = 10;
+    const BARD_BANK_RATE = 0.005;
+    const BARD_ENABLED = true;
     function timeLeftMMSS() {
       const now = new Date(); const end = new Date(now); end.setHours(23,59,59,999);
       const s = Math.max(0, Math.floor((end - now)/1000));
@@ -164,7 +167,7 @@ module.exports = {
     }
     function defaultDaily(baseDate){
       const key = baseDate || todayKey();
-      return { forestTurns:10, tavernDrinks:2, heals:DAILY_HEALS, slept:false, duelUsed:false, lastDate:key, interestDate:null };
+      return { forestTurns:10, tavernDrinks:2, heals:DAILY_HEALS, slept:false, duelUsed:false, bard:false, lastDate:key, interestDate:null };
     }
     function normalizeDaily(d){
       const today = todayKey();
@@ -174,6 +177,7 @@ module.exports = {
       if (typeof d.heals === 'undefined') d.heals = DAILY_HEALS;
       if (typeof d.slept === 'undefined') d.slept = false;
       if (typeof d.duelUsed === 'undefined') d.duelUsed = false;
+      if (typeof d.bard === 'undefined') d.bard = false;
       if (!d.lastDate || typeof d.lastDate !== 'string') d.lastDate = today;
       if (typeof d.interestDate === 'undefined') d.interestDate = null;
       return d;
@@ -397,7 +401,10 @@ module.exports = {
       api.hr(); api.print('V) Return to Town Square','dim'); }
     function tavernMenu(p){ printHeader('The Tavern'); showStatus(p);
       api.print('G) Gossip — overhear a rumor'); api.print('D) Drink — regain a few HP (limited per day)');
-      api.print('V) Return to Town Square'); api.hr(); api.print('Type: g, d, or v','dim'); }
+      if (BARD_ENABLED && !p.daily.bard){ api.print('B) Bard\'s Song — accept today\'s boon'); }
+      api.print('V) Return to Town Square'); api.hr();
+      const opts = (BARD_ENABLED && !p.daily.bard) ? 'g, b, d, or v' : 'g, d, or v';
+      api.print(`Type: ${opts}`,'dim'); }
     function statusMenu(p){ printHeader('Your Status'); showStatus(p);
       api.print('V) Return to Town Square'); api.hr(); api.print('Type: v','dim'); }
     function stubMenu(title, p){ printHeader(title); showStatus(p);
@@ -650,8 +657,48 @@ module.exports = {
     function onRankings(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
     function onTavern(p,t){ const k=t.toLowerCase(); if (k==='v'){ p.screen='town'; return render(p); }
       if (k==='g'){ const rumors=['They say a dragon’s hoard lies deep in the forest…','The Blacksmith sharpens for free if you’re charming — or so they say.','A hidden grove yields gold to those who listen to the wind.','Beware the Black Knight past the old bridge.']; api.print(rumors[randInt(0,rumors.length-1)],'cyan'); return; }
+      if (k==='b'){
+        if (!BARD_ENABLED) return api.print('The bard is away today.','dim');
+        if (p.daily.bard) return api.print('The bard has already sung for you today.','yellow');
+        const choices=['forest','xp','drinks','bank'];
+        const choice=choices[randInt(0, choices.length-1)];
+        let line='The bard sings a haunting melody.';
+        if (choice==='forest'){
+          const before=p.daily.forestTurns||0;
+          const maxTurns=12;
+          p.daily.forestTurns=clamp(before+1,0,maxTurns);
+          const gained=Math.max(0, p.daily.forestTurns-before);
+          line = gained>0 ? 'You feel ready for the wilds. Forest turn +1!' : 'You are already brimming with forest vigor.';
+        } else if (choice==='xp'){
+          p.xp=(p.xp||0)+BARD_XP;
+          line = `Wisdom fills you. +${BARD_XP} XP.`;
+          applyLevelUps(p);
+        } else if (choice==='drinks'){
+          const before = typeof p.daily.tavernDrinks === 'number' ? p.daily.tavernDrinks : 0;
+          if (typeof p.daily.tavernDrinkMax === 'number'){
+            const max = Math.max(0, Math.floor(p.daily.tavernDrinkMax));
+            p.daily.tavernDrinks = max;
+          } else {
+            const cap = Math.max(3, before);
+            p.daily.tavernDrinks = clamp(before + 1, 0, cap);
+          }
+          const gained = Math.max(0, p.daily.tavernDrinks - before);
+          line = gained>0 ? `Your mug is refilled. Drinks +${gained}.` : 'Your mug was already full.';
+        } else if (choice==='bank'){
+          const base = Math.max(0, p.bank||0);
+          const bonus = Math.floor(base * BARD_BANK_RATE);
+          p.bank = base + bonus;
+          line = bonus>0 ? `A patron tips ${bonus} gold into your bank.` : 'A cheerful tune promises riches to come, though none arrive today.';
+        }
+        p.daily.bard = true;
+        if (typeof addNews === 'function') addNews(`${p.name} was blessed by the Bard.`);
+        savePlayer(p);
+        api.print(line, 'green');
+        return render(p);
+      }
       if (k==='d'){ if (p.daily.tavernDrinks<=0) return api.print('No more drinks today.','yellow'); p.daily.tavernDrinks--; const heal=randInt(2,6); p.hp=clamp(p.hp+heal,0,p.maxHp); api.print(`You feel warm. Recovered ${heal} HP.`,'green'); savePlayer(p); return render(p); }
-      api.print('Type g (gossip), d (drink), or v.','dim'); }
+      const suffix = (BARD_ENABLED && !p.daily.bard) ? 'g (gossip), b (bard), d (drink), or v.' : 'g (gossip), d (drink), or v.';
+      api.print(`Type ${suffix}`,'dim'); }
     function onStatus(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
     function onDuel(p,t){
       const raw=t.trim().toLowerCase();
