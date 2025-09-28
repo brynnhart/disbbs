@@ -905,7 +905,8 @@ module.exports = {
       if (!d) return defaultDaily(today);
       if (typeof d.forestTurns === 'undefined') d.forestTurns = FOREST_TURNS_PER_DAY;
       if (typeof d.tavernDrinks === 'undefined') d.tavernDrinks = TAVERN_DRINK_MAX;
-      if (typeof d.tavernDrinkMax !== 'number') d.tavernDrinkMax = TAVERN_DRINK_MAX;
+      d.tavernDrinks = clamp(Math.floor(d.tavernDrinks), 0, TAVERN_DRINK_MAX);
+      d.tavernDrinkMax = TAVERN_DRINK_MAX;
       if (typeof d.heals === 'undefined') d.heals = DAILY_HEALS;
       if (typeof d.slept === 'undefined') d.slept = false;
       if (typeof d.duelUsed === 'undefined') d.duelUsed = false;
@@ -1741,7 +1742,7 @@ module.exports = {
     function healerMenu(p){ printHeader('The Healer'); showStatus(p);
       const missing=p.maxHp-p.hp;
       if (missing<=0){ api.print('You are already in perfect health.'); api.print('V) Return to Town Square','dim'); return; }
-      const rate=2,cost=missing*rate;
+      const rate=HEALER_COST_PER_HP,cost=missing*rate;
       api.print(`You are missing ${missing} HP. Healing costs ${rate} gold per HP (Total: ${cost}).`);
       api.print('H) Heal to full'); api.print('V) Return to Town Square'); api.hr(); api.print('Type: h or v','dim'); }
     function bankMenu(p){ printHeader('The Bank of Redux'); showStatus(p);
@@ -2396,22 +2397,19 @@ module.exports = {
       if (raw==='v'){ p.screen='town'; return render(p); }
       let k=raw;
       const wantsHeal = raw==='h' || raw==='heal' || raw==='camp' || raw==='camp heal';
-      if (wantsHeal && p.daily.heals>0){
-        const before=p.hp;
-        const healAmt=Math.ceil(p.maxHp * CAMP_HEAL_PCT);
-        p.hp=clamp(p.hp+healAmt,0,p.maxHp);
-        const gained=p.hp-before;
-        p.daily.heals=Math.max(0, p.daily.heals-1);
-        api.print(`You rest at camp and recover ${gained} HP. Camp heals left: ${p.daily.heals}.`, gained>0 ? 'green' : 'dim');
-        savePlayer(p);
-        return render(p);
-      }
       if (wantsHeal){
-        if (raw==='h' && hasTurns(p)){
-          k='hunt';
-        } else {
-          return api.print('You have no camp heals remaining today.','yellow');
+        if (p.daily.heals>0){
+          const before=p.hp;
+          const healAmt=Math.ceil(p.maxHp * CAMP_HEAL_PCT);
+          p.hp=clamp(p.hp+healAmt,0,p.maxHp);
+          const gained=p.hp-before;
+          p.daily.heals=Math.max(0, p.daily.heals-1);
+          api.print(`You rest at camp and recover ${gained} HP. Camp heals left: ${p.daily.heals}.`, gained>0 ? 'green' : 'dim');
+          savePlayer(p);
+          return render(p);
         }
+        api.print('No camp heals left today.','yellow');
+        return render(p);
       }
       if (k==='m'||k.startsWith('m')||k.startsWith('hunt')||k.startsWith('fight')){
         if (!hasTurns(p)) return api.print('No turns left today.','yellow');
@@ -2640,15 +2638,12 @@ module.exports = {
           line = `Wisdom fills you. +${BARD_XP} XP.`;
           applyLevelUps(p);
         } else if (choice==='drinks'){
-          const before = typeof p.daily.tavernDrinks === 'number' ? p.daily.tavernDrinks : 0;
-          if (typeof p.daily.tavernDrinkMax === 'number'){
-            const max = Math.max(0, Math.floor(p.daily.tavernDrinkMax));
-            p.daily.tavernDrinks = max;
-          } else {
-            const cap = Math.max(3, before);
-            p.daily.tavernDrinks = clamp(before + 1, 0, cap);
-          }
-          const gained = Math.max(0, p.daily.tavernDrinks - before);
+          const beforeRaw = typeof p.daily.tavernDrinks === 'number' ? p.daily.tavernDrinks : 0;
+          const before = Math.max(0, Math.floor(beforeRaw));
+          p.daily.tavernDrinkMax = TAVERN_DRINK_MAX;
+          const after = TAVERN_DRINK_MAX;
+          p.daily.tavernDrinks = after;
+          const gained = Math.max(0, after - Math.min(before, after));
           line = gained>0 ? `Your mug is refilled. Drinks +${gained}.` : 'Your mug was already full.';
         } else if (choice==='bank'){
           const base = Math.max(0, p.bank||0);
@@ -2662,7 +2657,15 @@ module.exports = {
         api.print(line, 'green');
         return render(p);
       }
-      if (k==='d'){ if (p.daily.tavernDrinks<=0) return api.print('No more drinks today.','yellow'); p.daily.tavernDrinks--; const heal=randInt(2,6); p.hp=clamp(p.hp+heal,0,p.maxHp); api.print(`You feel warm. Recovered ${heal} HP.`,'green'); savePlayer(p); return render(p); }
+      if (k==='d'){ if (p.daily.tavernDrinks<=0) return api.print('No more drinks today.','yellow');
+        const remaining = clamp(p.daily.tavernDrinks-1, 0, TAVERN_DRINK_MAX);
+        p.daily.tavernDrinks = remaining;
+        const heal=randInt(2,6);
+        p.hp=clamp(p.hp+heal,0,p.maxHp);
+        api.print(`You feel warm. Recovered ${heal} HP. Drinks left: ${remaining}.`,'green');
+        savePlayer(p);
+        return render(p);
+      }
       if (k==='f'){ return onFlirt(p); }
       if (k==='r'){ if (isMarried(p)) return api.print('You are already wed.','yellow'); p.screen='tavern:propose'; return render(p); }
       if (k==='l'){ const proposals = getPendingProposalsFor(p.userId); if (!proposals.length) return api.print('No proposals await you.','dim'); p.screen='tavern:inbox'; return render(p); }
