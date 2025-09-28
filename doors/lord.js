@@ -336,6 +336,7 @@ module.exports = {
     const ALLOW_CLASS_RESPEC = false;
     const RESPEC_COST_GOLD = 500;
     const MAIL_SEND_DAILY_LIMIT = 5;
+    const NAME_MAX = 20;
     const MAIL_SUBJECT_MAX = 40;
     const MAIL_BODY_MAX = 500;
     const ANNOUNCE_SUBJECT_MAX = 60;
@@ -354,29 +355,92 @@ module.exports = {
       const mm = String(Math.floor(s/60)).padStart(2,'0'); const ss = String(s%60).padStart(2,'0');
       return `${mm}:${ss}`;
     }
+    const ANSI_REGEXES = [
+      /\x1b\[[0-9;?]*[ -\/]*[@-~]/g, // CSI
+      /\x1b\][^\x07]*(?:\x07|\x1b\\)/g, // OSC
+      /\x1b[@-Z\\-_]/g, // 2-char sequences
+    ];
+    function sanitize(text, maxLen, options){
+      const opts = options || {};
+      const raw = String(text ?? '');
+      let cleaned = raw;
+      let strippedAnsi = false;
+      ANSI_REGEXES.forEach(re => {
+        const replaced = cleaned.replace(re, '');
+        if (replaced !== cleaned){
+          strippedAnsi = true;
+          cleaned = replaced;
+        }
+        re.lastIndex = 0;
+      });
+      if (cleaned.includes('\x1b')){
+        strippedAnsi = true;
+        cleaned = cleaned.replace(/\x1b/g, '');
+      }
+      if (strippedAnsi){
+        console.warn('[lord] sanitize() stripped ANSI escape sequences from input.');
+      }
+      cleaned = cleaned.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+      cleaned = cleaned.replace(/\t/g, ' ');
+      if (opts.allowNewlines){
+        cleaned = cleaned.replace(/\r\n?/g, '\n');
+        cleaned = cleaned.replace(/[ \t]+\n/g, '\n');
+        cleaned = cleaned.replace(/\n[ \t]+/g, '\n');
+      } else {
+        cleaned = cleaned.replace(/[\r\n]+/g, ' ');
+      }
+      if (opts.collapseWhitespace){
+        if (opts.allowNewlines){
+          cleaned = cleaned.replace(/[ \t]+/g, ' ');
+        } else {
+          cleaned = cleaned.replace(/\s+/g, ' ');
+        }
+      }
+      cleaned = cleaned.trim();
+      if (typeof maxLen === 'number' && Number.isFinite(maxLen) && maxLen > 0){
+        cleaned = cleaned.slice(0, maxLen);
+      }
+      return cleaned;
+    }
+    function sanitizeName(name){
+      return sanitize(name, NAME_MAX, { collapseWhitespace:true });
+    }
     function safeName(name){
-      const cleaned = String(name || '').replace(/[\x00-\x1F\x7F]/g, '').trim();
+      const cleaned = sanitizeName(name);
       return cleaned || 'Unknown';
     }
-    function stripControls(text, allowNewlines){
-      const pattern = allowNewlines ? /[\x00-\x09\x0B-\x1F\x7F]/g : /[\x00-\x1F\x7F]/g;
-      return String(text || '').replace(pattern, '');
+    function sanitizeMailSubjectMeta(text){
+      const cleaned = sanitize(text, undefined, { collapseWhitespace:true });
+      return {
+        value: cleaned.slice(0, MAIL_SUBJECT_MAX),
+        originalLength: cleaned.length
+      };
     }
     function sanitizeMailSubject(text){
-      const cleaned = stripControls(text, false).trim();
-      return cleaned.slice(0, MAIL_SUBJECT_MAX);
+      return sanitizeMailSubjectMeta(text).value;
+    }
+    function sanitizeMailBodyMeta(text){
+      const cleaned = sanitize(text, undefined, { allowNewlines:true });
+      return {
+        value: cleaned.slice(0, MAIL_BODY_MAX),
+        originalLength: cleaned.length
+      };
     }
     function sanitizeMailBody(text){
-      const cleaned = stripControls(text, true).trim();
-      return cleaned.slice(0, MAIL_BODY_MAX);
+      return sanitizeMailBodyMeta(text).value;
+    }
+    function sanitizeAnnouncementMeta(text){
+      const cleaned = sanitize(text, undefined, { collapseWhitespace:true });
+      return {
+        value: cleaned.slice(0, ANNOUNCE_SUBJECT_MAX),
+        originalLength: cleaned.length
+      };
     }
     function sanitizeAnnouncement(text){
-      const cleaned = stripControls(text, false).trim();
-      return cleaned.slice(0, ANNOUNCE_SUBJECT_MAX);
+      return sanitizeAnnouncementMeta(text).value;
     }
     function sanitizeNewsText(text){
-      const cleaned = stripControls(text, false).trim();
-      return cleaned;
+      return sanitize(text, undefined, { collapseWhitespace:true });
     }
     const GOLD_DELTA_CAPS = {
       combat: MAX_GOLD_DELTA_COMBAT,
@@ -854,7 +918,8 @@ module.exports = {
 
     // Player identity from BBS
     const userId = state.userId;
-    const fallbackName = state.displayName || state.username || 'Adventurer';
+    const fallbackNameRaw = state.displayName || state.username || 'Adventurer';
+    const fallbackName = sanitizeName(fallbackNameRaw) || 'Adventurer';
 
     // ─────────────────────────────────────────────────────────────
     // Persistence wrappers (DB or MEM)
@@ -970,7 +1035,7 @@ module.exports = {
     }
     function fromRow(r){
       return {
-        userId: r.user_id, name: r.char_name, gender: r.gender,
+        userId: r.user_id, name: sanitizeName(r.char_name) || fallbackName, gender: r.gender,
         createdAt: r.created_at, updatedAt: r.updated_at,
         level: r.level, xp: r.xp, hp: r.hp, maxHp: r.max_hp, gold: r.gold, bank: r.bank,
         weaponIdx: r.weapon_idx, armorIdx: r.armor_idx,
@@ -979,7 +1044,7 @@ module.exports = {
         expert: !!r.expert, screen: r.screen || 'town', combat: null, temp: null,
         gems: typeof r.gems === 'number' ? r.gems : 0,
         spouseId: r.spouse_id ? String(r.spouse_id) : null,
-        spouseName: r.spouse_name || null,
+        spouseName: r.spouse_name ? (sanitizeName(r.spouse_name) || null) : null,
         marriedOn: typeof r.married_on === 'number' ? r.married_on : 0,
         classId: r.class_id ? String(r.class_id) : null,
         lastSeen: typeof r.last_seen === 'number' ? r.last_seen : 0
@@ -1034,6 +1099,15 @@ module.exports = {
         const num = Number(val);
         return Number.isFinite(num) ? Math.floor(num) : 0;
       };
+      const nameOriginal = typeof p.name === 'undefined' ? '' : String(p.name);
+      const nameSanitized = sanitizeName(nameOriginal) || fallbackName;
+      if (nameSanitized !== nameOriginal){
+        p.name = nameSanitized;
+      }
+      if (p.spouseName){
+        const spouseSanitized = sanitizeName(p.spouseName);
+        p.spouseName = spouseSanitized || null;
+      }
       const maxHpOriginal = p.maxHp;
       const maxHpNormalized = Math.max(0, toInt(p.maxHp));
       if (maxHpNormalized !== maxHpOriginal) guardLog(p, 'save', 'maxHp', maxHpOriginal, maxHpNormalized, { reason:'invariant' });
@@ -1071,13 +1145,21 @@ module.exports = {
     }
     function getOpponentsFor(player){
       if (useDB){
-        return opponentsStmt ? opponentsStmt.all(player.userId) : [];
+        if (!opponentsStmt) return [];
+        return opponentsStmt.all(player.userId).map(row => ({
+          user_id: row.user_id,
+          name: safeName(row.name || row.char_name || ''),
+          level: row.level,
+          kills: row.kills,
+          deaths: row.deaths,
+          gold: row.gold
+        }));
       }
       return [...MEM.players.values()]
         .filter(other => other.userId !== player.userId)
         .sort((a,b)=>(b.level-a.level)||(b.xp-a.xp)||(b.kills-a.kills))
         .slice(0,20)
-        .map(o=>({ user_id:o.userId, name:o.name, level:o.level, kills:o.kills, deaths:o.deaths, gold:o.gold }));
+        .map(o=>({ user_id:o.userId, name:safeName(o.name), level:o.level, kills:o.kills, deaths:o.deaths, gold:o.gold }));
     }
     function getPlayerByIdRaw(id){
       if (useDB){
@@ -1586,8 +1668,9 @@ module.exports = {
     // Character creation
     function defaultPlayer(charName, gender){
       const now = nowEpoch();
+      const normalizedName = sanitizeName(charName) || fallbackName;
       return {
-        userId, name: charName || fallbackName, gender: gender || null,
+        userId, name: normalizedName, gender: gender || null,
         createdAt: now, updatedAt: now,
         level:1, xp:0, hp:STARTING_HP, maxHp:STARTING_HP, gold:STARTING_GOLD, bank:0, weaponIdx:0, armorIdx:0,
         charm:STARTING_CHARM, kills:0, deaths:0, dayCount:1, daily: defaultDaily(),
@@ -3080,26 +3163,24 @@ module.exports = {
       }
       if (draft.step === 'subject'){
         if (!trimmed && draft.subject){ draft.step='body'; return render(p); }
-        const subject = sanitizeMailSubject(trimmed);
+        const { value: subject, originalLength } = sanitizeMailSubjectMeta(trimmed);
         if (!subject){
           api.print('Subject cannot be blank.','yellow');
           return;
         }
-        const original = stripControls(trimmed, false).trim();
-        if (subject.length < original.length){ api.print('Subject truncated to 40 characters.','dim'); }
+        if (subject.length < originalLength){ api.print('Subject truncated to 40 characters.','dim'); }
         draft.subject = subject;
         draft.step = 'body';
         return render(p);
       }
       if (draft.step === 'body'){
         if (!trimmed && draft.body){ draft.step='confirm'; return render(p); }
-        const cleaned = stripControls(raw, true).trim();
-        const body = sanitizeMailBody(raw);
+        const { value: body, originalLength } = sanitizeMailBodyMeta(raw);
         if (!body){
           api.print('Message cannot be blank.','yellow');
           return;
         }
-        if (body.length < cleaned.length){ api.print('Message truncated to 500 characters.','dim'); }
+        if (body.length < originalLength){ api.print('Message truncated to 500 characters.','dim'); }
         draft.body = body;
         draft.step = 'confirm';
         return render(p);
@@ -3214,13 +3295,12 @@ module.exports = {
         api.print('Enter your announcement, or type v to cancel.','dim');
         return;
       }
-      const subject = sanitizeAnnouncement(raw);
+      const { value: subject, originalLength } = sanitizeAnnouncementMeta(raw);
       if (!subject){
         api.print('Announcement cannot be blank.','yellow');
         return;
       }
-      const cleaned = stripControls(raw, false).trim();
-      if (subject.length < cleaned.length){ api.print('Announcement truncated to 60 characters.','dim'); }
+      if (subject.length < originalLength){ api.print('Announcement truncated to 60 characters.','dim'); }
       if (typeof addNews === 'function'){
         try { addNews(`${p.name} announces: ${subject}`); } catch (err) { console.error('[lord] addNews failed:', err); }
       }
@@ -3317,7 +3397,15 @@ module.exports = {
       p.daily = normalizeDaily(p.daily);
 
       // Creation flow
-      if (p.screen==='create:name'){ const name = raw || fallbackName; p.temp={ name, step:'gender' }; p.screen='create:gender'; savePlayer(p); render(p); return true; }
+      if (p.screen==='create:name'){
+        const proposed = raw || fallbackName;
+        const name = sanitizeName(proposed) || fallbackName;
+        p.temp={ name, step:'gender' };
+        p.screen='create:gender';
+        savePlayer(p);
+        render(p);
+        return true;
+      }
       if (p.screen==='create:gender'){
         const k=raw.toLowerCase(); let gender=null;
         if (k==='m'||k==='male') gender='Male';
