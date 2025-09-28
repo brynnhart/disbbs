@@ -9,13 +9,15 @@ module.exports = {
     // Safe/lazy DB — fallback to memory if anything fails
     const G = (globalThis || global);
     const MEMKEY = '__LORD_MEM_STORE__';
-    if (!G[MEMKEY]) G[MEMKEY] = { players: new Map(), proposals: [], nextProposalId: 1, mail: [], nextMailId: 1 };
+    if (!G[MEMKEY]) G[MEMKEY] = { players: new Map(), proposals: [], nextProposalId: 1, mail: [], nextMailId: 1, hof: [], nextHofId: 1 };
     const MEM = G[MEMKEY];
     if (!MEM.players) MEM.players = new Map();
     if (!Array.isArray(MEM.proposals)) MEM.proposals = [];
     if (typeof MEM.nextProposalId !== 'number') MEM.nextProposalId = 1;
     if (!Array.isArray(MEM.mail)) MEM.mail = [];
     if (typeof MEM.nextMailId !== 'number') MEM.nextMailId = 1;
+    if (!Array.isArray(MEM.hof)) MEM.hof = [];
+    if (typeof MEM.nextHofId !== 'number') MEM.nextHofId = 1;
 
     let dbReady = false;
     let useDB = false;
@@ -23,7 +25,8 @@ module.exports = {
       selectMarriageCandidatesStmt = null, insertProposalStmt = null, selectProposalsForStmt = null, checkProposalStmt = null,
       deleteProposalStmt = null, deleteProposalsByPlayerStmt = null, selectMarriedPairsStmt = null,
       insertMailStmt = null, selectInboxMailStmt = null, selectMailByIdStmt = null, markMailReadStmt = null,
-      selectOnlinePlayersStmt = null;
+      selectOnlinePlayersStmt = null, insertHofStmt = null, selectRecentHofStmt = null, topSeasonSnapshotStmt = null,
+      resetAllPlayersStmt = null;
 
     function lazyInitDB() {
       if (dbReady) return;
@@ -101,6 +104,18 @@ module.exports = {
           CREATE INDEX IF NOT EXISTS idx_lord_mail_to_ts ON lord_mail(to_id, ts DESC);
           CREATE INDEX IF NOT EXISTS idx_lord_mail_from_ts ON lord_mail(from_id, ts DESC);
         `);
+
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS lord_hof (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name   TEXT NOT NULL,
+            level  INTEGER NOT NULL,
+            kills  INTEGER NOT NULL,
+            wealth INTEGER NOT NULL,
+            ts     INTEGER NOT NULL
+          );
+        `);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_lord_hof_ts ON lord_hof(ts DESC);`);
 
         selectPlayer = db.prepare(`SELECT * FROM lord_players WHERE user_id = ?`);
         insertPlayer = db.prepare(`
@@ -186,6 +201,46 @@ module.exports = {
            ORDER BY last_seen DESC
            LIMIT 60
         `);
+        insertHofStmt = db.prepare(`
+          INSERT INTO lord_hof (name, level, kills, wealth, ts)
+          VALUES (?, ?, ?, ?, ?)
+        `);
+        selectRecentHofStmt = db.prepare(`
+          SELECT id, name, level, kills, wealth, ts
+            FROM lord_hof
+           ORDER BY ts DESC, id DESC
+           LIMIT ?
+        `);
+        topSeasonSnapshotStmt = db.prepare(`
+          SELECT user_id, char_name, level, xp, kills, gold, bank
+            FROM lord_players
+           ORDER BY level DESC, xp DESC, kills DESC, (gold + bank) DESC
+           LIMIT 10
+        `);
+        resetAllPlayersStmt = db.prepare(`
+          UPDATE lord_players
+             SET level = 1,
+                 xp = 0,
+                 gold = ?,
+                 bank = 0,
+                 hp = ?,
+                 max_hp = ?,
+                 weapon_idx = 0,
+                 armor_idx = 0,
+                 kills = 0,
+                 deaths = 0,
+                 charm = ?,
+                 gems = 0,
+                 class_id = NULL,
+                 spouse_id = NULL,
+                 spouse_name = NULL,
+                 married_on = 0,
+                 daily_json = ?,
+                 day_count = 1,
+                 screen = 'town',
+                 updated_at = ?
+           WHERE 1 = 1
+        `);
         useDB = true;
       } catch (e) {
         useDB = false; // fall back silently; don't break DoorManager
@@ -200,6 +255,13 @@ module.exports = {
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const nowEpoch = () => Math.floor(Date.now() / 1000);
     const ONLINE_WINDOW_SEC = 300;
+    const STARTING_GOLD = 50;
+    const STARTING_HP = 30;
+    const STARTING_CHARM = 0;
+    const LORD_ADMIN_IDS = (process.env.LORD_ADMIN_IDS || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
     const FEATURE_GEMS = true;
     const GEM_DROP_RATE_SEARCH = 0.01;
     const JEWELER_DAILY_LIMIT = 3;
@@ -792,6 +854,120 @@ module.exports = {
       }
     }
     function topHeroes(){ return useDB ? topHeroesStmt.all() : memTop(); }
+    function getHallOfFame(limit){
+      const max = Math.max(1, limit || 30);
+      if (useDB){
+        if (!selectRecentHofStmt) return [];
+        return selectRecentHofStmt.all(max).map(row => ({
+          id: row.id,
+          name: safeName(row.name),
+          level: Math.max(1, row.level || 1),
+          kills: Math.max(0, row.kills || 0),
+          wealth: Math.max(0, row.wealth || 0),
+          ts: row.ts || 0
+        }));
+      }
+      const list = Array.isArray(MEM.hof) ? MEM.hof.slice() : [];
+      return list
+        .sort((a,b)=> (b.ts - a.ts) || ((b.id||0) - (a.id||0)))
+        .slice(0, max)
+        .map(entry => ({
+          id: entry.id,
+          name: safeName(entry.name),
+          level: Math.max(1, entry.level || 1),
+          kills: Math.max(0, entry.kills || 0),
+          wealth: Math.max(0, entry.wealth || 0),
+          ts: entry.ts || 0
+        }));
+    }
+    function isAdminPlayer(player){
+      if (!player) return false;
+      try {
+        if (typeof G.LORD_IS_ADMIN === 'function'){ if (G.LORD_IS_ADMIN(player)) return true; }
+      } catch (err){ /* ignore */ }
+      const id = player.userId != null ? String(player.userId) : '';
+      if (!id) return false;
+      if (LORD_ADMIN_IDS.includes(id)) return true;
+      return false;
+    }
+    function applySeasonResetToPlayer(player, ts, baseDate){
+      if (!player) return null;
+      const stamp = typeof ts === 'number' ? ts : nowEpoch();
+      const dateKey = baseDate || todayKey();
+      player.level = 1;
+      player.xp = 0;
+      player.gold = STARTING_GOLD;
+      player.bank = 0;
+      player.maxHp = STARTING_HP;
+      player.hp = STARTING_HP;
+      player.weaponIdx = 0;
+      player.armorIdx = 0;
+      player.kills = 0;
+      player.deaths = 0;
+      player.charm = STARTING_CHARM;
+      player.gems = 0;
+      player.classId = null;
+      player.spouseId = null;
+      player.spouseName = null;
+      player.marriedOn = 0;
+      player.dayCount = 1;
+      player.daily = defaultDaily(dateKey);
+      player.screen = 'town';
+      player.combat = null;
+      player.temp = null;
+      player.updatedAt = stamp;
+      if (typeof player.lastSeen !== 'number') player.lastSeen = stamp;
+      return player;
+    }
+    function performSeasonReset(actor){
+      const ts = nowEpoch();
+      const dateKey = todayKey();
+      const dailyJson = JSON.stringify(defaultDaily(dateKey));
+      const topEntries = [];
+      let updatedPlayer = null;
+      if (useDB){
+        const rows = topSeasonSnapshotStmt ? topSeasonSnapshotStmt.all() : [];
+        rows.forEach(row => {
+          const wealth = Math.max(0, (row.gold || 0) + (row.bank || 0));
+          topEntries.push({ name: safeName(row.char_name), level: Math.max(1, row.level || 1), kills: Math.max(0, row.kills || 0), wealth, ts });
+        });
+        if (resetAllPlayersStmt){
+          const txn = db.transaction(() => {
+            topEntries.forEach(entry => insertHofStmt && insertHofStmt.run(entry.name, entry.level, entry.kills, entry.wealth, entry.ts));
+            resetAllPlayersStmt.run(STARTING_GOLD, STARTING_HP, STARTING_HP, STARTING_CHARM, dailyJson, ts);
+          });
+          txn();
+        }
+        updatedPlayer = dbGetPlayer();
+      } else {
+        const players = [...MEM.players.values()].map(memClone);
+        players.sort((a,b)=> (b.level-a.level) || (b.xp-a.xp) || (b.kills-a.kills) || (((b.gold||0)+(b.bank||0)) - ((a.gold||0)+(a.bank||0))));
+        players.slice(0,10).forEach(p => {
+          const wealth = Math.max(0, (p.gold || 0) + (p.bank || 0));
+          topEntries.push({ name: safeName(p.name), level: Math.max(1, p.level || 1), kills: Math.max(0, p.kills || 0), wealth, ts });
+        });
+        const withIds = topEntries.map(entry => ({
+          id: MEM.nextHofId++,
+          ...entry
+        }));
+        MEM.hof = withIds.concat(Array.isArray(MEM.hof) ? MEM.hof : []).slice(0,200);
+        MEM.players.forEach((player, key) => {
+          applySeasonResetToPlayer(player, ts, dateKey);
+          MEM.players.set(key, player);
+        });
+        updatedPlayer = actor ? applySeasonResetToPlayer(actor, ts, dateKey) : null;
+      }
+      if (useDB && insertHofStmt && topEntries.length && !resetAllPlayersStmt){
+        // If reset statement missing, still persist HoF entries individually
+        topEntries.forEach(entry => insertHofStmt.run(entry.name, entry.level, entry.kills, entry.wealth, entry.ts));
+      }
+      if (!useDB){
+        // ensure cap after merge when MEM.hof already had entries
+        if (Array.isArray(MEM.hof) && MEM.hof.length > 200){ MEM.hof = MEM.hof.slice(0,200); }
+      }
+      if (typeof addNews === 'function') addNews('A new season begins! The Hall of Fame has been updated.');
+      return { count: topEntries.length, player: updatedPlayer };
+    }
 
     function isMarried(p){
       if (!p) return false;
@@ -1102,8 +1278,8 @@ module.exports = {
       return {
         userId, name: charName || fallbackName, gender: gender || null,
         createdAt: now, updatedAt: now,
-        level:1, xp:0, hp:30, maxHp:30, gold:50, bank:0, weaponIdx:0, armorIdx:0,
-        charm:0, kills:0, deaths:0, dayCount:1, daily: defaultDaily(),
+        level:1, xp:0, hp:STARTING_HP, maxHp:STARTING_HP, gold:STARTING_GOLD, bank:0, weaponIdx:0, armorIdx:0,
+        charm:STARTING_CHARM, kills:0, deaths:0, dayCount:1, daily: defaultDaily(),
         gems:0,
         spouseId:null, spouseName:null, marriedOn:0,
         classId:null,
@@ -1154,31 +1330,41 @@ module.exports = {
     // Town Square
     function townSquareMenu(p){
       setPromptLord(); townHeader();
+      if (p.temp && p.temp.seasonNotice){
+        api.print(p.temp.seasonNotice,'green');
+        api.hr();
+        delete p.temp.seasonNotice;
+        if (Object.keys(p.temp).length === 0) p.temp = null;
+      }
       api.print('The streets are crowded, it is difficult to','dim');
       api.print('push your way through the mob....','dim'); api.hr();
       const W=36, pad=(s,w)=> (s+' '.repeat(Math.max(0,w-s.length)));
+      const admin = isAdminPlayer(p);
       const row=(lk,lt,rk,rt)=> api.print(pad(`(${lk})${lt}`,W)+`(${rk})${rt}`);
       if (!p.expert){
         row('F','orest','S','laughter other players');
         row('K','ing Arthurs Weapons','A','bduls Armour');
-        row('H','ealers Hut','V','iew your stats');
+        row('U','Healers Hut','V','iew your stats');
         row('I','nn','T','urgons Warrior Training');
         row('Y','e Old Bank','L','ist Warriors');
         row('W','rite Mail','D','aily News');
         row('C','onjugality List','O','ther Places');
-        row('X','pert Mode','M','ake Announcement');
+        row('H','all of Fame','X','pert Mode');
+        row('M','ake Announcement','P','eople Online');
         if (FEATURE_GEMS){
-          row('P','eople Online','J','eweler');
-          row('Q','uit to Fields',' ',' ');
+          row('Q','uit to Fields','J','eweler');
         } else {
-          row('P','eople Online','Q','uit to Fields');
+          row('Q','uit to Fields',' ',' ');
         }
+        if (admin) row('Z','Reset Season',' ',' ');
         api.hr();
         api.print('The Town Square    (? for menu)','magenta');
-        const menuKeys = FEATURE_GEMS ? '(F,S,K,A,H,V,I,T,Y,L,W,D,C,O,X,M,P,Q,J)' : '(F,S,K,A,H,V,I,T,Y,L,W,D,C,O,X,M,P,Q)';
+        let menuKeys = FEATURE_GEMS ? '(F,S,K,A,U,V,I,T,Y,L,W,D,C,O,H,X,M,P,Q,J)' : '(F,S,K,A,U,V,I,T,Y,L,W,D,C,O,H,X,M,P,Q)';
+        if (admin) menuKeys = menuKeys.slice(0, -1) + ',Z)';
         api.print(menuKeys,'dim');
       } else {
-        const expertOpts = FEATURE_GEMS ? '[Expert Mode] F S K A H V I T Y L W D C O X M P Q J' : '[Expert Mode] F S K A H V I T Y L W D C O X M P Q';
+        let expertOpts = FEATURE_GEMS ? '[Expert Mode] F S K A U V I T Y L W D C O H X M P Q J' : '[Expert Mode] F S K A U V I T Y L W D C O H X M P Q';
+        if (admin) expertOpts += ' Z';
         api.print(expertOpts,'magenta');
         api.print('Type a single letter (e.g., F, K, A, V) — /help for help','dim');
       }
@@ -1271,6 +1457,28 @@ module.exports = {
       const rows = topHeroes(); if (!rows.length) api.print('No heroes recorded yet.','dim');
       rows.forEach((r,i)=> api.print(`${i+1}. ${r.name}  Lv${r.level}  K:${r.kills} D:${r.deaths}  Riches:${r.wealth}`));
       api.hr(); api.print('V) Return to Town Square','dim'); }
+    function hallOfFameMenu(){ printHeader('Hall of Fame');
+      const entries = getHallOfFame(30);
+      if (!entries.length){
+        api.print('No heroes have been immortalized yet.','dim');
+      } else {
+        entries.forEach(entry => {
+          const date = formatDate(entry.ts);
+          api.print(`${entry.name} — Level ${entry.level}, K:${entry.kills}, Wealth:${entry.wealth} [${date}]`);
+        });
+      }
+      api.hr();
+      api.print('V) Return to Town Square','dim');
+    }
+    function seasonResetMenu(){ printHeader('Season Reset');
+      api.print('This will archive the top 10 heroes into the Hall of Fame and reset all adventurers.','yellow');
+      api.print('Are you absolutely sure?','cyan');
+      api.hr();
+      api.print('Y) Yes, begin the new season');
+      api.print('N) No, return to Town Square');
+      api.hr();
+      api.print('Type Y or N.','dim');
+    }
     function tavernMenu(p){ printHeader('The Tavern'); showStatus(p);
       const bardReady = BARD_ENABLED && !p.daily.bard;
       const married = isMarried(p);
@@ -1748,7 +1956,8 @@ module.exports = {
       if (k==='s'){ p.screen='duel'; return render(p); }
       if (k==='k'){ p.screen='blacksmith'; return render(p); }
       if (k==='a'){ p.screen='armorer'; return render(p); }
-      if (k==='h'){ p.screen='healer'; return render(p); }
+      if (k==='u'){ p.screen='healer'; return render(p); }
+      if (k==='h'){ p.screen='hall_of_fame'; return render(p); }
       if (k==='v'){ p.screen='status'; return render(p); }
       if (k==='i'){ p.screen='inn'; return render(p); }
       if (k==='t'){ p.screen='training'; return render(p); }
@@ -1763,10 +1972,19 @@ module.exports = {
       if (k==='m'){ p.screen='announce'; return render(p); }
       if (k==='p'){ p.screen='people'; return render(p); }
       if (k==='q'){ p.screen='town'; savePlayer(p); leave(); return; }
+      if (k==='z'){
+        if (isAdminPlayer(p)){ p.screen='season:reset'; return render(p); }
+        return api.print('Only admins may reset the season.','yellow');
+      }
       if (k.startsWith('forest')){ p.screen='forest'; return render(p); }
       if (k.startsWith('black')){ p.screen='blacksmith'; return render(p); }
       if (k.startsWith('armor')){ p.screen='armorer'; return render(p); }
       if (k.startsWith('heal')){ p.screen='healer'; return render(p); }
+      if (k.startsWith('hall')){ p.screen='hall_of_fame'; return render(p); }
+      if (k.startsWith('reset')){
+        if (isAdminPlayer(p)){ p.screen='season:reset'; return render(p); }
+        return api.print('Only admins may reset the season.','yellow');
+      }
       if (k.startsWith('inn')){ p.screen='inn'; return render(p); }
       if (k.startsWith('bank')||k==='ye'||k.startsWith('ye old')){ p.screen='bank'; return render(p); }
       if (k.startsWith('rank')){ p.screen='rankings'; return render(p); }
@@ -1967,6 +2185,24 @@ module.exports = {
       api.print('Type r for a Ring of Swagger, h for a Heartstone, or v to return.','dim');
     }
     function onRankings(p,t){ if (t.toLowerCase()==='v'){ p.screen='town'; return render(p); } api.print('Type v to return.','dim'); }
+    function onHallOfFame(p,t){ const raw=t.trim().toLowerCase(); if (raw==='v'){ p.screen='town'; return render(p); } api.print('Type V to return to Town Square.','dim'); }
+    function onSeasonReset(p,t){
+      const raw = t.trim().toLowerCase();
+      if (!isAdminPlayer(p)){ p.screen='town'; return render(p); }
+      if (raw==='n' || raw==='no'){ p.screen='town'; return render(p); }
+      if (raw==='y' || raw==='yes'){
+        const result = performSeasonReset(p);
+        const count = result && typeof result.count === 'number' ? result.count : 0;
+        const refreshed = result && result.player ? result.player : dbGetPlayer() || p;
+        const updated = refreshed || p;
+        const message = `Season reset complete. ${count} champion${count===1?'':'s'} honored in the Hall of Fame.`;
+        updated.temp = { ...(updated.temp || {}), seasonNotice: message };
+        updated.screen = 'town';
+        if (!useDB) savePlayer(updated);
+        return render(updated);
+      }
+      api.print('Type Y to confirm the reset, or N to cancel.','yellow');
+    }
     function onFlirt(p){
       const currentCharm = clamp(p.charm || 0, 0, CHARM_MAX);
       const roll = randInt(0, 100) + currentCharm * 5;
@@ -2535,6 +2771,8 @@ module.exports = {
         case 'bank:wit':   return bankWithdrawPrompt(p);
         case 'jeweler':    return jewelerMenu(p);
         case 'rankings':   return rankingsMenu();
+        case 'hall_of_fame': return hallOfFameMenu();
+        case 'season:reset': return isAdminPlayer(p) ? seasonResetMenu() : townSquareMenu(p);
         case 'tavern':     return tavernMenu(p);
         case 'tavern:propose': return marriageProposeMenu(p);
         case 'tavern:inbox':   return proposalInboxMenu(p);
@@ -2644,6 +2882,7 @@ module.exports = {
         case 'bank:wit':   onBankAmount(p, raw); break;
         case 'jeweler':    onJeweler(p, raw);    break;
         case 'rankings':   onRankings(p, raw);   break;
+        case 'hall_of_fame': onHallOfFame(p, raw); break;
         case 'tavern':     onTavern(p, raw);     break;
         case 'tavern:propose': onMarriagePropose(p, raw); break;
         case 'tavern:inbox':   onProposalInbox(p, raw); break;
@@ -2660,6 +2899,7 @@ module.exports = {
         case 'conjugality':onConjugality(p, raw);break;
         case 'announce':   onAnnounce(p, raw);   break;
         case 'people':     onPeople(p, raw);     break;
+        case 'season:reset': onSeasonReset(p, raw); break;
         default:           p.screen='town'; render(p);
       }
       return true;
