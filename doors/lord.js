@@ -19,6 +19,7 @@ module.exports = {
     if (!Array.isArray(MEM.hof)) MEM.hof = [];
     if (typeof MEM.nextHofId !== 'number') MEM.nextHofId = 1;
     if (!Array.isArray(MEM.news)) MEM.news = [];
+    if (!MEM.adminCfg || !(MEM.adminCfg instanceof Map)) MEM.adminCfg = new Map();
 
     let dbReady = false;
     let useDB = false;
@@ -27,7 +28,8 @@ module.exports = {
       deleteProposalStmt = null, deleteProposalsByPlayerStmt = null, selectMarriedPairsStmt = null,
       insertMailStmt = null, selectInboxMailStmt = null, selectMailByIdStmt = null, markMailReadStmt = null,
       selectOnlinePlayersStmt = null, insertHofStmt = null, selectRecentHofStmt = null, topSeasonSnapshotStmt = null,
-      resetAllPlayersStmt = null, insertNewsStmt = null, selectRecentNewsStmt = null;
+      resetAllPlayersStmt = null, insertNewsStmt = null, selectRecentNewsStmt = null,
+      selectAdminCfgStmt = null, upsertAdminCfgStmt = null, deleteAdminCfgStmt = null, clearAdminCfgStmt = null;
 
     function lazyInitDB() {
       if (dbReady) return;
@@ -125,6 +127,13 @@ module.exports = {
           );
         `);
         db.exec(`CREATE INDEX IF NOT EXISTS idx_lord_news_ts ON lord_news(ts DESC);`);
+
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS lord_admin_cfg (
+            key TEXT PRIMARY KEY,
+            val TEXT NOT NULL
+          );
+        `);
 
         selectPlayer = db.prepare(`SELECT * FROM lord_players WHERE user_id = ?`);
         insertPlayer = db.prepare(`
@@ -261,6 +270,11 @@ module.exports = {
            WHERE 1 = 1
         `);
         useDB = true;
+        selectAdminCfgStmt = db.prepare(`SELECT key, val FROM lord_admin_cfg`);
+        upsertAdminCfgStmt = db.prepare(`INSERT INTO lord_admin_cfg (key, val) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET val=excluded.val`);
+        deleteAdminCfgStmt = db.prepare(`DELETE FROM lord_admin_cfg WHERE key = ?`);
+        clearAdminCfgStmt = db.prepare(`DELETE FROM lord_admin_cfg`);
+        applyConfigFromStore();
       } catch (e) {
         useDB = false; // fall back silently; don't break DoorManager
         console.error('[lord] DB unavailable, using in-memory store:', e && e.message ? e.message : e);
@@ -278,17 +292,9 @@ module.exports = {
     // ─────────────────────────────────────────────────────────────
     // BALANCE / ECONOMY CONSTANTS
     const ECON_DEBUG_LOG = (process.env.ECON_DEBUG_LOG === 'true');
-    const INTEREST_RATE = 0.01;
     const FOREST_TURNS_PER_DAY = 10;
     const TAVERN_DRINK_MAX = 2;
-    const DUEL_GOLD_TAKE_RATE = 0.05;
-    const SEARCH_GOLD_MIN = 2;
-    const SEARCH_GOLD_MAX = 15;
-    const FOREST_EVENT_CHANCE = 0.20;
     const DRAGON_LEVEL_REQ = 12;
-    const DRAGON_FIND_CHANCE = 0.15;
-    const DRAGON_GOLD_MIN = 500;
-    const DRAGON_GOLD_MAX = 700;
     const CHARM_MAX = 10;
     const HEALER_COST_PER_HP = 2;
     const TRAINING_SPARRING_COST = 80;
@@ -311,7 +317,52 @@ module.exports = {
       .split(',')
       .map(s => s.trim())
       .filter(Boolean);
-    const FEATURE_GEMS = true;
+    const DEFAULT_CONFIG = Object.freeze({
+      FEATURE_GEMS: true,
+      CLASS_ENABLED: true,
+      BARD_ENABLED: true,
+      INTEREST_RATE: 0.01,
+      FOREST_EVENT_CHANCE: 0.20,
+      DRAGON_FIND_CHANCE: 0.15,
+      DUEL_GOLD_TAKE_RATE: 0.05,
+      SEARCH_GOLD_MIN: 2,
+      SEARCH_GOLD_MAX: 15,
+      DRAGON_GOLD_MIN: 500,
+      DRAGON_GOLD_MAX: 700
+    });
+    const CONFIG = Object.assign({}, DEFAULT_CONFIG);
+    const ADMIN_SETTING_DEFS = {
+      FEATURE_GEMS: { label:'Gems Feature', type:'boolean', description:'Enable gem drops and the jeweler.' },
+      CLASS_ENABLED: { label:'Classes Enabled', type:'boolean', description:'Allow class selection and bonuses.' },
+      BARD_ENABLED: { label:'Bard Enabled', type:'boolean', description:'Allow visiting the tavern bard.' },
+      INTEREST_RATE: { label:'Bank Interest Rate', type:'number', min:0, max:0.50, precision:3, description:'Daily interest rate applied to bank gold.' },
+      FOREST_EVENT_CHANCE: { label:'Forest Event Chance', type:'number', min:0, max:1, precision:2, description:'Chance of encountering a forest event each turn.' },
+      DRAGON_FIND_CHANCE: { label:'Dragon Find Chance', type:'number', min:0, max:1, precision:2, description:'Chance to find the Dragon when searching.' },
+      DUEL_GOLD_TAKE_RATE: { label:'Duel Gold Take Rate', type:'number', min:0, max:1, precision:2, description:'Percent of loser gold taken in duels.' },
+      SEARCH_GOLD_MIN: { label:'Search Gold Min', type:'number', min:0, max:1000, integer:true, description:'Minimum gold found when searching the forest.' },
+      SEARCH_GOLD_MAX: { label:'Search Gold Max', type:'number', min:0, max:5000, integer:true, description:'Maximum base gold found when searching the forest.' },
+      DRAGON_GOLD_MIN: { label:'Dragon Gold Min', type:'number', min:0, max:100000, integer:true, description:'Minimum gold reward for defeating the Dragon.' },
+      DRAGON_GOLD_MAX: { label:'Dragon Gold Max', type:'number', min:0, max:100000, integer:true, description:'Maximum gold reward for defeating the Dragon.' }
+    };
+    const ADMIN_SETTING_ORDER = [
+      'FEATURE_GEMS',
+      'CLASS_ENABLED',
+      'BARD_ENABLED',
+      'INTEREST_RATE',
+      'FOREST_EVENT_CHANCE',
+      'DRAGON_FIND_CHANCE',
+      'DUEL_GOLD_TAKE_RATE',
+      'SEARCH_GOLD_MIN',
+      'SEARCH_GOLD_MAX',
+      'DRAGON_GOLD_MIN',
+      'DRAGON_GOLD_MAX'
+    ];
+    const ADMIN_SETTING_GROUPS = [
+      { title:'Feature Flags', keys:['FEATURE_GEMS','CLASS_ENABLED','BARD_ENABLED'] },
+      { title:'Economy & Encounters', keys:['INTEREST_RATE','FOREST_EVENT_CHANCE','DRAGON_FIND_CHANCE','DUEL_GOLD_TAKE_RATE','SEARCH_GOLD_MIN','SEARCH_GOLD_MAX','DRAGON_GOLD_MIN','DRAGON_GOLD_MAX'] }
+    ];
+    const ADMIN_SETTING_KEYS = ADMIN_SETTING_ORDER.filter(key => ADMIN_SETTING_DEFS[key]);
+    applyConfigFromStore();
     const GEM_DROP_RATE_SEARCH = 0.01;
     const JEWELER_DAILY_LIMIT = 3;
     const HEARTSTONE_HP = 2;
@@ -325,11 +376,9 @@ module.exports = {
     const DAILY_HEALS = 2;
     const BARD_XP = 10;
     const BARD_BANK_RATE = 0.005;
-    const BARD_ENABLED = true;
     const EVENT_HP_MAX = 8;
     const EVENT_GOLD_MAX = 25;
     const EVENT_XP_MAX = 12;
-    const CLASS_ENABLED = true;
     const THIEF_SEARCH_BONUS_RATE = 0.10;
     const MYSTIC_VICTORY_HEAL = 2;
     const DEATHKNIGHT_FIRST_STRIKE_BONUS = 1;
@@ -360,6 +409,121 @@ module.exports = {
       /\x1b\][^\x07]*(?:\x07|\x1b\\)/g, // OSC
       /\x1b[@-Z\\-_]/g, // 2-char sequences
     ];
+    function getAdminSettingDef(key){ return ADMIN_SETTING_DEFS[key] || null; }
+    function getAdminSettingKeyByIndex(num){
+      const idx = Number(num) - 1;
+      if (!Number.isInteger(idx) || idx < 0 || idx >= ADMIN_SETTING_KEYS.length) return null;
+      return ADMIN_SETTING_KEYS[idx];
+    }
+    function coerceConfigValue(key, raw){
+      const def = getAdminSettingDef(key);
+      if (!def) return { ok:false, msg:'Unknown setting.' };
+      if (def.type === 'boolean'){
+        if (typeof raw === 'boolean') return { ok:true, val:raw };
+        if (typeof raw === 'number') return { ok:true, val: raw !== 0 };
+        if (typeof raw === 'string'){
+          const norm = raw.trim().toLowerCase();
+          if (['true','t','yes','y','1','on','enable','enabled'].includes(norm)) return { ok:true, val:true };
+          if (['false','f','no','n','0','off','disable','disabled'].includes(norm)) return { ok:true, val:false };
+        }
+        return { ok:false, msg:'Enter yes/no or true/false.' };
+      }
+      if (def.type === 'number'){
+        const num = typeof raw === 'number' ? raw : Number(raw);
+        if (!Number.isFinite(num)) return { ok:false, msg:'Enter a numeric value.' };
+        if (def.integer && !Number.isInteger(num)) return { ok:false, msg:'Enter a whole number.' };
+        if (typeof def.min === 'number' && num < def.min) return { ok:false, msg:`Must be ≥ ${def.min}.` };
+        if (typeof def.max === 'number' && num > def.max) return { ok:false, msg:`Must be ≤ ${def.max}.` };
+        return { ok:true, val:num };
+      }
+      return { ok:false, msg:'Unsupported setting type.' };
+    }
+    function formatSettingValue(key, value){
+      const def = getAdminSettingDef(key);
+      if (!def) return String(value);
+      if (def.type === 'boolean') return value ? 'ON' : 'OFF';
+      if (def.type === 'number'){
+        if (typeof value !== 'number' || !Number.isFinite(value)) return String(value);
+        if (typeof def.precision === 'number' && def.precision >= 0){
+          return value.toFixed(def.precision);
+        }
+        return String(value);
+      }
+      return String(value);
+    }
+    function formatConfigValue(key){
+      return formatSettingValue(key, CONFIG[key]);
+    }
+    function persistConfigValue(key, val){
+      const strVal = String(val);
+      if (useDB && upsertAdminCfgStmt){
+        if (DEFAULT_CONFIG[key] === val){
+          if (deleteAdminCfgStmt) deleteAdminCfgStmt.run(key);
+        } else {
+          upsertAdminCfgStmt.run(key, strVal);
+        }
+        return;
+      }
+      if (!MEM.adminCfg || !(MEM.adminCfg instanceof Map)) MEM.adminCfg = new Map();
+      if (DEFAULT_CONFIG[key] === val){
+        MEM.adminCfg.delete(key);
+      } else {
+        MEM.adminCfg.set(key, strVal);
+      }
+    }
+    function setConfigValue(key, raw){
+      const def = getAdminSettingDef(key);
+      if (!def) return { ok:false, msg:'Unknown setting.' };
+      const parsed = coerceConfigValue(key, raw);
+      if (!parsed.ok) return parsed;
+      const next = parsed.val;
+      if (key === 'SEARCH_GOLD_MIN' && next > CONFIG.SEARCH_GOLD_MAX){
+        return { ok:false, msg:`Must be ≤ SEARCH_GOLD_MAX (${CONFIG.SEARCH_GOLD_MAX}).` };
+      }
+      if (key === 'SEARCH_GOLD_MAX' && next < CONFIG.SEARCH_GOLD_MIN){
+        return { ok:false, msg:`Must be ≥ SEARCH_GOLD_MIN (${CONFIG.SEARCH_GOLD_MIN}).` };
+      }
+      if (key === 'DRAGON_GOLD_MIN' && next > CONFIG.DRAGON_GOLD_MAX){
+        return { ok:false, msg:`Must be ≤ DRAGON_GOLD_MAX (${CONFIG.DRAGON_GOLD_MAX}).` };
+      }
+      if (key === 'DRAGON_GOLD_MAX' && next < CONFIG.DRAGON_GOLD_MIN){
+        return { ok:false, msg:`Must be ≥ DRAGON_GOLD_MIN (${CONFIG.DRAGON_GOLD_MIN}).` };
+      }
+      CONFIG[key] = next;
+      persistConfigValue(key, next);
+      return { ok:true, val:next };
+    }
+    function restoreConfigDefaults(){
+      Object.assign(CONFIG, DEFAULT_CONFIG);
+      if (useDB && clearAdminCfgStmt){
+        clearAdminCfgStmt.run();
+      } else if (MEM.adminCfg && MEM.adminCfg instanceof Map){
+        MEM.adminCfg.clear();
+      }
+    }
+    function applyConfigFromStore(){
+      Object.assign(CONFIG, DEFAULT_CONFIG);
+      if (useDB && selectAdminCfgStmt){
+        try {
+          const rows = selectAdminCfgStmt.all();
+          rows.forEach(row => {
+            const def = getAdminSettingDef(row.key);
+            if (!def) return;
+            const parsed = coerceConfigValue(row.key, row.val);
+            if (parsed.ok) CONFIG[row.key] = parsed.val;
+          });
+        } catch (err){
+          console.error('[lord] Failed to load admin config overrides:', err);
+        }
+        return;
+      }
+      if (MEM.adminCfg && MEM.adminCfg instanceof Map){
+        MEM.adminCfg.forEach((val, key) => {
+          const parsed = coerceConfigValue(key, val);
+          if (parsed.ok) CONFIG[key] = parsed.val;
+        });
+      }
+    }
     function sanitize(text, maxLen, options){
       const opts = options || {};
       const raw = String(text ?? '');
@@ -532,7 +696,7 @@ module.exports = {
       return applied;
     }
     function safeAddGems(player, delta, source){
-      if (!FEATURE_GEMS) return 0;
+      if (!CONFIG.FEATURE_GEMS) return 0;
       if (!player || typeof delta !== 'number' || !delta) return 0;
       const current = typeof player.gems === 'number' ? player.gems : 0;
       const target = Math.max(0, current + delta);
@@ -654,7 +818,7 @@ module.exports = {
               if (success){
                 const xp = randInt(6, EVENT_XP_MAX);
                 const gold = randInt(6, Math.min(EVENT_GOLD_MAX, 16));
-                const gems = (FEATURE_GEMS && Math.random() < 0.1) ? 1 : 0;
+                const gems = (CONFIG.FEATURE_GEMS && Math.random() < 0.1) ? 1 : 0;
                 return {
                   deltas:{ xp, gold, gems },
                   lines(applied){
@@ -738,7 +902,7 @@ module.exports = {
               if (blessing){
                 const xp = randInt(2, Math.min(EVENT_XP_MAX, 5));
                 const charmGain = p.charm >= CHARM_MAX ? 0 : 1;
-                const gems = (FEATURE_GEMS && Math.random() < 0.1) ? 1 : 0;
+                const gems = (CONFIG.FEATURE_GEMS && Math.random() < 0.1) ? 1 : 0;
                 return {
                   deltas:{ xp, charm:charmGain, gems },
                   lines(applied){
@@ -823,7 +987,7 @@ module.exports = {
           }
         }
         if (typeof deltas.charm === 'number') actual.charm = safeAddCharm(p, deltas.charm, 'event');
-        if (FEATURE_GEMS && typeof deltas.gems === 'number') actual.gems = safeAddGems(p, deltas.gems, 'event');
+        if (CONFIG.FEATURE_GEMS && typeof deltas.gems === 'number') actual.gems = safeAddGems(p, deltas.gems, 'event');
       }
       return { actual, levelInfo };
     }
@@ -871,7 +1035,7 @@ module.exports = {
     function startForestEvent(p, origin){
       if (p?.temp?.event) return false;
       if (FOREST_EVENTS.length<=0) return false;
-      if (Math.random() >= FOREST_EVENT_CHANCE) return false;
+      if (Math.random() >= CONFIG.FOREST_EVENT_CHANCE) return false;
       const event = FOREST_EVENTS[randInt(0, FOREST_EVENTS.length-1)];
       if (!event) return false;
       if (!spendTurn(p, origin || 'event')) return true;
@@ -987,7 +1151,7 @@ module.exports = {
     function applyBankInterest(p, dateKey){
       const key = dateKey || todayKey();
       if (p.daily.interestDate === key) return null;
-      const interest = Math.floor(p.bank * INTEREST_RATE);
+      const interest = Math.floor(p.bank * CONFIG.INTEREST_RATE);
       p.bank += interest;
       p.daily.interestDate = key;
       if (interest > 0 && typeof addNews === 'function') addNews(`${p.name} earned ${interest} gold interest in the bank.`);
@@ -1128,7 +1292,7 @@ module.exports = {
       const charmNormalized = clamp(toInt(p.charm), 0, CHARM_MAX);
       if (charmNormalized !== charmOriginal) guardLog(p, 'save', 'charm', charmOriginal, charmNormalized, { reason:'invariant' });
       p.charm = charmNormalized;
-      if (FEATURE_GEMS){
+      if (CONFIG.FEATURE_GEMS){
         const gemsOriginal = p.gems;
         const gemsNormalized = Math.max(0, toInt(p.gems));
         if (gemsNormalized !== gemsOriginal) guardLog(p, 'save', 'gems', gemsOriginal, gemsNormalized, { reason:'invariant' });
@@ -1691,10 +1855,10 @@ module.exports = {
       const w=WEAPONS[p.weaponIdx], a=ARMOR[p.armorIdx];
       api.print(`Name: ${p.name}   Level: ${p.level} (${p.xp}/${xpToNext(p.level)} xp)`, 'cyan');
       api.print(`HP: ${p.hp}/${p.maxHp}   ATK: ${w.atk} (${w.name})   DEF: ${a.def} (${a.name})`);
-      const gems = FEATURE_GEMS ? (p.gems || 0) : 0;
-      const gemText = FEATURE_GEMS ? `  Gems: ${gems}` : '';
+      const gems = CONFIG.FEATURE_GEMS ? (p.gems || 0) : 0;
+      const gemText = CONFIG.FEATURE_GEMS ? `  Gems: ${gems}` : '';
       api.print(`Gold: ${p.gold}  Bank: ${p.bank}${gemText}  Kills: ${p.kills}  Deaths: ${p.deaths}`);
-      if (CLASS_ENABLED){
+      if (CONFIG.CLASS_ENABLED){
         const className = getClassName(p.classId);
         if (className) api.print(`Class: ${className}`);
       }
@@ -1745,20 +1909,20 @@ module.exports = {
         row('C','onjugality List','O','ther Places');
         row('H','all of Fame','X','pert Mode');
         row('M','ake Announcement','P','eople Online');
-        if (FEATURE_GEMS){
+        if (CONFIG.FEATURE_GEMS){
           row('Q','uit to Fields','J','eweler');
         } else {
           row('Q','uit to Fields',' ',' ');
         }
-        if (admin) row('Z','Reset Season',' ',' ');
+        if (admin) row('Z','Admin Controls',' ',' ');
         api.hr();
         api.print('The Town Square    (? for menu)','magenta');
-        let menuKeys = FEATURE_GEMS ? '(F,S,K,A,U,V,I,T,Y,L,W,D,C,O,H,X,M,P,Q,J)' : '(F,S,K,A,U,V,I,T,Y,L,W,D,C,O,H,X,M,P,Q)';
+        let menuKeys = CONFIG.FEATURE_GEMS ? '(F,S,K,A,U,V,I,T,Y,L,W,D,C,O,H,X,M,P,Q,J)' : '(F,S,K,A,U,V,I,T,Y,L,W,D,C,O,H,X,M,P,Q)';
         if (admin) menuKeys = menuKeys.slice(0, -1) + ',Z)';
         api.print(menuKeys,'dim');
       } else {
-        let expertOpts = FEATURE_GEMS ? '[Expert Mode] F S K A U V I T Y L W D C O H X M P Q J' : '[Expert Mode] F S K A U V I T Y L W D C O H X M P Q';
-        if (admin) expertOpts += ' Z';
+        let expertOpts = CONFIG.FEATURE_GEMS ? '[Expert Mode] F S K A U V I T Y L W D C O H X M P Q J' : '[Expert Mode] F S K A U V I T Y L W D C O H X M P Q';
+        if (admin) expertOpts += ' Z(Admin)';
         api.print(expertOpts,'magenta');
         api.print('Type a single letter (e.g., F, K, A, V) — /help for help','dim');
       }
@@ -1831,7 +1995,7 @@ module.exports = {
     function bankMenu(p){ printHeader('The Bank of Redux'); showStatus(p);
       api.print('D) Deposit gold'); api.print('W) Withdraw gold'); api.print('V) Return to Town Square'); api.hr(); api.print('Type: d, w, or v','dim'); }
     function jewelerMenu(p){ printHeader('The Jeweler'); showStatus(p);
-      if (!FEATURE_GEMS){ api.print('The jeweler\'s stall is closed today.'); api.print('V) Return to Town Square'); api.hr(); api.print('Type: v','dim'); return; }
+      if (!CONFIG.FEATURE_GEMS){ api.print('The jeweler\'s stall is closed today.'); api.print('V) Return to Town Square'); api.hr(); api.print('Type: v','dim'); return; }
       const gems = p.gems || 0;
       const purchases = p.daily.jewelerPurchases || 0;
       if (JEWELER_DAILY_LIMIT > 0){
@@ -1873,8 +2037,82 @@ module.exports = {
       api.hr();
       api.print('Type Y or N.','dim');
     }
+    function adminMenu(p){
+      if (!isAdminPlayer(p)){ p.screen='town'; return render(p); }
+      setPromptLord();
+      printHeader('Admin Controls');
+      if (p.temp && p.temp.adminNotice){
+        const note = p.temp.adminNotice;
+        const color = note && typeof note.color === 'string' ? note.color : 'green';
+        if (note && note.text) api.print(note.text, color);
+        api.hr();
+        delete p.temp.adminNotice;
+        if (Object.keys(p.temp).length === 0) p.temp = null;
+      }
+      api.print('Live feature flags & tuning. Values marked * differ from defaults.','dim');
+      api.hr();
+      const pad = (s,w) => s + ' '.repeat(Math.max(0, w - s.length));
+      let listed = false;
+      ADMIN_SETTING_GROUPS.forEach(group => {
+        const keys = group.keys.filter(key => ADMIN_SETTING_KEYS.includes(key));
+        if (!keys.length) return;
+        listed = true;
+        api.print(group.title,'magenta');
+        keys.forEach(key => {
+          const def = getAdminSettingDef(key);
+          if (!def) return;
+          const index = ADMIN_SETTING_KEYS.indexOf(key);
+          if (index === -1) return;
+          const num = String(index + 1).padStart(2,'0');
+          const label = pad(`${num}) ${def.label}`, 40);
+          const valueText = formatConfigValue(key);
+          const mark = (CONFIG[key] !== DEFAULT_CONFIG[key]) ? ' *' : '';
+          api.print(`${label}${valueText}${mark}`);
+        });
+        api.hr();
+      });
+      if (!listed) api.print('No configurable settings found.','yellow');
+      api.print('R) Restore Defaults','yellow');
+      api.print('S) Season Reset Menu');
+      api.print('V) Return to Town Square');
+      api.hr();
+      api.print('Select a number to toggle/edit, or choose another option.','dim');
+    }
+    function adminEditMenu(p){
+      if (!isAdminPlayer(p)){ p.screen='town'; return render(p); }
+      const edit = p?.temp?.adminEdit;
+      const key = edit && edit.key;
+      const def = key ? getAdminSettingDef(key) : null;
+      if (!key || !def){
+        if (p?.temp?.adminEdit){ delete p.temp.adminEdit; if (Object.keys(p.temp).length === 0) p.temp = null; }
+        p.screen='admin';
+        return render(p);
+      }
+      setPromptLord();
+      printHeader('Admin Setting');
+      if (edit.notice){
+        const color = edit.notice.color || 'yellow';
+        if (edit.notice.text) api.print(edit.notice.text, color);
+        delete edit.notice;
+      }
+      api.print(def.label,'cyan');
+      api.print(`Current: ${formatConfigValue(key)}`);
+      const defaultText = formatSettingValue(key, DEFAULT_CONFIG[key]);
+      api.print(`Default: ${defaultText}`,'dim');
+      if (def.type === 'number'){
+        const hints = [];
+        if (typeof def.min === 'number') hints.push(`min ${def.min}`);
+        if (typeof def.max === 'number') hints.push(`max ${def.max}`);
+        if (def.integer) hints.push('whole numbers only');
+        if (hints.length) api.print(`Limits: ${hints.join(', ')}`,'dim');
+      } else if (def.type === 'boolean'){
+        api.print('Enter yes/no or true/false.','dim');
+      }
+      api.hr();
+      api.print('Enter a new value, or V to cancel.','dim');
+    }
     function tavernMenu(p){ printHeader('The Tavern'); showStatus(p);
-      const bardReady = BARD_ENABLED && !p.daily.bard;
+      const bardReady = CONFIG.BARD_ENABLED && !p.daily.bard;
       const married = isMarried(p);
       const hasInbox = hasPendingProposals(p.userId);
       api.print('G) Gossip — overhear a rumor');
@@ -1915,6 +2153,85 @@ module.exports = {
       });
       api.print('V) Return to the Tavern');
       api.hr(); api.print('Type A# to accept or D# to decline (e.g., A1). V to return.','dim'); }
+    function onAdmin(p,t){
+      if (!isAdminPlayer(p)){ p.screen='town'; return render(p); }
+      const raw = String(t || '').trim();
+      const lower = raw.toLowerCase();
+      if (!raw){ return render(p); }
+      if (lower === 'v'){ p.screen='town'; return render(p); }
+      if (lower === 's'){ p.screen='season:reset'; return render(p); }
+      if (lower === 'r'){
+        restoreConfigDefaults();
+        if (!p.temp || typeof p.temp !== 'object') p.temp = {};
+        p.temp.adminNotice = { text:'Configuration restored to defaults.', color:'green' };
+        return render(p);
+      }
+      const choice = parseInt(raw, 10);
+      if (!Number.isNaN(choice)){
+        const key = getAdminSettingKeyByIndex(choice);
+        if (!key){
+          if (!p.temp || typeof p.temp !== 'object') p.temp = {};
+          p.temp.adminNotice = { text:'Invalid selection.', color:'yellow' };
+          return render(p);
+        }
+        const def = getAdminSettingDef(key);
+        if (!def){
+          if (!p.temp || typeof p.temp !== 'object') p.temp = {};
+          p.temp.adminNotice = { text:'Unknown setting.', color:'yellow' };
+          return render(p);
+        }
+        if (def.type === 'boolean'){
+          const result = setConfigValue(key, !CONFIG[key]);
+          if (!p.temp || typeof p.temp !== 'object') p.temp = {};
+          if (result.ok){
+            p.temp.adminNotice = { text:`${def.label} set to ${formatConfigValue(key)}.`, color:'green' };
+          } else {
+            p.temp.adminNotice = { text:result.msg, color:'yellow' };
+          }
+          return render(p);
+        }
+        if (!p.temp || typeof p.temp !== 'object') p.temp = {};
+        p.temp.adminEdit = { key };
+        p.screen='admin:edit';
+        return render(p);
+      }
+      if (!p.temp || typeof p.temp !== 'object') p.temp = {};
+      p.temp.adminNotice = { text:'Select a listed option.', color:'yellow' };
+      return render(p);
+    }
+    function onAdminEdit(p,t){
+      if (!isAdminPlayer(p)){ p.screen='town'; return render(p); }
+      const edit = p?.temp?.adminEdit;
+      const key = edit && edit.key;
+      const def = key ? getAdminSettingDef(key) : null;
+      if (!key || !def){
+        if (p?.temp?.adminEdit){ delete p.temp.adminEdit; if (Object.keys(p.temp).length === 0) p.temp = null; }
+        p.screen='admin';
+        return render(p);
+      }
+      const raw = String(t || '').trim();
+      if (!raw){
+        edit.notice = { text:'Enter a value or V to cancel.', color:'yellow' };
+        return render(p);
+      }
+      if (raw.toLowerCase() === 'v'){
+        delete p.temp.adminEdit;
+        if (Object.keys(p.temp).length === 0) p.temp = null;
+        p.screen='admin';
+        return render(p);
+      }
+      const result = setConfigValue(key, raw);
+      if (!result.ok){
+        edit.notice = { text:result.msg, color:'yellow' };
+        return render(p);
+      }
+      if (!p.temp || typeof p.temp !== 'object') p.temp = {};
+      delete p.temp.adminEdit;
+      p.temp.adminNotice = { text:`${def.label} set to ${formatSettingValue(key, result.val)}.`, color:'green' };
+      if (Object.keys(p.temp).length === 0) p.temp = null;
+      p.screen='admin';
+      return render(p);
+    }
     function statusMenu(p){ printHeader('Your Status'); showStatus(p);
       api.print('V) Return to Town Square'); api.hr(); api.print('Type: v','dim'); }
     function stubMenu(title, p){ printHeader(title); showStatus(p);
@@ -1974,7 +2291,7 @@ module.exports = {
       api.print(`S) Sparring — hone your edge (+${TRAINING_SPARRING_XP} xp) — Cost: ${TRAINING_SPARRING_COST} gold`);
       api.print(`E) Endurance drills — toughen up (+${TRAINING_ENDURANCE_HP} Max HP) — Cost: ${TRAINING_ENDURANCE_COST} gold`);
       api.print(`W) Swagger lessons — polish your charm (+${TRAINING_SWAGGER_CHARM} Charm, cap ${CHARM_MAX}) — Cost: ${TRAINING_SWAGGER_COST} gold`);
-      if (CLASS_ENABLED){
+      if (CONFIG.CLASS_ENABLED){
         const classInfo = getClassInfo(p.classId);
         if (classInfo){
           api.print(`Class: ${classInfo.name} — ${classInfo.description}`);
@@ -1992,13 +2309,13 @@ module.exports = {
       if (p.charm >= CHARM_MAX) api.print('Your charm already dazzles the realm; further swagger is impossible.','dim');
       api.print('V) Return to Town Square');
       api.hr();
-      const trainHint = CLASS_ENABLED ? 'Type: s, e, w, c, or v.' : 'Type: s, e, w, or v.';
+      const trainHint = CONFIG.CLASS_ENABLED ? 'Type: s, e, w, c, or v.' : 'Type: s, e, w, or v.';
       api.print(trainHint,'dim');
     }
     function classMenu(p){
       printHeader('Choose Your Class');
       showStatus(p);
-      if (!CLASS_ENABLED){
+      if (!CONFIG.CLASS_ENABLED){
         api.print('Classes are not available right now.','yellow');
         api.print('V) Return to Training');
         api.hr();
@@ -2345,7 +2662,7 @@ module.exports = {
       }
     }
     function maybeApplyMysticHeal(p){
-      if (!CLASS_ENABLED || p.classId !== 'mystic') return;
+      if (!CONFIG.CLASS_ENABLED || p.classId !== 'mystic') return;
       const heal = Math.max(0, Math.floor(MYSTIC_VICTORY_HEAL || 0));
       if (heal <= 0) return;
       const before = p.hp;
@@ -2355,7 +2672,7 @@ module.exports = {
     }
     function maybeDragon(p){
       if (p.level < DRAGON_LEVEL_REQ) return null;
-      if (Math.random() > DRAGON_FIND_CHANCE) return null;
+      if (Math.random() > CONFIG.DRAGON_FIND_CHANCE) return null;
       const levelBonus = Math.max(0, p.level - DRAGON_LEVEL_REQ);
       const maxHp = clamp(170 + levelBonus * 10, 160, 240);
       const atk = 22 + levelBonus * 2;
@@ -2370,7 +2687,7 @@ module.exports = {
       const weapon = WEAPONS[p.weaponIdx];
       let dmgToEnemy=Math.max(1, weapon.atk + randInt(0,3) - e.def);
       let bonusApplied = 0;
-      if (CLASS_ENABLED && p.classId === 'deathknight' && !hasUsedFirstStrike(p)){
+      if (CONFIG.CLASS_ENABLED && p.classId === 'deathknight' && !hasUsedFirstStrike(p)){
         const bonus = Math.max(0, Math.floor(DEATHKNIGHT_FIRST_STRIKE_BONUS || 0));
         if (bonus > 0){
           bonusApplied = bonus;
@@ -2383,7 +2700,7 @@ module.exports = {
       if (e.hp<=0){
         p.kills++;
         if (e.boss){
-          const gold = randInt(DRAGON_GOLD_MIN, DRAGON_GOLD_MAX);
+          const gold = randInt(CONFIG.DRAGON_GOLD_MIN, CONFIG.DRAGON_GOLD_MAX);
           const xp = randInt(80,120) + p.level * randInt(6,10);
           const goldApplied = safeAddGold(p, gold, 'dragon');
           const xpResult = safeAddXP(p, xp, 'dragon');
@@ -2440,7 +2757,7 @@ module.exports = {
       if (k==='l'){ p.screen='rankings'; return render(p); }
       if (k==='w'){ p.screen='mail'; return render(p); }
       if (k==='d'){ setNewsOffset(p, 0); p.screen='news'; return render(p); }
-      if (FEATURE_GEMS && k==='j'){ p.screen='jeweler'; return render(p); }
+      if (CONFIG.FEATURE_GEMS && k==='j'){ p.screen='jeweler'; return render(p); }
       if (k==='c'){ p.screen='conjugality'; return render(p); }
       if (k==='o'){ p.screen='tavern'; return render(p); }
       if (k==='x'){ p.expert=!p.expert; savePlayer(p); return render(p); }
@@ -2448,8 +2765,8 @@ module.exports = {
       if (k==='p'){ p.screen='people'; return render(p); }
       if (k==='q'){ p.screen='town'; savePlayer(p); leave(); return; }
       if (k==='z'){
-        if (isAdminPlayer(p)){ p.screen='season:reset'; return render(p); }
-        return api.print('Only admins may reset the season.','yellow');
+        if (isAdminPlayer(p)){ p.screen='admin'; return render(p); }
+        return api.print('Only admins may access the admin controls.','yellow');
       }
       if (k.startsWith('forest')){ p.screen='forest'; return render(p); }
       if (k.startsWith('black')){ p.screen='blacksmith'; return render(p); }
@@ -2463,7 +2780,7 @@ module.exports = {
       if (k.startsWith('inn')){ p.screen='inn'; return render(p); }
       if (k.startsWith('bank')||k==='ye'||k.startsWith('ye old')){ p.screen='bank'; return render(p); }
       if (k.startsWith('rank')){ p.screen='rankings'; return render(p); }
-      if (FEATURE_GEMS && (k.startsWith('jewel')||k==='jeweler')){ p.screen='jeweler'; return render(p); }
+      if (CONFIG.FEATURE_GEMS && (k.startsWith('jewel')||k==='jeweler')){ p.screen='jeweler'; return render(p); }
       if (k.startsWith('status')||k.startsWith('view')){ p.screen='status'; return render(p); }
       if (k.startsWith('tav')||k.startsWith('other')){ p.screen='tavern'; return render(p); }
       if (k.startsWith('train')){ p.screen='training'; return render(p); }
@@ -2505,8 +2822,8 @@ module.exports = {
         if (!hasTurns(p)) return api.print('No turns left today.','yellow');
         if (startForestEvent(p, 'search')) return render(p);
         if (!spendTurn(p, 'search')) return;
-        let gold=randInt(SEARCH_GOLD_MIN, SEARCH_GOLD_MAX)+randInt(0,p.level);
-        if (CLASS_ENABLED && p.classId === 'thief'){
+        let gold=randInt(CONFIG.SEARCH_GOLD_MIN, CONFIG.SEARCH_GOLD_MAX)+randInt(0,p.level);
+        if (CONFIG.CLASS_ENABLED && p.classId === 'thief'){
           const rate = Math.max(0, THIEF_SEARCH_BONUS_RATE || 0);
           const adjusted = Math.floor(gold * (1 + rate));
           gold = Math.max(0, adjusted);
@@ -2515,7 +2832,7 @@ module.exports = {
         }
         const goldApplied = safeAddGold(p, gold, 'search');
         api.print(`You find ${goldApplied} gold.`,'green');
-        if (FEATURE_GEMS && GEM_DROP_RATE_SEARCH > 0 && Math.random() < GEM_DROP_RATE_SEARCH){
+        if (CONFIG.FEATURE_GEMS && GEM_DROP_RATE_SEARCH > 0 && Math.random() < GEM_DROP_RATE_SEARCH){
           const gemGain = safeAddGems(p, 1, 'search');
           if (gemGain > 0) api.print('A glint catches your eye — you pocket a rare gem!','magenta');
         }
@@ -2619,7 +2936,7 @@ module.exports = {
     function onJeweler(p,t){
       const raw=t.trim().toLowerCase();
       if (raw==='v'){ p.screen='town'; return render(p); }
-      if (!FEATURE_GEMS){ api.print('The jeweler has shuttered their stall for now.','yellow'); return; }
+      if (!CONFIG.FEATURE_GEMS){ api.print('The jeweler has shuttered their stall for now.','yellow'); return; }
       const gems = typeof p.gems === 'number' ? p.gems : 0;
       const purchases = p.daily.jewelerPurchases || 0;
       const limit = Math.max(0, Math.floor(JEWELER_DAILY_LIMIT || 0));
@@ -2705,7 +3022,7 @@ module.exports = {
     function onTavern(p,t){ const k=t.toLowerCase(); if (k==='v'){ p.screen='town'; return render(p); }
       if (k==='g'){ const rumors=['They say a dragon’s hoard lies deep in the forest…','The Blacksmith sharpens for free if you’re charming — or so they say.','A hidden grove yields gold to those who listen to the wind.','Beware the Black Knight past the old bridge.']; api.print(rumors[randInt(0,rumors.length-1)],'cyan'); return; }
       if (k==='b'){
-        if (!BARD_ENABLED) return api.print('The bard is away today.','dim');
+        if (!CONFIG.BARD_ENABLED) return api.print('The bard is away today.','dim');
         if (p.daily.bard) return api.print('The bard has already sung for you today.','yellow');
         const choices=['forest','xp','drinks','bank'];
         const choice=choices[randInt(0, choices.length-1)];
@@ -2753,7 +3070,7 @@ module.exports = {
       if (k==='r'){ if (isMarried(p)) return api.print('You are already wed.','yellow'); p.screen='tavern:propose'; return render(p); }
       if (k==='l'){ const proposals = getPendingProposalsFor(p.userId); if (!proposals.length) return api.print('No proposals await you.','dim'); p.screen='tavern:inbox'; return render(p); }
       const bits = ['g (gossip)'];
-      if (BARD_ENABLED && !p.daily.bard) bits.push('b (bard)');
+      if (CONFIG.BARD_ENABLED && !p.daily.bard) bits.push('b (bard)');
       bits.push('d (drink)','f (flirt)');
       if (!isMarried(p)) bits.push('r (propose)');
       if (hasPendingProposals(p.userId)) bits.push('l (proposals)');
@@ -2876,7 +3193,7 @@ module.exports = {
       }
 
       const xpGain=randInt(8,12);
-      const goldTransfer=Math.max(0, Math.floor(Math.max(0, loser.gold || 0) * DUEL_GOLD_TAKE_RATE));
+      const goldTransfer=Math.max(0, Math.floor(Math.max(0, loser.gold || 0) * CONFIG.DUEL_GOLD_TAKE_RATE));
       let goldRemoved = 0;
       let goldAdded = 0;
       if (goldTransfer>0){
@@ -2922,7 +3239,7 @@ module.exports = {
     function onTraining(p,t){
       const k=t.trim().toLowerCase();
       if (k==='v'){ p.screen='town'; return render(p); }
-      if (CLASS_ENABLED && (k==='c'||k.startsWith('class'))){ p.screen='training:class'; return render(p); }
+      if (CONFIG.CLASS_ENABLED && (k==='c'||k.startsWith('class'))){ p.screen='training:class'; return render(p); }
       if (k==='s'||k.startsWith('spar')){
         if (p.gold < TRAINING_SPARRING_COST) return api.print('Turgon grunts: "Come back with more gold."','yellow');
         p.gold -= TRAINING_SPARRING_COST;
@@ -2945,7 +3262,7 @@ module.exports = {
         api.print(`You perfect a roguish grin. Charm +${charmGain}.`,'green');
         savePlayer(p); return render(p);
       }
-      const fallback = CLASS_ENABLED
+      const fallback = CONFIG.CLASS_ENABLED
         ? 'Type s (sparring), e (endurance), w (swagger), c (class), or v to return.'
         : 'Type s (sparring), e (endurance), w (swagger), or v to return.';
       api.print(fallback,'dim');
@@ -2953,7 +3270,7 @@ module.exports = {
     function onClass(p,t){
       const raw=t.trim().toLowerCase();
       if (raw==='v'){ p.screen='training'; return render(p); }
-      if (!CLASS_ENABLED){
+      if (!CONFIG.CLASS_ENABLED){
         api.print('Classes are not available right now.','yellow');
         return;
       }
@@ -3332,6 +3649,8 @@ module.exports = {
         case 'jeweler':    return jewelerMenu(p);
         case 'rankings':   return rankingsMenu();
         case 'hall_of_fame': return hallOfFameMenu();
+        case 'admin':       return isAdminPlayer(p) ? adminMenu(p) : townSquareMenu(p);
+        case 'admin:edit':  return isAdminPlayer(p) ? adminEditMenu(p) : townSquareMenu(p);
         case 'season:reset': return isAdminPlayer(p) ? seasonResetMenu() : townSquareMenu(p);
         case 'tavern':     return tavernMenu(p);
         case 'tavern:propose': return marriageProposeMenu(p);
@@ -3453,6 +3772,8 @@ module.exports = {
         case 'conjugality':onConjugality(p, raw);break;
         case 'announce':   onAnnounce(p, raw);   break;
         case 'people':     onPeople(p, raw);     break;
+        case 'admin':       onAdmin(p, raw); break;
+        case 'admin:edit':  onAdminEdit(p, raw); break;
         case 'season:reset': onSeasonReset(p, raw); break;
         default:           p.screen='town'; render(p);
       }
