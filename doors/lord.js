@@ -46,6 +46,7 @@ module.exports = {
             char_name    TEXT NOT NULL,
             gender       TEXT,
             created_at   INTEGER NOT NULL,
+            created_ts   INTEGER NOT NULL DEFAULT 0,
             updated_at   INTEGER NOT NULL,
             last_seen    INTEGER NOT NULL DEFAULT 0,
             level        INTEGER NOT NULL DEFAULT 1,
@@ -73,6 +74,7 @@ module.exports = {
           CREATE INDEX IF NOT EXISTS idx_lord_players_last_seen ON lord_players(last_seen DESC);
         `);
 
+        db.exec(`ALTER TABLE lord_players ADD COLUMN IF NOT EXISTS created_ts INTEGER NOT NULL DEFAULT 0;`);
         db.exec(`ALTER TABLE lord_players ADD COLUMN IF NOT EXISTS gems INTEGER NOT NULL DEFAULT 0;`);
         db.exec(`ALTER TABLE lord_players ADD COLUMN IF NOT EXISTS spouse_id TEXT;`);
         db.exec(`ALTER TABLE lord_players ADD COLUMN IF NOT EXISTS spouse_name TEXT;`);
@@ -138,15 +140,15 @@ module.exports = {
         selectPlayer = db.prepare(`SELECT * FROM lord_players WHERE user_id = ?`);
         insertPlayer = db.prepare(`
           INSERT INTO lord_players (
-            user_id, char_name, gender, created_at, updated_at, last_seen,
+            user_id, char_name, gender, created_at, created_ts, updated_at, last_seen,
             level, xp, hp, max_hp, gold, bank, weapon_idx, armor_idx,
             charm, kills, deaths, day_count, daily_json, expert, screen, gems,
             spouse_id, spouse_name, married_on, class_id
-          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         `);
         updatePlayer = db.prepare(`
           UPDATE lord_players
-             SET char_name=?, gender=?, updated_at=?, last_seen=?,
+             SET char_name=?, gender=?, created_ts=?, updated_at=?, last_seen=?,
                  level=?, xp=?, hp=?, max_hp=?, gold=?, bank=?, weapon_idx=?, armor_idx=?,
                  charm=?, kills=?, deaths=?, day_count=?, daily_json=?, expert=?, screen=?, gems=?,
                  spouse_id=?, spouse_name=?, married_on=?, class_id=?
@@ -159,7 +161,8 @@ module.exports = {
            LIMIT 20
         `);
         opponentsStmt = db.prepare(`
-          SELECT user_id, char_name AS name, level, kills, deaths, gold
+          SELECT user_id, char_name AS name, level, kills, deaths, gold,
+                 COALESCE(created_ts, created_at) AS created_ts
             FROM lord_players
            WHERE user_id != ?
            ORDER BY level DESC, xp DESC, kills DESC
@@ -328,7 +331,11 @@ module.exports = {
       SEARCH_GOLD_MIN: 2,
       SEARCH_GOLD_MAX: 15,
       DRAGON_GOLD_MIN: 500,
-      DRAGON_GOLD_MAX: 700
+      DRAGON_GOLD_MAX: 700,
+      NEWBIE_LEVEL_SHIELD: 3,
+      NEWBIE_DAYS_SHIELD: 2,
+      MIN_LEVEL_DIFF: 3,
+      ENABLE_LEVEL_BANDING: true
     });
     const CONFIG = Object.assign({}, DEFAULT_CONFIG);
     const ADMIN_SETTING_DEFS = {
@@ -342,7 +349,11 @@ module.exports = {
       SEARCH_GOLD_MIN: { label:'Search Gold Min', type:'number', min:0, max:1000, integer:true, description:'Minimum gold found when searching the forest.' },
       SEARCH_GOLD_MAX: { label:'Search Gold Max', type:'number', min:0, max:5000, integer:true, description:'Maximum base gold found when searching the forest.' },
       DRAGON_GOLD_MIN: { label:'Dragon Gold Min', type:'number', min:0, max:100000, integer:true, description:'Minimum gold reward for defeating the Dragon.' },
-      DRAGON_GOLD_MAX: { label:'Dragon Gold Max', type:'number', min:0, max:100000, integer:true, description:'Maximum gold reward for defeating the Dragon.' }
+      DRAGON_GOLD_MAX: { label:'Dragon Gold Max', type:'number', min:0, max:100000, integer:true, description:'Maximum gold reward for defeating the Dragon.' },
+      NEWBIE_LEVEL_SHIELD: { label:'Newbie Shield Level', type:'number', min:1, max:99, integer:true, description:'Players below this level cannot be challenged in duels.' },
+      NEWBIE_DAYS_SHIELD: { label:'Newbie Shield Days', type:'number', min:0, max:30, integer:true, description:'Protect new accounts from duels for this many days.' },
+      MIN_LEVEL_DIFF: { label:'Level Banding Gap', type:'number', min:0, max:99, integer:true, description:'Block duels where attacker exceeds target by at least this many levels.' },
+      ENABLE_LEVEL_BANDING: { label:'Level Banding Enabled', type:'boolean', description:'Disallow duels against much lower level players.' }
     };
     const ADMIN_SETTING_ORDER = [
       'FEATURE_GEMS',
@@ -355,11 +366,16 @@ module.exports = {
       'SEARCH_GOLD_MIN',
       'SEARCH_GOLD_MAX',
       'DRAGON_GOLD_MIN',
-      'DRAGON_GOLD_MAX'
+      'DRAGON_GOLD_MAX',
+      'NEWBIE_LEVEL_SHIELD',
+      'NEWBIE_DAYS_SHIELD',
+      'ENABLE_LEVEL_BANDING',
+      'MIN_LEVEL_DIFF'
     ];
     const ADMIN_SETTING_GROUPS = [
       { title:'Feature Flags', keys:['FEATURE_GEMS','CLASS_ENABLED','BARD_ENABLED'] },
-      { title:'Economy & Encounters', keys:['INTEREST_RATE','FOREST_EVENT_CHANCE','DRAGON_FIND_CHANCE','DUEL_GOLD_TAKE_RATE','SEARCH_GOLD_MIN','SEARCH_GOLD_MAX','DRAGON_GOLD_MIN','DRAGON_GOLD_MAX'] }
+      { title:'Economy & Encounters', keys:['INTEREST_RATE','FOREST_EVENT_CHANCE','DRAGON_FIND_CHANCE','DUEL_GOLD_TAKE_RATE','SEARCH_GOLD_MIN','SEARCH_GOLD_MAX','DRAGON_GOLD_MIN','DRAGON_GOLD_MAX'] },
+      { title:'PvP Fairness', keys:['NEWBIE_LEVEL_SHIELD','NEWBIE_DAYS_SHIELD','ENABLE_LEVEL_BANDING','MIN_LEVEL_DIFF'] }
     ];
     const ADMIN_SETTING_KEYS = ADMIN_SETTING_ORDER.filter(key => ADMIN_SETTING_DEFS[key]);
     applyConfigFromStore();
@@ -1126,7 +1142,8 @@ module.exports = {
         jewelerPurchases:0,
         proposalsMade:0,
         mailSent:0,
-        announced:false
+        announced:false,
+        duelTargets:[]
       };
     }
     function normalizeDaily(d){
@@ -1146,6 +1163,14 @@ module.exports = {
       if (typeof d.proposalsMade !== 'number') d.proposalsMade = 0;
       if (typeof d.mailSent !== 'number') d.mailSent = 0;
       if (typeof d.announced !== 'boolean') d.announced = false;
+      if (!Array.isArray(d.duelTargets)) d.duelTargets = [];
+      else {
+        const normalizedTargets = d.duelTargets
+          .map(id => (id === null || typeof id === 'undefined') ? '' : String(id).trim())
+          .filter(Boolean);
+        const uniqueTargets = Array.from(new Set(normalizedTargets));
+        d.duelTargets = uniqueTargets;
+      }
       return d;
     }
     function applyBankInterest(p, dateKey){
@@ -1184,7 +1209,11 @@ module.exports = {
       const id = p.userId ?? userId;
       return {
         user_id: id, char_name: p.name, gender: p.gender || null,
-        created_at: p.createdAt, updated_at: p.updatedAt,
+        created_at: p.createdAt,
+        created_ts: (typeof p.createdTs === 'number' && p.createdTs > 0)
+          ? Math.floor(p.createdTs)
+          : (typeof p.createdAt === 'number' ? Math.floor(p.createdAt) : 0),
+        updated_at: p.updatedAt,
         level: p.level, xp: p.xp, hp: p.hp, max_hp: p.maxHp, gold: p.gold, bank: p.bank,
         weapon_idx: p.weaponIdx, armor_idx: p.armorIdx,
         charm: p.charm, kills: p.kills, deaths: p.deaths,
@@ -1200,7 +1229,10 @@ module.exports = {
     function fromRow(r){
       return {
         userId: r.user_id, name: sanitizeName(r.char_name) || fallbackName, gender: r.gender,
-        createdAt: r.created_at, updatedAt: r.updated_at,
+        createdAt: r.created_at, createdTs: (typeof r.created_ts === 'number' && r.created_ts > 0)
+          ? r.created_ts
+          : (typeof r.created_at === 'number' ? r.created_at : 0),
+        updatedAt: r.updated_at,
         level: r.level, xp: r.xp, hp: r.hp, maxHp: r.max_hp, gold: r.gold, bank: r.bank,
         weaponIdx: r.weapon_idx, armorIdx: r.armor_idx,
         charm: r.charm, kills: r.kills, deaths: r.deaths,
@@ -1231,6 +1263,9 @@ module.exports = {
         if (existing){
           existing.daily = normalizeDaily(existing.daily);
           if (typeof existing.lastSeen !== 'number') existing.lastSeen = 0;
+          if (typeof existing.createdTs !== 'number' || existing.createdTs <= 0){
+            existing.createdTs = typeof existing.createdAt === 'number' ? existing.createdAt : 0;
+          }
         }
         return existing;
       }
@@ -1240,7 +1275,7 @@ module.exports = {
       if (!useDB) return memPut(p);
       const r = toRow(p);
       insertPlayer.run(
-        r.user_id, r.char_name, r.gender, r.created_at, r.updated_at, r.last_seen,
+        r.user_id, r.char_name, r.gender, r.created_at, r.created_ts, r.updated_at, r.last_seen,
         r.level, r.xp, r.hp, r.max_hp, r.gold, r.bank, r.weapon_idx, r.armor_idx,
         r.charm, r.kills, r.deaths, r.day_count, r.daily_json, r.expert, r.screen, r.gems,
         r.spouse_id, r.spouse_name, r.married_on, r.class_id
@@ -1250,7 +1285,7 @@ module.exports = {
       if (!useDB) return memPut(p);
       const r = toRow(p);
       updatePlayer.run(
-        r.char_name, r.gender, r.updated_at, r.last_seen,
+        r.char_name, r.gender, r.created_ts, r.updated_at, r.last_seen,
         r.level, r.xp, r.hp, r.max_hp, r.gold, r.bank, r.weapon_idx, r.armor_idx,
         r.charm, r.kills, r.deaths, r.day_count, r.daily_json, r.expert, r.screen, r.gems,
         r.spouse_id, r.spouse_name, r.married_on, r.class_id,
@@ -1312,18 +1347,122 @@ module.exports = {
         if (!opponentsStmt) return [];
         return opponentsStmt.all(player.userId).map(row => ({
           user_id: row.user_id,
+          userId: row.user_id,
           name: safeName(row.name || row.char_name || ''),
           level: row.level,
           kills: row.kills,
           deaths: row.deaths,
-          gold: row.gold
+          gold: row.gold,
+          createdTs: (typeof row.created_ts === 'number' && row.created_ts > 0) ? row.created_ts : 0
         }));
       }
       return [...MEM.players.values()]
         .filter(other => other.userId !== player.userId)
         .sort((a,b)=>(b.level-a.level)||(b.xp-a.xp)||(b.kills-a.kills))
         .slice(0,20)
-        .map(o=>({ user_id:o.userId, name:safeName(o.name), level:o.level, kills:o.kills, deaths:o.deaths, gold:o.gold }));
+        .map(o=>({
+          user_id:o.userId,
+          userId:o.userId,
+          name:safeName(o.name),
+          level:o.level,
+          kills:o.kills,
+          deaths:o.deaths,
+          gold:o.gold,
+          createdTs: (typeof o.createdTs === 'number' && o.createdTs > 0)
+            ? o.createdTs
+            : (typeof o.createdAt === 'number' ? o.createdAt : 0)
+        }));
+    }
+    function stringId(val){
+      if (val === null || typeof val === 'undefined') return '';
+      const str = String(val).trim();
+      return str;
+    }
+    function getDuelTargetsList(player){
+      if (!player || typeof player !== 'object') return [];
+      player.daily = normalizeDaily(player.daily);
+      if (!Array.isArray(player.daily.duelTargets)) player.daily.duelTargets = [];
+      player.daily.duelTargets = player.daily.duelTargets
+        .map(id => stringId(id))
+        .filter(Boolean);
+      const unique = Array.from(new Set(player.daily.duelTargets));
+      player.daily.duelTargets = unique;
+      return player.daily.duelTargets;
+    }
+    function addDuelTargetId(player, targetId){
+      const list = getDuelTargetsList(player);
+      const id = stringId(targetId);
+      if (!id) return;
+      if (!list.includes(id)) list.push(id);
+    }
+    function computeAccountAgeDays(createdTs, nowSec){
+      const created = Number(createdTs);
+      if (!Number.isFinite(created) || created <= 0) return Number.POSITIVE_INFINITY;
+      const current = Number(nowSec);
+      const base = Number.isFinite(current) && current > 0 ? current : nowEpoch();
+      const ageSeconds = Math.max(0, base - created);
+      return ageSeconds / 86400;
+    }
+    function getDuelBlockCodes(attacker, target, nowSec){
+      const codes = [];
+      if (!attacker || !target) return codes;
+      const duelTargets = getDuelTargetsList(attacker);
+      const targetId = stringId(target.userId ?? target.user_id ?? target.id);
+      if (targetId && duelTargets.includes(targetId)) codes.push('cooldown');
+      const levelShieldRaw = Number(CONFIG.NEWBIE_LEVEL_SHIELD);
+      const levelShield = Number.isFinite(levelShieldRaw) ? Math.max(0, levelShieldRaw) : 0;
+      if (levelShield > 0 && typeof target.level === 'number' && target.level < levelShield){
+        codes.push('newbie-level');
+      }
+      const daysShieldRaw = Number(CONFIG.NEWBIE_DAYS_SHIELD);
+      const daysShield = Number.isFinite(daysShieldRaw) ? Math.max(0, daysShieldRaw) : 0;
+      if (daysShield > 0){
+        const createdSource = Number(target.createdTs ?? target.created_ts ?? target.created_at ?? 0);
+        const ageDays = computeAccountAgeDays(createdSource, nowSec);
+        if (ageDays < daysShield) codes.push('newbie-age');
+      }
+      const enableBanding = CONFIG.ENABLE_LEVEL_BANDING !== false;
+      const minDiffRaw = Number(CONFIG.MIN_LEVEL_DIFF);
+      const minDiff = Number.isFinite(minDiffRaw) ? Math.max(0, minDiffRaw) : 0;
+      if (enableBanding && minDiff > 0 && typeof attacker.level === 'number' && typeof target.level === 'number'){
+        if ((attacker.level - target.level) >= minDiff){
+          codes.push('banding');
+        }
+      }
+      return Array.from(new Set(codes));
+    }
+    function formatDuelBlockLabel(codes){
+      if (!Array.isArray(codes) || !codes.length) return '';
+      if (codes.includes('cooldown')) return 'Cooldown';
+      if (codes.some(code => code.startsWith('newbie'))) return 'Newbie Shield';
+      if (codes.includes('banding')) return 'Level Gap';
+      return 'Unavailable';
+    }
+    function formatDuelBlockMessage(codes, targetName){
+      if (!Array.isArray(codes) || !codes.length) return null;
+      const name = safeName(targetName || 'them');
+      if (codes.includes('cooldown')){
+        return `You already challenged ${name} today. Give them time to recover.`;
+      }
+      if (codes.some(code => code.startsWith('newbie'))){
+        return `${name} is protected by the Newbie Shield. Let them grow before challenging them.`;
+      }
+      if (codes.includes('banding')){
+        return `The arena forbids bullying ${name}; the level gap is too great.`;
+      }
+      return `You cannot duel ${name} right now.`;
+    }
+    function buildDuelOpponentList(player){
+      const raw = getOpponentsFor(player) || [];
+      const nowSec = nowEpoch();
+      return raw.map(entry => {
+        const blockCodes = getDuelBlockCodes(player, entry, nowSec);
+        return Object.assign({}, entry, {
+          blockCodes,
+          blocked: blockCodes.length > 0,
+          blockLabel: formatDuelBlockLabel(blockCodes)
+        });
+      });
     }
     function getPlayerByIdRaw(id){
       if (useDB){
@@ -1334,6 +1473,9 @@ module.exports = {
       if (mem){
         mem.daily = normalizeDaily(mem.daily);
         if (typeof mem.lastSeen !== 'number') mem.lastSeen = 0;
+        if (typeof mem.createdTs !== 'number' || mem.createdTs <= 0){
+          mem.createdTs = typeof mem.createdAt === 'number' ? mem.createdAt : 0;
+        }
       }
       return mem;
     }
@@ -1835,7 +1977,7 @@ module.exports = {
       const normalizedName = sanitizeName(charName) || fallbackName;
       return {
         userId, name: normalizedName, gender: gender || null,
-        createdAt: now, updatedAt: now,
+        createdAt: now, createdTs: now, updatedAt: now,
         level:1, xp:0, hp:STARTING_HP, maxHp:STARTING_HP, gold:STARTING_GOLD, bank:0, weaponIdx:0, armorIdx:0,
         charm:STARTING_CHARM, kills:0, deaths:0, dayCount:1, daily: defaultDaily(),
         gems:0,
@@ -2244,7 +2386,7 @@ module.exports = {
         api.print('V) Return to Town Square','dim');
         return;
       }
-      const opponents = getOpponentsFor(p);
+      const opponents = buildDuelOpponentList(p);
       if (!opponents.length){
         api.print('No worthy challengers are here right now.','dim');
         api.print('V) Return to Town Square','dim');
@@ -2253,7 +2395,10 @@ module.exports = {
       }
       p.temp = { opponents };
       opponents.forEach((o,i)=>{
-        api.print(`${i+1}) ${o.name}  Lv${o.level}  K:${o.kills} D:${o.deaths}  Gold:${o.gold}`);
+        const base = `${i+1}) ${o.name}  Lv${o.level}  K:${o.kills} D:${o.deaths}  Gold:${o.gold}`;
+        const note = o.blocked && o.blockLabel ? `  [${o.blockLabel}]` : '';
+        if (o.blocked) api.print(base + note, 'dim');
+        else api.print(base + note);
       });
       api.hr();
       api.print('Pick a foe by number, or V to return.','dim');
@@ -3144,18 +3289,31 @@ module.exports = {
       const raw=t.trim().toLowerCase();
       if (raw==='v'){ p.temp=null; p.screen='town'; return render(p); }
       if (p.daily.duelUsed) return api.print('You already fought today.','yellow');
-      const opponents = Array.isArray(p.temp?.opponents) ? p.temp.opponents : getOpponentsFor(p);
+      const opponents = Array.isArray(p.temp?.opponents) ? p.temp.opponents : buildDuelOpponentList(p);
       if (!opponents.length){ p.temp={ opponents: [] }; return api.print('No challengers stand before you.','dim'); }
       const choice=parseInt(raw,10);
       if (Number.isNaN(choice) || choice<1 || choice>opponents.length){ return api.print('Choose a fighter by number, or V to return.','dim'); }
       const target=opponents[choice-1];
+      if (Array.isArray(target?.blockCodes) && target.blockCodes.length){
+        const msg = formatDuelBlockMessage(target.blockCodes, target.name);
+        if (msg) api.print(msg, 'yellow');
+        return;
+      }
       const defender=getPlayerByIdRaw(target.user_id);
       if (!defender){
         api.print('That challenger has left the grounds.','yellow');
-        p.temp={ opponents: getOpponentsFor(p) };
+        p.temp={ opponents: buildDuelOpponentList(p) };
         return render(p);
       }
       if (defender.userId === p.userId){ return api.print('You cannot duel yourself.','yellow'); }
+      const nowSec = nowEpoch();
+      const blockCodes = getDuelBlockCodes(p, Object.assign({}, defender, { userId:defender.userId, createdTs:defender.createdTs }), nowSec);
+      if (blockCodes.length){
+        const msg = formatDuelBlockMessage(blockCodes, defender.name);
+        if (msg) api.print(msg, 'yellow');
+        p.temp = { opponents: buildDuelOpponentList(p) };
+        return;
+      }
 
       const attackerStats={ atk:WEAPONS[p.weaponIdx]?.atk||0, def:ARMOR[p.armorIdx]?.def||0, hp:p.maxHp, level:p.level, charm:p.charm||0 };
       const defenderStats={ atk:WEAPONS[defender.weaponIdx]?.atk||0, def:ARMOR[defender.armorIdx]?.def||0, hp:defender.maxHp, level:defender.level, charm:defender.charm||0 };
@@ -3212,6 +3370,7 @@ module.exports = {
       }
 
       p.daily.duelUsed = true;
+      addDuelTargetId(p, defender.userId);
 
       const result={
         opponent:defender.name,
