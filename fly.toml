@@ -4,7 +4,7 @@
 #
 
 app = 'dis-bbs-punkyroo'
-primary_region = 'fra'
+primary_region = 'yyz'
 
 [build]
 
