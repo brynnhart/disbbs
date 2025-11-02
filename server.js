@@ -11,6 +11,7 @@ const { createRockoService } = require('./src/services/rocko');
 const formatting = require('./src/utils/formatting');
 const timeUtils = require('./src/utils/time');
 
+
 let DoorManager, lordDoor, casinoDoor;
 try {
   const DM = require('./doors/manager');
@@ -1742,7 +1743,26 @@ function handleGlobalCommand(cmd, api, state, args){
 
 
 /* ======================= WS handling (containerized doors) ======================= */
+const HEARTBEAT_MS = 30_000;
+function markAlive() { this.isAlive = true; }
+
+const heartbeatTimer = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) {
+      try { ws.terminate(); } catch {}
+      return;
+    }
+    ws.isAlive = false;
+    try { ws.ping(); } catch {}
+  });
+}, HEARTBEAT_MS);
+
+
+
 wss.on('connection', (ws) => {
+  ws.isAlive = true;
+  ws.on('pong', markAlive);
+
   HUB.clients.add(ws);
   const api = makeApi(ws);
   const state = makeInitialState();
@@ -1851,6 +1871,7 @@ wss.on('connection', (ws) => {
     HUB.clients.delete(ws);
     try { DoorManager?.leave?.(api, state); } catch {}
     removeUserPresence(api, state);
+    clearInterval(heartbeatTimer)
   });
 
   ws.on('error', (err) => console.error('WS error:', err));
@@ -2006,6 +2027,10 @@ function adminChatHandleRaw(text, api, state){
 
 
 
+app.get('/healthz', (req, res) => {
+  // Liveness only — don't touch DB or do any work
+  res.type('text').send('ok');
+});
 
 
 
