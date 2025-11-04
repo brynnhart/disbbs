@@ -19,23 +19,19 @@ primary_region = 'yyz'
 [http_service]
   internal_port = 3000
   force_https = true
-
-  # Keep the WS machine always on (no surprise stops)
   auto_stop_machines = "off"
   auto_start_machines = true
   min_machines_running = 1
   processes = ["app"]
 
   [http_service.concurrency]
-    # Count live sockets, not HTTP requests
     type = "connections"
     soft_limit = 200
     hard_limit = 250
 
-  # Prefer a cheap, fast health endpoint with relaxed timing
   [[http_service.checks]]
     interval = "15s"
-    timeout = "5s"
+    timeout  = "5s"
     grace_period = "30s"
     method = "GET"
     path = "/healthz"
