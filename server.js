@@ -1757,6 +1757,9 @@ const heartbeatTimer = setInterval(() => {
   });
 }, HEARTBEAT_MS);
 
+wss.on('close', () => {
+  clearInterval(heartbeatTimer);
+});
 
 
 wss.on('connection', (ws) => {
@@ -1774,6 +1777,7 @@ wss.on('connection', (ws) => {
 
   ws.on('message', (data, isBinary) => {
     if (isBinary) return;
+    ws.isAlive = true;
 
     // Parse once
     let msg; try { msg = JSON.parse(String(data)); } catch { return; }
@@ -1871,7 +1875,6 @@ wss.on('connection', (ws) => {
     HUB.clients.delete(ws);
     try { DoorManager?.leave?.(api, state); } catch {}
     removeUserPresence(api, state);
-    clearInterval(heartbeatTimer)
   });
 
   ws.on('error', (err) => console.error('WS error:', err));

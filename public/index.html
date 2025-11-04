@@ -199,7 +199,119 @@
 
   // ===== WebSocket =====
   var proto = (location.protocol === 'https:' ? 'wss:' : 'ws:');
-  var ws = new WebSocket(proto + '//' + location.host + '/ws');
+  var ws = null;
+  var reconnectAttempts = 0;
+  var reconnectTimer = null;
+  var hasConnectedOnce = false;
+  var reconnectNoticeShown = false;
+
+  function websocketUrl(){
+    return proto + '//' + location.host + '/ws';
+  }
+
+  function reconnectDelay(attempt){
+    var base = 1000;
+    var maxDelay = 30000;
+    var exp = Math.pow(2, Math.max(0, attempt - 1));
+    return Math.min(maxDelay, base * exp);
+  }
+
+  function clearReconnectTimer(){
+    if (reconnectTimer != null) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+  }
+
+  function scheduleReconnect(immediate){
+    if (reconnectTimer != null) {
+      if (!immediate) return;
+      clearReconnectTimer();
+    }
+    if (hasConnectedOnce && !reconnectNoticeShown) {
+      reconnectNoticeShown = true;
+      op_print('Connection lost. Attempting to reconnect…', 'yellow');
+    }
+    reconnectAttempts += 1;
+    var delay = immediate ? 0 : reconnectDelay(reconnectAttempts);
+    reconnectTimer = setTimeout(function(){
+      reconnectTimer = null;
+      connectWebSocket();
+    }, delay);
+  }
+
+  function connectWebSocket(){
+    var socket;
+    try {
+      socket = new WebSocket(websocketUrl());
+    } catch (err) {
+      console.error('WebSocket creation failed', err);
+      ws = null;
+      scheduleReconnect();
+      return;
+    }
+
+    ws = socket;
+
+    socket.addEventListener('open', function(){
+      if (socket !== ws) return;
+      var wasReconnecting = reconnectAttempts > 0;
+      hasConnectedOnce = true;
+      reconnectNoticeShown = false;
+      reconnectAttempts = 0;
+      clearReconnectTimer();
+      if (wasReconnecting) op_print('Reconnected to server.', 'green');
+      try { socket.send(JSON.stringify({ type: 'init' })); } catch (err) {
+        console.error('WebSocket init send failed', err);
+      }
+    });
+
+    socket.addEventListener('message', function(ev){
+      if (socket !== ws) return;
+      var msg; try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg.type === 'ops' && Array.isArray(msg.ops)) {
+        msg.ops.forEach(function(op){
+          if (op.op === 'clear') op_clear();
+          else if (op.op === 'print') op_print(op.text, op.cls);
+          else if (op.op === 'printHTML') op_printHTML(op.html, op.cls);
+          else if (op.op === 'hr') op_hr();
+          else if (op.op === 'setInput') op_setInput(op.inputType, op.placeholder);
+          else if (op.op === 'setPrompt') op_setPrompt(op.prefix);
+          else if (op.op === 'reload') op_reload();
+          else if (op.op === 'doorOpen') openDoorOverlay(op);
+          else if (op.op === 'doorClose') teardownDoor(op && op.slug);
+          else if (op.op === 'doorEvent') dispatchDoorEvent(op);
+          else if (op.op === 'audio') op_audio(op.src, op.volume);
+          else if (op.op === 'beep') op_beep(op.kind);
+        });
+      }
+    });
+
+    socket.addEventListener('close', function(ev){
+      if (socket !== ws) return;
+      ws = null;
+      teardownDoor();
+      if (ev && ev.code === 4001) {
+        return;
+      }
+      scheduleReconnect();
+    });
+
+    socket.addEventListener('error', function(err){
+      if (socket !== ws) return;
+      console.error('WebSocket error', err);
+      try { socket.close(); } catch (closeErr) {
+        console.error('WebSocket close after error failed', closeErr);
+      }
+    });
+  }
+
+  connectWebSocket();
+  window.addEventListener('online', function(){
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      scheduleReconnect(true);
+    }
+  });
 
   function doorRuntimeAvailable(){ return !!(window.DDR && typeof window.DDR.openDoor === 'function'); }
 
@@ -330,42 +442,16 @@
     });
   }
 
-  ws.addEventListener('open', function(){
-    ws.send(JSON.stringify({ type: 'init' }));
-  });
   input.focus();
-
-  ws.addEventListener('message', function(ev){
-    var msg; try { msg = JSON.parse(ev.data); } catch { return; }
-    if (msg.type === 'ops' && Array.isArray(msg.ops)) {
-      msg.ops.forEach(function(op){
-        if (op.op === 'clear') op_clear();
-        else if (op.op === 'print') op_print(op.text, op.cls);
-        else if (op.op === 'printHTML') op_printHTML(op.html, op.cls);
-        else if (op.op === 'hr') op_hr();
-        else if (op.op === 'setInput') op_setInput(op.inputType, op.placeholder);
-        else if (op.op === 'setPrompt') op_setPrompt(op.prefix);
-        else if (op.op === 'reload') op_reload();
-        else if (op.op === 'doorOpen') openDoorOverlay(op);
-        else if (op.op === 'doorClose') teardownDoor(op && op.slug);
-        else if (op.op === 'doorEvent') dispatchDoorEvent(op);
-        else if (op.op === 'audio') op_audio(op.src, op.volume);
-        else if (op.op === 'beep') op_beep(op.kind);
-      });
-    }
-  });
-
-  ws.addEventListener('close', function(){
-    teardownDoor();
-    op_print('Disconnected. Reload to reconnect.', 'red');
-  });
 
   form.addEventListener('submit', function(e){
     e.preventDefault();
     var raw = (input.value || '').trim();
     if (!raw) return;
-    if (ws.readyState === WebSocket.OPEN) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'input', raw: raw }));
+    } else {
+      op_print('Still reconnecting. Message not sent.', 'yellow');
     }
     input.value = '';
     input.focus();
