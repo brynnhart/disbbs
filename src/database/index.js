@@ -39,9 +39,11 @@ CREATE TABLE IF NOT EXISTS invites (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   code TEXT NOT NULL UNIQUE,
   created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_by_name TEXT,
   created_at INTEGER NOT NULL,
   expires_at INTEGER,
   used_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  used_by_name TEXT,
   used_at INTEGER,
   note TEXT
 );
@@ -179,6 +181,7 @@ CREATE TABLE IF NOT EXISTS users (
   ensureNotificationsSchema(db);
   ensureAboutColumn(db);
   ensureNormalizationColumns(db);
+  ensureInviteAuditColumns(db);
 
   const getSetting = db.prepare('SELECT value FROM settings WHERE key=?');
   const setSetting = db.prepare(`
@@ -200,13 +203,13 @@ CREATE TABLE IF NOT EXISTS users (
   const setUserAboutById = db.prepare('UPDATE users SET about = ? WHERE id = ?');
 
   const insertInvite = db.prepare(`
-    INSERT INTO invites (code, created_by, created_at, expires_at, note)
-    VALUES (?, ?, strftime('%s','now'), ?, ?)
+    INSERT INTO invites (code, created_by, created_by_name, created_at, expires_at, note)
+    VALUES (?, ?, ?, strftime('%s','now'), ?, ?)
   `);
   const getInvite = db.prepare('SELECT * FROM invites WHERE code = ?');
   const redeemInvite = db.prepare(`
     UPDATE invites
-       SET used_by = ?, used_at = strftime('%s','now')
+       SET used_by = ?, used_by_name = ?, used_at = strftime('%s','now')
      WHERE code = ? AND used_at IS NULL
   `);
   const sweepExpiredInvites = db.prepare(`
@@ -527,11 +530,11 @@ CREATE TABLE IF NOT EXISTS users (
     return hex.match(/.{1,4}/g).join('-');
   }
 
-  function createInvite({ creatorId, days, note }){
+  function createInvite({ creatorId, creatorName, days, note }){
     const expires_at = (typeof days === 'number' && days > 0) ? (nowEpoch() + days*86400) : null;
     const code = makeInviteCode();
     try {
-      insertInvite.run(code, creatorId || null, expires_at, note || null);
+      insertInvite.run(code, creatorId || null, creatorName || null, expires_at, note || null);
       return { ok:true, code, expires_at };
     } catch (e) {
       return { ok:false, err: e && e.message ? e.message : String(e) };
@@ -729,6 +732,37 @@ function ensureNormalizationColumns(db){
     `);
   } catch (e) {
     console.error('users.*_norm index create failed:', e && e.message ? e.message : e);
+  }
+}
+
+function ensureInviteAuditColumns(db){
+  try {
+    const cols = db.prepare('PRAGMA table_info(invites)').all().map(c => c.name);
+    if (!cols.includes('created_by_name')) {
+      db.exec('ALTER TABLE invites ADD COLUMN created_by_name TEXT');
+    }
+    if (!cols.includes('used_by_name')) {
+      db.exec('ALTER TABLE invites ADD COLUMN used_by_name TEXT');
+    }
+  } catch (e) {
+    console.error('invites.*_name add failed (ok if already exists):', e && e.message ? e.message : e);
+  }
+
+  try {
+    db.exec(`
+      UPDATE invites
+         SET created_by_name = (
+               SELECT username FROM users WHERE id = invites.created_by
+             )
+       WHERE created_by IS NOT NULL AND created_by_name IS NULL;
+      UPDATE invites
+         SET used_by_name = (
+               SELECT username FROM users WHERE id = invites.used_by
+             )
+       WHERE used_by IS NOT NULL AND used_by_name IS NULL;
+    `);
+  } catch (e) {
+    console.error('invites.*_name backfill failed:', e && e.message ? e.message : e);
   }
 }
 

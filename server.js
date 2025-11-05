@@ -1251,14 +1251,13 @@ function cmdSetDisplay(api, state, args){
 
 function cmdMakeInvite(api, state, args){
   if (!requireAuth(api, state)) return;
-  if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
   let days = 7, note = '';
   if (args && args.length) {
     const maybe = parseInt(args[0], 10);
     if (!Number.isNaN(maybe) && maybe >= 0) { days = maybe; note = args.slice(1).join(' ').trim(); }
     else { note = args.join(' ').trim(); }
   }
-  const out = createInvite({ creatorId: state.userId, days, note });
+  const out = createInvite({ creatorId: state.userId, creatorName: state.username, days, note });
   if (!out.ok) { api.print('Failed to create invite.', 'red'); return; }
   const expiresLine = out.expires_at ? new Date(out.expires_at*1000).toLocaleString() : 'never';
   api.print('Invite created:', 'green');
@@ -1277,13 +1276,16 @@ function cmdListInvites(api, state, args){
   if (!state.isAdmin){ api.print('Unknown command.', 'red'); return; } // hidden to non-admins
   const mode = (args[0]||'unused').toLowerCase(); // unused|used|all
   let where = 'used_at IS NULL'; if (mode==='used') where='used_at IS NOT NULL'; else if (mode==='all') where='1=1';
-  const rows = db.prepare(`SELECT code, created_at, expires_at, used_at, note FROM invites WHERE ${where} ORDER BY created_at DESC LIMIT 50`).all();
+  const rows = db.prepare(`SELECT code, created_at, expires_at, used_at, note, created_by_name, used_by_name FROM invites WHERE ${where} ORDER BY created_at DESC LIMIT 50`).all();
   if (!rows.length){ api.print('No invites found.', 'dim'); return; }
   api.hr(); api.print(`Invites (${mode}):`, 'yellow');
   rows.forEach(r=>{
     const exp = r.expires_at ? new Date(r.expires_at*1000).toLocaleString() : 'never';
     const used = r.used_at ? new Date(r.used_at*1000).toLocaleString() : '—';
-    api.print(`• ${r.code}  exp:${exp}  used:${used}  ${r.note?'- '+r.note:''}`, r.used_at?'dim':'cyan');
+    const maker = r.created_by_name ? ` by ${r.created_by_name}` : '';
+    const usedBy = r.used_by_name ? ` → ${r.used_by_name}` : '';
+    const noteBit = r.note ? ` - ${r.note}` : '';
+    api.print(`• ${r.code}${maker}${usedBy}  exp:${exp}  used:${used}${noteBit}`, r.used_at?'dim':'cyan');
   });
 }
 
@@ -1605,7 +1607,7 @@ function cmdRegister(api, state, args){
   // 3) redeem invite (single-use)
   try {
     const newUser = findUserByName.get(username);
-    const changed = redeemInvite.run(newUser.id, inviteCode).changes;
+    const changed = redeemInvite.run(newUser.id, newUser.username, inviteCode).changes;
     if (!changed) {
       api.print('Invite could not be redeemed (race condition). Try another.', 'red');
       // Rollback user creation here only if you want strict semantics.
