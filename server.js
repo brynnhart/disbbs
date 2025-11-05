@@ -1606,7 +1606,7 @@ function cmdRegister(api, state, args){
 
   // 3) redeem invite (single-use)
   try {
-    const newUser = findUserByName.get(username);
+    const newUser = getUserByName.get(username);
     const changed = redeemInvite.run(newUser.id, newUser.username, inviteCode).changes;
     if (!changed) {
       api.print('Invite could not be redeemed (race condition). Try another.', 'red');
@@ -1631,7 +1631,7 @@ function cmdPasswd(api, state, args){
   const [oldp, newp] = args || [];
   if (!oldp || !newp){ api.print('Usage: /passwd <old> <new>', 'yellow'); return; }
   if (newp.length < 6){ api.print('New password must be at least 6 characters.', 'yellow'); return; }
-  const u = findUserByName.get(state.username);
+  const u = getUserByName.get(state.username);
   if (!u || !bcrypt.compareSync(oldp, u.password_hash)){ api.print('Old password incorrect.', 'red'); return; }
   const hash = bcrypt.hashSync(newp, 10);
   db.prepare(`UPDATE users SET password_hash = ? WHERE id = ?`).run(hash, u.id);
