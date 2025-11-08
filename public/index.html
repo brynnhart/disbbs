@@ -22,6 +22,8 @@
   #terminal::-webkit-scrollbar-thumb{background:var(--scroll-thumb);border-radius:8px}
   #terminal::-webkit-scrollbar-thumb:hover{background:#19C3C3B3}
   .line{white-space:pre-wrap;word-wrap:break-word}
+  .line a{color:var(--accent);text-decoration:underline;text-decoration-thickness:1px;text-decoration-color:var(--accent);transition:color .12s ease,text-decoration-color .12s ease;cursor:pointer}
+  .line a:hover{color:var(--white);text-decoration-color:var(--white)}
   .dim{opacity:.75}
   .red{color:var(--red)} .green{color:var(--green)} .yellow{color:var(--yellow)}
   .blue{color:var(--blue)} .magenta{color:var(--magenta)} .cyan{color:var(--cyan)} .white{color:var(--white)}

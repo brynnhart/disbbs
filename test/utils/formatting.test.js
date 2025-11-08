@@ -23,6 +23,13 @@ test('sanitizeAndFormatDIS applies markup and emoji rendering', () => {
   assert.strictEqual(sanitizeAndFormatDIS(input), expected);
 });
 
+test('sanitizeAndFormatDIS linkifies URLs with truncated labels', () => {
+  const input = 'Visit http://www.google.com/1234567890 for more info!';
+  const expected =
+    'Visit <a class="ext-link" href="http://www.google.com/1234567890" target="_blank" rel="noopener noreferrer">www.google.com/123456...</a> for more info!';
+  assert.strictEqual(sanitizeAndFormatDIS(input), expected);
+});
+
 test('renderEmojis leaves unknown emoji codes untouched', () => {
   const input = 'Try :unknown: but keep :happy:!';
   const output = renderEmojis(input);
