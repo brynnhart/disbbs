@@ -3,6 +3,9 @@
 const ALLOWED_COLORS = ['red','green','yellow','blue','magenta','cyan','white'];
 const COLOR_TAGS = ['dim', ...ALLOWED_COLORS];
 
+const URL_PATTERN = /https?:\/\/[^\s<>"']+/gi;
+const TRAILING_PUNCTUATION_PATTERN = /[)\]\}!?,.;]+$/;
+
 const EMOJI_DEFINITIONS = {
   happy: {
     src: '/static/emoji/happy.svg',
@@ -35,6 +38,68 @@ function escapeHTML(s){
     .replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;')
     .replace(/'/g,'&#39;');
+}
+
+function trimTrailingPunctuation(url){
+  let trimmed = url;
+  let trailing = '';
+  while (trimmed && TRAILING_PUNCTUATION_PATTERN.test(trimmed.slice(-1))) {
+    trailing = trimmed.slice(-1) + trailing;
+    trimmed = trimmed.slice(0, -1);
+  }
+  return { trimmed, trailing };
+}
+
+function formatLinkDisplay(url){
+  try {
+    const parsed = new URL(url);
+    const host = parsed.host || parsed.hostname || parsed.href;
+    let remainder = (parsed.pathname || '') + (parsed.search || '') + (parsed.hash || '');
+    if (remainder && remainder !== '/') {
+      remainder = remainder.replace(/^\/+/, '/');
+      const content = remainder.slice(1);
+      if (content.length > 6) {
+        remainder = '/' + content.slice(0, 6) + '...';
+      }
+      return host + remainder;
+    }
+    return host;
+  } catch {
+    return String(url).replace(/^https?:\/\//i, '');
+  }
+}
+
+function escapeAndLinkify(text){
+  if (!text) return '';
+  const input = String(text);
+  let out = '';
+  let lastIndex = 0;
+  URL_PATTERN.lastIndex = 0;
+  let match;
+  while ((match = URL_PATTERN.exec(input))) {
+    const start = match.index;
+    const end = start + match[0].length;
+    out += escapeHTML(input.slice(lastIndex, start));
+
+    const { trimmed, trailing } = trimTrailingPunctuation(match[0]);
+    if (trimmed) {
+      const display = formatLinkDisplay(trimmed);
+      const safeHref = escapeHTML(trimmed);
+      const safeDisplay = escapeHTML(display);
+      out += `<a class="ext-link" href="${safeHref}" target="_blank" rel="noopener noreferrer">${safeDisplay}</a>`;
+      if (trailing) out += escapeHTML(trailing);
+    } else {
+      out += escapeHTML(match[0]);
+    }
+
+    lastIndex = end;
+  }
+
+  if (lastIndex < input.length) {
+    out += escapeHTML(input.slice(lastIndex));
+  }
+
+  return out;
 }
 
 function disUnderline(s){
@@ -83,7 +148,7 @@ function renderEmojis(html){
 }
 
 function sanitizeAndFormatDIS(text){
-  let out = escapeHTML(text);
+  let out = escapeAndLinkify(text);
   out = disUnderline(out);
   out = disBold(out);
   out = disItalics(out);
