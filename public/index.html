@@ -35,9 +35,24 @@
   .prompt{color:var(--accent)}
   .prompt.limit{color:var(--accent)}
   .prompt.limit.limit-over{color:var(--red)}
-  #cmdForm{display:flex;flex:1 1 auto;gap:8px;min-width:0}
-  #cmdInput{flex:1 1 auto;min-width:0;background:#0c0c0c;color:var(--fg);border:1px solid #151515;outline:0;padding:10px 12px;border-radius:6px;caret-color:var(--accent)}
-  #cmdInput::placeholder{color:#6a6a6a}
+  .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+  #cmdForm{display:flex;flex:1 1 auto;gap:8px;min-width:0;align-items:center}
+  .input-shell{position:relative;flex:1 1 auto;min-width:0}
+  .input-shell > *{width:100%;box-sizing:border-box;display:block}
+  .input-shell > *[hidden]{display:none !important}
+  #cmdInput,#cmdTextarea{background:#0c0c0c;color:var(--fg);border:1px solid #151515;outline:0;padding:10px 12px;border-radius:6px;caret-color:var(--accent);font:inherit}
+  #cmdInput{min-height:0}
+  #cmdTextarea{min-height:120px;resize:vertical;line-height:1.4;display:block}
+  #cmdInput::placeholder,#cmdTextarea::placeholder{color:#6a6a6a}
+  .input-toggle{appearance:none;border:1px solid #1b1b1b;background:#0d0d0d;color:var(--fg);padding:8px 10px;border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;line-height:1}
+  .input-toggle:hover{border-color:#2a2a2a}
+  .input-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .input-toggle.active{color:var(--accent);border-color:#2a2a2a;background:#111}
+  .input-toggle-icon{font-size:16px;line-height:1}
+  #inputbar.expanded{align-items:flex-start;flex:0 0 auto;padding:10px 12px 12px}
+  #inputbar.expanded .prompt{padding-top:8px}
+  #inputbar.expanded #cmdForm{align-items:flex-start}
+  #inputbar.expanded #cmdForm .btn{align-self:flex-start;margin-top:2px}
   .btn{appearance:none;border:1px solid #1b1b1b;background:#0d0d0d;color:var(--fg);padding:9px 12px;border-radius:6px;cursor:pointer}
   .btn:hover{border-color:#2a2a2a}
   .btn:disabled{cursor:not-allowed;opacity:.55}
@@ -73,8 +88,15 @@
     </div>
     <div id="inputbar">
       <div class="prompt">DIS&gt;</div>
+      <button type="button" id="inputToggle" class="input-toggle" aria-pressed="false">
+        <span class="input-toggle-icon" aria-hidden="true">⤢</span>
+        <span class="input-toggle-label sr-only">Expand input</span>
+      </button>
       <form id="cmdForm" autocomplete="off">
-        <input id="cmdInput" type="text" placeholder="Type here…" spellcheck="false" autofocus>
+        <div class="input-shell">
+          <input id="cmdInput" type="text" placeholder="Type here…" spellcheck="false" autofocus>
+          <textarea id="cmdTextarea" placeholder="Type here…" spellcheck="false" hidden></textarea>
+        </div>
         <button class="btn" type="submit">Enter</button>
       </form>
     </div>
@@ -97,13 +119,20 @@
 <script>
 (function(){
   var term  = document.getElementById('terminal');
+  var inputBar = document.getElementById('inputbar');
   var form  = document.getElementById('cmdForm');
-  var input = document.getElementById('cmdInput');
+  var singleInput = document.getElementById('cmdInput');
+  var textareaInput = document.getElementById('cmdTextarea');
+  var inputToggleBtn = document.getElementById('inputToggle');
+  var inputToggleIcon = inputToggleBtn && inputToggleBtn.querySelector('.input-toggle-icon');
+  var inputToggleLabel = inputToggleBtn && inputToggleBtn.querySelector('.input-toggle-label');
+  var input = singleInput || textareaInput;
   var submitBtn = form ? form.querySelector('button[type="submit"]') : null;
   var promptEl = document.querySelector('.prompt');
   var promptDefault = 'DIS>';
   var promptLabel = promptDefault;
   var inputLimit = null;
+  var isExpandedInput = false;
   var doorOverlay = document.getElementById('doorOverlay');
   var doorModal = document.getElementById('doorModal');
   var doorMountWrap = document.getElementById('doorMountWrap');
@@ -111,6 +140,15 @@
   var doorHintEl = document.getElementById('doorHint');
   var doorCloseBtn = document.getElementById('doorClose');
   var activeDoor = null;
+
+  if (singleInput && textareaInput){
+    textareaInput.value = singleInput.value || '';
+    if (!textareaInput.placeholder) textareaInput.placeholder = singleInput.placeholder || '';
+  }
+
+  if (!textareaInput && inputToggleBtn){
+    inputToggleBtn.hidden = true;
+  }
 
   // ===== Audio support =====
   var AUDIO_CACHE = new Map();
@@ -191,9 +229,76 @@
     if (stick) scrollToBottom(term);
   }
   function op_setInput(type, placeholder){
-    try { if (type && input.type !== type) input.type = type; } catch(e){}
-    if (typeof placeholder !== 'undefined') input.placeholder = placeholder;
+    if (singleInput){
+      try { if (type && singleInput.type !== type) singleInput.type = type; } catch(e){}
+    }
+    if (typeof placeholder !== 'undefined'){
+      if (singleInput) singleInput.placeholder = placeholder;
+      if (textareaInput) textareaInput.placeholder = placeholder;
+    }
     updatePromptDisplay();
+  }
+
+  function syncInputMirror(source){
+    if (!source || !singleInput || !textareaInput) return;
+    var target = source === singleInput ? textareaInput : singleInput;
+    if (target && target.value !== source.value) target.value = source.value;
+  }
+
+  function focusInputEnd(el){
+    if (!el || typeof el.focus !== 'function') return;
+    setTimeout(function(){
+      try {
+        el.focus();
+        if (typeof el.setSelectionRange === 'function'){
+          var len = el.value != null ? String(el.value).length : 0;
+          el.setSelectionRange(len, len);
+        }
+      } catch(e){}
+    }, 0);
+  }
+
+  function updateToggleVisual(){
+    if (!inputToggleBtn) return;
+    var expanded = !!isExpandedInput;
+    inputToggleBtn.setAttribute('aria-pressed', expanded ? 'true' : 'false');
+    if (inputToggleIcon) inputToggleIcon.textContent = expanded ? '⤡' : '⤢';
+    if (inputToggleLabel) inputToggleLabel.textContent = expanded ? 'Collapse input' : 'Expand input';
+    inputToggleBtn.classList.toggle('active', expanded);
+    inputToggleBtn.title = expanded ? 'Collapse input' : 'Expand input';
+  }
+
+  function setInputExpanded(expanded){
+    expanded = !!expanded;
+    if (!singleInput && !textareaInput){
+      isExpandedInput = false;
+      input = null;
+      updateToggleVisual();
+      updatePromptDisplay();
+      return;
+    }
+
+    if (!textareaInput){
+      expanded = false;
+    }
+
+    if (singleInput) singleInput.hidden = expanded;
+    if (textareaInput) textareaInput.hidden = !expanded;
+
+    if (singleInput && textareaInput){
+      var from = expanded ? singleInput : textareaInput;
+      var to = expanded ? textareaInput : singleInput;
+      if (from && to && to.value !== from.value){
+        to.value = from.value;
+      }
+    }
+
+    isExpandedInput = expanded;
+    input = expanded ? (textareaInput || singleInput) : (singleInput || textareaInput);
+    if (inputBar) inputBar.classList.toggle('expanded', expanded);
+    updateToggleVisual();
+    updatePromptDisplay();
+    focusInputEnd(input);
   }
   function normalizedLimit(value){
     if (value === null || typeof value === 'undefined') return null;
@@ -510,40 +615,74 @@
     });
   }
 
-  if (input){
-    input.addEventListener('input', updatePromptDisplay);
-    input.addEventListener('keydown', function(ev){
-      if (ev.key === 'Enter' && isLimitExceeded()) {
-        ev.preventDefault();
-        ev.stopPropagation();
-      }
-    });
-  }
-
-  updatePromptDisplay();
-
-  input.focus();
-
-  form.addEventListener('submit', function(e){
-    e.preventDefault();
-    if (isLimitExceeded()) return;
+  function submitCurrentInput(){
+    if (!input) return false;
+    if (isLimitExceeded()) return false;
     var raw = (input.value || '').trim();
-    if (!raw) return;
+    if (!raw) return false;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'input', raw: raw }));
     } else {
       op_print('Still reconnecting. Message not sent.', 'yellow');
     }
     input.value = '';
+    if (singleInput && singleInput !== input) singleInput.value = '';
+    if (textareaInput && textareaInput !== input) textareaInput.value = '';
     updatePromptDisplay();
-    input.focus();
-  });
+    focusInputEnd(input);
+    return true;
+  }
+
+  function handleInputEvent(ev){
+    if (ev && ev.target) syncInputMirror(ev.target);
+    updatePromptDisplay();
+  }
+
+  function handleInputKeydown(ev){
+    if (ev.key === 'Enter'){
+      if (isLimitExceeded()){
+        ev.preventDefault();
+        ev.stopPropagation();
+        return;
+      }
+      var activeTextarea = (input === textareaInput && textareaInput && !textareaInput.hidden);
+      if (activeTextarea && !ev.shiftKey && !ev.altKey && !ev.metaKey && !ev.ctrlKey){
+        ev.preventDefault();
+        submitCurrentInput();
+      }
+    }
+  }
+
+  if (singleInput){
+    singleInput.addEventListener('input', handleInputEvent);
+    singleInput.addEventListener('keydown', handleInputKeydown);
+  }
+  if (textareaInput){
+    textareaInput.addEventListener('input', handleInputEvent);
+    textareaInput.addEventListener('keydown', handleInputKeydown);
+  }
+
+  if (inputToggleBtn){
+    inputToggleBtn.addEventListener('click', function(ev){
+      ev.preventDefault();
+      setInputExpanded(!isExpandedInput);
+    });
+  }
+
+  setInputExpanded(false);
+
+  if (form){
+    form.addEventListener('submit', function(e){
+      e.preventDefault();
+      submitCurrentInput();
+    });
+  }
 
   // Click anywhere to refocus input (unless interacting with a control)
   var appEl = document.querySelector('.app');
   function isFocusableTarget(el){
     if (!el) return false;
-    if (el === input) return true;
+    if (el === input || el === singleInput || el === textareaInput) return true;
     if (el.closest('form')) return true;
     if (el.closest('button')) return true;
     if (el.closest('a[href]')) return true;
@@ -554,13 +693,13 @@
     if (isFocusableTarget(ev.target)) return;
     var sel = window.getSelection && window.getSelection();
     if (sel && String(sel).length) return;
-    setTimeout(function(){ input.focus(); }, 0);
+    focusInputEnd(input);
   }
-  appEl.addEventListener('click', clickToFocus);
+  if (appEl) appEl.addEventListener('click', clickToFocus);
 
   // ESC quickly refocuses prompt
   document.addEventListener('keydown', function(ev){
-    if (ev.key === 'Escape' && !activeDoor) input.focus();
+    if (ev.key === 'Escape' && !activeDoor) focusInputEnd(input);
   });
 })();
 </script>
