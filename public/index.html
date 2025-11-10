@@ -40,6 +40,7 @@
   #cmdInput::placeholder{color:#6a6a6a}
   .btn{appearance:none;border:1px solid #1b1b1b;background:#0d0d0d;color:var(--fg);padding:9px 12px;border-radius:6px;cursor:pointer}
   .btn:hover{border-color:#2a2a2a}
+  .btn:disabled{cursor:not-allowed;opacity:.55}
   .svg-splash-wrap{display:flex;justify-content:center;margin:8px 0 12px}
   .svg-splash{max-width:960px;width:96%;height:auto;display:block}
   .line.me {
@@ -98,6 +99,7 @@
   var term  = document.getElementById('terminal');
   var form  = document.getElementById('cmdForm');
   var input = document.getElementById('cmdInput');
+  var submitBtn = form ? form.querySelector('button[type="submit"]') : null;
   var promptEl = document.querySelector('.prompt');
   var promptDefault = 'DIS>';
   var promptLabel = promptDefault;
@@ -210,22 +212,34 @@
     return String(input.value || '').length;
   }
 
+  function isLimitExceeded(){
+    return inputLimit != null && currentInputLength() > inputLimit;
+  }
+
+  function updateSubmitState(){
+    if (!submitBtn) return;
+    var over = isLimitExceeded();
+    submitBtn.disabled = over;
+  }
+
   function updatePromptDisplay(){
-    if (!promptEl) return;
-    if (inputLimit != null){
-      var remaining = inputLimit - currentInputLength();
-      var text = remaining >= 0
-        ? (remaining + ' left')
-        : (Math.abs(remaining) + ' over');
-      promptEl.textContent = text;
-      promptEl.classList.add('limit');
-      if (remaining < 0) promptEl.classList.add('limit-over');
-      else promptEl.classList.remove('limit-over');
-    } else {
-      promptEl.textContent = promptLabel;
-      promptEl.classList.remove('limit');
-      promptEl.classList.remove('limit-over');
+    if (promptEl){
+      if (inputLimit != null){
+        var remaining = inputLimit - currentInputLength();
+        var text = remaining >= 0
+          ? (remaining + ' left')
+          : (Math.abs(remaining) + ' over');
+        promptEl.textContent = text;
+        promptEl.classList.add('limit');
+        if (remaining < 0) promptEl.classList.add('limit-over');
+        else promptEl.classList.remove('limit-over');
+      } else {
+        promptEl.textContent = promptLabel;
+        promptEl.classList.remove('limit');
+        promptEl.classList.remove('limit-over');
+      }
     }
+    updateSubmitState();
   }
 
   function setInputLimit(limit){
@@ -498,6 +512,12 @@
 
   if (input){
     input.addEventListener('input', updatePromptDisplay);
+    input.addEventListener('keydown', function(ev){
+      if (ev.key === 'Enter' && isLimitExceeded()) {
+        ev.preventDefault();
+        ev.stopPropagation();
+      }
+    });
   }
 
   updatePromptDisplay();
@@ -506,6 +526,7 @@
 
   form.addEventListener('submit', function(e){
     e.preventDefault();
+    if (isLimitExceeded()) return;
     var raw = (input.value || '').trim();
     if (!raw) return;
     if (ws && ws.readyState === WebSocket.OPEN) {
