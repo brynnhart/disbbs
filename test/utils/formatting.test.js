@@ -47,3 +47,13 @@ test('visibleLengthDIS measures printable length', () => {
   const input = 'Look **here** [green]friend[/green]!';
   assert.strictEqual(visibleLengthDIS(input), 'Look here friend!'.length);
 });
+
+test('visibleLengthDIS counts truncated link labels instead of raw URLs', () => {
+  const input = 'Check this http://example.com/abcdef123456 right now';
+  const html = sanitizeAndFormatDIS(input);
+  const match = html.match(/<a[^>]*>([^<]+)<\/a>/);
+  assert.ok(match, 'expected a linked URL in formatted HTML');
+  const display = match[1];
+  const expectedLength = `Check this ${display} right now`.length;
+  assert.strictEqual(visibleLengthDIS(input), expectedLength);
+});

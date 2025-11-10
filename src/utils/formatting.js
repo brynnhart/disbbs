@@ -102,6 +102,37 @@ function escapeAndLinkify(text){
   return out;
 }
 
+function plainTextWithLinkDisplays(text){
+  if (!text) return '';
+  const input = String(text);
+  let out = '';
+  let lastIndex = 0;
+  URL_PATTERN.lastIndex = 0;
+  let match;
+  while ((match = URL_PATTERN.exec(input))) {
+    const start = match.index;
+    const end = start + match[0].length;
+    out += input.slice(lastIndex, start);
+
+    const { trimmed, trailing } = trimTrailingPunctuation(match[0]);
+    if (trimmed) {
+      const display = formatLinkDisplay(trimmed);
+      out += display;
+      if (trailing) out += trailing;
+    } else {
+      out += input.slice(start, end);
+    }
+
+    lastIndex = end;
+  }
+
+  if (lastIndex < input.length) {
+    out += input.slice(lastIndex);
+  }
+
+  return out;
+}
+
 function disUnderline(s){
   return s.replace(/__([^_]+)__/g,'<span class="u">$1</span>');
 }
@@ -174,7 +205,8 @@ function stripDISFormatting(s){
 }
 
 function visibleLengthDIS(s){
-  return stripDISFormatting(String(s)).length;
+  const withLinkDisplays = plainTextWithLinkDisplays(s);
+  return stripDISFormatting(withLinkDisplays).length;
 }
 
 module.exports = {
