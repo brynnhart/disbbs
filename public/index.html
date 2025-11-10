@@ -33,11 +33,14 @@
   .banner{background:linear-gradient(180deg,#0a0a0a 0%,#050505 100%);border:1px solid #121212;padding:10px 12px;margin-bottom:10px}
   #inputbar{flex:0 0 var(--inputbar-h);display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--panel);box-sizing:border-box}
   .prompt{color:var(--accent)}
+  .prompt.limit{color:var(--accent)}
+  .prompt.limit.limit-over{color:var(--red)}
   #cmdForm{display:flex;flex:1 1 auto;gap:8px;min-width:0}
   #cmdInput{flex:1 1 auto;min-width:0;background:#0c0c0c;color:var(--fg);border:1px solid #151515;outline:0;padding:10px 12px;border-radius:6px;caret-color:var(--accent)}
   #cmdInput::placeholder{color:#6a6a6a}
   .btn{appearance:none;border:1px solid #1b1b1b;background:#0d0d0d;color:var(--fg);padding:9px 12px;border-radius:6px;cursor:pointer}
   .btn:hover{border-color:#2a2a2a}
+  .btn:disabled{cursor:not-allowed;opacity:.55}
   .svg-splash-wrap{display:flex;justify-content:center;margin:8px 0 12px}
   .svg-splash{max-width:960px;width:96%;height:auto;display:block}
   .line.me {
@@ -96,7 +99,11 @@
   var term  = document.getElementById('terminal');
   var form  = document.getElementById('cmdForm');
   var input = document.getElementById('cmdInput');
+  var submitBtn = form ? form.querySelector('button[type="submit"]') : null;
   var promptEl = document.querySelector('.prompt');
+  var promptDefault = 'DIS>';
+  var promptLabel = promptDefault;
+  var inputLimit = null;
   var doorOverlay = document.getElementById('doorOverlay');
   var doorModal = document.getElementById('doorModal');
   var doorMountWrap = document.getElementById('doorMountWrap');
@@ -186,10 +193,67 @@
   function op_setInput(type, placeholder){
     try { if (type && input.type !== type) input.type = type; } catch(e){}
     if (typeof placeholder !== 'undefined') input.placeholder = placeholder;
+    updatePromptDisplay();
   }
+  function normalizedLimit(value){
+    if (value === null || typeof value === 'undefined') return null;
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      if (value < 0) return 0;
+      return Math.floor(value);
+    }
+    var parsed = Number(value);
+    if (!Number.isFinite(parsed)) return null;
+    if (parsed < 0) return 0;
+    return Math.floor(parsed);
+  }
+
+  function currentInputLength(){
+    if (!input) return 0;
+    return String(input.value || '').length;
+  }
+
+  function isLimitExceeded(){
+    return inputLimit != null && currentInputLength() > inputLimit;
+  }
+
+  function updateSubmitState(){
+    if (!submitBtn) return;
+    var over = isLimitExceeded();
+    submitBtn.disabled = over;
+  }
+
+  function updatePromptDisplay(){
+    if (promptEl){
+      if (inputLimit != null){
+        var remaining = inputLimit - currentInputLength();
+        var text = remaining >= 0
+          ? (remaining + ' left')
+          : (Math.abs(remaining) + ' over');
+        promptEl.textContent = text;
+        promptEl.classList.add('limit');
+        if (remaining < 0) promptEl.classList.add('limit-over');
+        else promptEl.classList.remove('limit-over');
+      } else {
+        promptEl.textContent = promptLabel;
+        promptEl.classList.remove('limit');
+        promptEl.classList.remove('limit-over');
+      }
+    }
+    updateSubmitState();
+  }
+
+  function setInputLimit(limit){
+    inputLimit = normalizedLimit(limit);
+    updatePromptDisplay();
+  }
+
+  function setPromptLabel(prefix){
+    promptLabel = String(prefix || promptDefault);
+    updatePromptDisplay();
+  }
+
   function op_setPrompt(prefix){
-    if (!promptEl) return;
-    promptEl.textContent = String(prefix || 'DIS>');
+    setPromptLabel(prefix);
   }
   function op_reload(){
     try {
@@ -279,6 +343,7 @@
           else if (op.op === 'hr') op_hr();
           else if (op.op === 'setInput') op_setInput(op.inputType, op.placeholder);
           else if (op.op === 'setPrompt') op_setPrompt(op.prefix);
+          else if (op.op === 'setInputLimit') setInputLimit(op.limit);
           else if (op.op === 'reload') op_reload();
           else if (op.op === 'doorOpen') openDoorOverlay(op);
           else if (op.op === 'doorClose') teardownDoor(op && op.slug);
@@ -293,6 +358,7 @@
       if (socket !== ws) return;
       ws = null;
       teardownDoor();
+      setInputLimit(null);
       if (ev && ev.code === 4001) {
         return;
       }
@@ -444,10 +510,23 @@
     });
   }
 
+  if (input){
+    input.addEventListener('input', updatePromptDisplay);
+    input.addEventListener('keydown', function(ev){
+      if (ev.key === 'Enter' && isLimitExceeded()) {
+        ev.preventDefault();
+        ev.stopPropagation();
+      }
+    });
+  }
+
+  updatePromptDisplay();
+
   input.focus();
 
   form.addEventListener('submit', function(e){
     e.preventDefault();
+    if (isLimitExceeded()) return;
     var raw = (input.value || '').trim();
     if (!raw) return;
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -456,6 +535,7 @@
       op_print('Still reconnecting. Message not sent.', 'yellow');
     }
     input.value = '';
+    updatePromptDisplay();
     input.focus();
   });
 

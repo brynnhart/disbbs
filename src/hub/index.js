@@ -29,6 +29,14 @@ function createHub({ timeUtils, formatting }){
       },
       hr(){ _send([{ op:'hr' }]); },
       setInputType(type, placeholder){ _send([{ op:'setInput', inputType:type, placeholder }]); },
+      setInputLimit(limit){
+        let value = null;
+        if (limit !== null && typeof limit !== 'undefined'){
+          const num = Number(limit);
+          if (Number.isFinite(num) && num >= 0) value = Math.floor(num);
+        }
+        _send([{ op:'setInputLimit', limit:value }]);
+      },
       setPrompt(prefix){ _send([{ op:'setPrompt', prefix:String(prefix||'DIS>') }]); },
       openDoor(slug, options){
         const id = String(slug || '').trim();
@@ -74,6 +82,14 @@ function createHub({ timeUtils, formatting }){
           },
           hr(){ ops.push({ op:'hr' }); },
           setInputType(type, placeholder){ ops.push({ op:'setInput', inputType:type, placeholder }); },
+          setInputLimit(limit){
+            let value = null;
+            if (limit !== null && typeof limit !== 'undefined'){
+              const num = Number(limit);
+              if (Number.isFinite(num) && num >= 0) value = Math.floor(num);
+            }
+            ops.push({ op:'setInputLimit', limit:value });
+          },
           setPrompt(prefix){ ops.push({ op:'setPrompt', prefix:String(prefix||'DIS>') }); },
           openDoor(slug, options){
             const id = String(slug || '').trim();

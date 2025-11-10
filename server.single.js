@@ -1032,6 +1032,14 @@ function createHub({ timeUtils, formatting }){
       },
       hr(){ _send([{ op:'hr' }]); },
       setInputType(type, placeholder){ _send([{ op:'setInput', inputType:type, placeholder }]); },
+      setInputLimit(limit){
+        let value = null;
+        if (limit !== null && typeof limit !== 'undefined'){
+          const num = Number(limit);
+          if (Number.isFinite(num) && num >= 0) value = Math.floor(num);
+        }
+        _send([{ op:'setInputLimit', limit:value }]);
+      },
       setPrompt(prefix){ _send([{ op:'setPrompt', prefix:String(prefix||'DIS>') }]); },
       batch(fn){
         const ops = [];
@@ -1045,6 +1053,14 @@ function createHub({ timeUtils, formatting }){
           },
           hr(){ ops.push({ op:'hr' }); },
           setInputType(type, placeholder){ ops.push({ op:'setInput', inputType:type, placeholder }); },
+          setInputLimit(limit){
+            let value = null;
+            if (limit !== null && typeof limit !== 'undefined'){
+              const num = Number(limit);
+              if (Number.isFinite(num) && num >= 0) value = Math.floor(num);
+            }
+            ops.push({ op:'setInputLimit', limit:value });
+          },
           setPrompt(prefix){ ops.push({ op:'setPrompt', prefix:String(prefix||'DIS>') }); },
         };
         fn(api);
@@ -1901,6 +1917,7 @@ function renderSplash(api, state){
     b.print('or type /register <user> <pass> <invite> to create a new account.', 'dim');
      b.print('Accounts removed after 60 days of inactivity. Issues? sysop@disbbs.org', 'red');
     b.setInputType('text', 'Username or /register');
+    b.setInputLimit(null);
   });
   state.login.step='username'; state.login.tempUser='';
 }
@@ -1913,7 +1930,7 @@ function splashHandleRaw(text, api, state){
   if (state.login.step==='username'){
     if (!text){ api.print('Please enter a username.', 'dim'); return true; }
     state.login.tempUser = text;
-    api.print('Enter password:', 'cyan'); api.setInputType('password', 'Password'); state.login.step='password'; return true;
+    api.print('Enter password:', 'cyan'); api.setInputType('password', 'Password'); api.setInputLimit(null); state.login.step='password'; return true;
   }
   if (state.login.step==='password'){
     const user = verifyLogin(state.login.tempUser, text);
@@ -1942,6 +1959,7 @@ function splashHandleRaw(text, api, state){
       broadcastSystem(`${state.username} joined`);
 
       api.setInputType('text', 'Type here… try /help');
+      api.setInputLimit(null);
       api.print('Login successful.', 'green');
 
       routeGo(api, state, 'menu');
@@ -1949,7 +1967,7 @@ function splashHandleRaw(text, api, state){
     } else {
       api.print('Invalid credentials. Try again.', 'red');
       state.login.step='username'; state.login.tempUser='';
-      api.print('Enter username:', 'cyan'); api.setInputType('text','Username');
+      api.print('Enter username:', 'cyan'); api.setInputType('text','Username'); api.setInputLimit(null);
     }
     return true;
   }
@@ -2012,6 +2030,7 @@ function renderMenu(api, state){
   if (!requireAuth(api, state)) return;
   api.batch(b=>{
     b.clear();
+    b.setInputLimit(null);
     b.printHTML('<div class="banner"><div class="line"><span class="cyan">▄▄▄</span><span class="magenta"> Dead Internet Society </span><span class="cyan">▄▄▄</span></div><div class="line dim">Command Hub — use slash commands to navigate.</div></div>');
     b.print('Main Menu:', 'yellow');
     b.print('  /chat            Enter the Commons Chat', 'cyan');
@@ -2272,8 +2291,10 @@ function cmdPost(api, state, args){
 /* ======================= Chat ======================= */
 function renderChat(api, state){
   if (!requireAuth(api, state)) return;
+  const chatMaxLen = +(getSetting.get('chat_max_len')?.value || 400);
   api.batch(b=>{
     b.clear();
+    b.setInputLimit(chatMaxLen);
     b.print('== The Commons Chat ==', 'magenta');
     b.print('Topic: One big room to hang out — be kind, be weird.', 'dim'); b.hr();
 
@@ -2368,6 +2389,7 @@ function renderAbout(api, state){
   if (!requireAuth(api, state)) return;
   api.batch(b=>{
     b.clear();
+    b.setInputLimit(null);
     b.print('== About Dead Internet Society ==', 'magenta'); b.hr();
     b.print('Punk-style middle finger to the modern feed.', 'white');
     b.print('No engagement farming. No surveillance. No dopamine casinos.', 'white');
@@ -2384,6 +2406,7 @@ function renderRules(api, state){
   if (!requireAuth(api, state)) return;
   api.batch(b=>{
     b.clear();
+    b.setInputLimit(null);
     b.print('== Rules ==', 'magenta'); b.hr();
     b.print('Be kind. No bigotry. No harassment. No brigading.', 'white');
     b.print('We moderate for safety, not for virality.', 'white');
@@ -2429,6 +2452,7 @@ function renderBoard(api, state){
 
   api.batch(b=>{
     b.clear();
+    b.setInputLimit(null);
     b.print('== Message Board ==', 'magenta'); b.hr();
     if (rows.length === 0){
       b.print('No topics yet. Start one with /newtopic <title>.', 'dim');
@@ -2454,6 +2478,8 @@ function openTopic(api, state, topicId){
   state.currentScreen = 'topic';
   state.currentTopicId = topicId;
 
+  const maxLen = +(getSetting.get('topic_comment_max_len')?.value || 600);
+
   const comments = selectCommentsForTopic.all(topicId);
   const posterRaw = (t.display_name && t.display_name.trim()) ? t.display_name : (t.creator || 'anon');
   const poster = sanitizeAndFormatDIS(posterRaw);
@@ -2477,6 +2503,7 @@ function openTopic(api, state, topicId){
     b.hr();
     b.print('Type to reply. Commands: /board (back), /main', 'dim');
     b.setInputType('text', 'Type to reply… /board to go back');
+    b.setInputLimit(maxLen);
   });
 }
 function boardHandleCommand(cmd, api, state, args){
@@ -2577,6 +2604,7 @@ function renderNewsList(api, state){
   const rows = selectNewsList.all(limit);
   api.batch(b=>{
     b.clear();
+    b.setInputLimit(null);
     b.print('== DIS News ==', 'magenta'); b.hr();
     if (!rows.length){
       b.print('No news yet. Add one with /addnews <headline> <url> <tag>.', 'dim');
@@ -2605,6 +2633,8 @@ function openNewsItem(api, state, id){
   state.currentScreen = 'news:item';
   state.currentNewsId = id;
 
+  const maxLen = +(getSetting.get('news_comment_max_len')?.value || 600);
+
   const comments = selectNewsComments.all(id);
   const posterRaw = (p.display_name && p.display_name.trim()) ? p.display_name : (p.username || 'anon');
   const poster = sanitizeAndFormatDIS(posterRaw);
@@ -2629,6 +2659,7 @@ function openNewsItem(api, state, id){
     b.hr();
     b.print('Type to comment. Commands: /news (back), /main', 'dim');
     b.setInputType('text', 'Type to comment… /news to go back');
+    b.setInputLimit(maxLen);
   });
 }
 function newsListHandleCommand(cmd, api, state, args){
@@ -3398,6 +3429,7 @@ function renderAdminChat(api, state){
 
   api.batch(b=>{
     b.clear();
+    b.setInputLimit(null);
     b.print('== Admin Ops Chat ==', 'magenta');
     b.print('Private room for sysops / moderators.', 'dim'); b.hr();
 
