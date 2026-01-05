@@ -667,6 +667,7 @@ CREATE TABLE IF NOT EXISTS users (
     insertNotification,
     listNotificationsForUser,
     markAllNotificationsSeen,
+    setSetting,
   };
 
   const helpers = {

@@ -100,6 +100,7 @@ const STATUS_FEED_LIMIT_CAP = 200;
 
 const {
   getSetting,
+  setSetting,
   getUserByName,
   getUserIdByName,
   setLastLogin,
@@ -411,6 +412,7 @@ function cmdHelp(api, state){
     api.print('  /listinvites [unused|used|all]  Show recent invites', 'cyan');
     api.print('  /revokeinvite <code>        Expire an unused invite', 'cyan');
     api.print('  /removesuggestion <#>  Remove a suggestion (from the current list)', 'cyan');
+    api.print('  /retention <area> <days>   Set auto-delete retention (board/news/messages/posts/users)', 'cyan');
     api.print('  /adminchat   Admin live room (private)', 'cyan');
     api.print('  /announce <text>             Post a new announcement', 'cyan');
     api.print('  /removeannounce <id>         Remove an announcement', 'cyan');
@@ -1315,6 +1317,61 @@ function cmdRevokeInvite(api, state, args){
   api.print('Invite revoked.', 'green');
 }
 
+function cmdRetention(api, state, args){
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin){ api.print('Unknown command.', 'red'); return; }
+
+  const keys = {
+    board: 'board_inactive_days',
+    news: 'news_inactive_days',
+    messages: 'dm_retention_days',
+    dms: 'dm_retention_days',
+    posts: 'status_retention_days',
+    status: 'status_retention_days',
+    users: 'user_inactive_days',
+    accounts: 'user_inactive_days',
+  };
+
+  if (!args || !args.length){
+    api.hr();
+    api.print('Auto-delete retention (days):', 'yellow');
+    Object.entries({
+      board: keys.board,
+      news: keys.news,
+      messages: keys.messages,
+      posts: keys.posts,
+      users: keys.users,
+    }).forEach(([label, key]) => {
+      const value = Number(getSetting.get(key)?.value || 0);
+      api.print(`  ${label}: ${value} day${value === 1 ? '' : 's'}`, 'cyan');
+    });
+    api.print('Set with: /retention <board|news|messages|posts|users> <days>. Use 0 to disable.', 'dim');
+    return;
+  }
+
+  if (args.length < 2){
+    api.print('Usage: /retention <board|news|messages|posts|users> <days>', 'yellow');
+    return;
+  }
+
+  const area = String(args[0] || '').trim().toLowerCase();
+  const key = keys[area];
+  if (!key){
+    api.print('Unknown retention area. Use: board, news, messages, posts, users.', 'yellow');
+    return;
+  }
+
+  const daysRaw = Number(args[1]);
+  if (!Number.isFinite(daysRaw) || daysRaw < 0){
+    api.print('Days must be 0 or a positive number.', 'yellow');
+    return;
+  }
+
+  const days = Math.floor(daysRaw);
+  setSetting.run(key, String(days));
+  api.print(`Retention updated: ${area} → ${days} day${days === 1 ? '' : 's'}.`, 'green');
+}
+
 /* ======================= DMs, Suggestions, Invites (brevity) ======================= */
 function cmdDM(api, state, args){
   if (!requireAuth(api, state)) return;
@@ -1726,6 +1783,7 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'makeinvite':   return (cmdMakeInvite(api, state, args), true);
     case 'listinvites':  return (cmdListInvites(api, state, args), true);
     case 'revokeinvite': return (cmdRevokeInvite(api, state, args), true);
+    case 'retention':    return (cmdRetention(api, state, args), true);
     case 'register':     cmdRegister(api, state, args); return true;
 
     /* Notifications */
