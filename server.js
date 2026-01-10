@@ -62,6 +62,58 @@ if (rocko && typeof rocko.start === 'function') {
   rocko.start();
 }
 
+const aiService = (() => {
+  const fetchFn = typeof fetch === 'function' ? fetch.bind(globalThis) : null;
+  const apiKey = process.env.OPENAI_API_KEY || null;
+  const model = process.env.AI_MODEL || 'gpt-5-nano';
+  const enabled = !!(fetchFn && apiKey);
+
+  async function ask(prompt, { temperature = 0.2, maxTokens = 240 } = {}) {
+    if (!enabled) return null;
+    try {
+      const res = await fetchFn('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            {
+              role: 'system',
+              content: 'You are a concise, factual assistant for a BBS. Provide clear, informative answers in plain text without roleplay.',
+            },
+            { role: 'user', content: prompt },
+          ],
+          temperature,
+          max_completion_tokens: maxTokens,
+        }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        console.warn(`[ai] OpenAI request failed: ${res.status} ${errText}`);
+        return null;
+      }
+
+      const data = await res.json();
+      const choice = data?.choices?.[0];
+      const content = choice?.message?.content;
+      if (!content) return null;
+      return String(content).trim();
+    } catch (err) {
+      console.warn('[ai] OpenAI call failed', err);
+      return null;
+    }
+  }
+
+  return {
+    enabled,
+    ask,
+  };
+})();
+
 const {
   hub: HUB,
   sendOps,
@@ -376,6 +428,7 @@ function cmdHelp(api, state){
   api.print('Global slash commands:', 'yellow');
   api.print('  /register  Create an account: /register <user> <pass> <invite>', 'cyan');
   api.print('  /chat      Enter the Commons Chat', 'cyan');
+  api.print('  /ai <question>  Ask the AI for an informational response', 'cyan');
   api.print('  /here      Show who is currently in the chat', 'cyan');
   api.print('  /post <text>  Share a short status update (swept after ~30 days)', 'cyan');
   api.print('  /feed [user]  View recent updates (optionally for a user)', 'cyan');
@@ -423,6 +476,29 @@ function cmdHelp(api, state){
   api.print('DIS-Markdown: **bold**, _italics_, __underline__, [dim]…[/dim], and color tags like [cyan]…[/cyan].', 'dim');
 }
 
+function cmdAi(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  if (!aiService.enabled) {
+    api.print('AI is unavailable right now.', 'red');
+    return;
+  }
+  const prompt = (args || []).join(' ').trim();
+  if (!prompt) {
+    api.print('Usage: /ai <question>', 'yellow');
+    return;
+  }
+  api.print('AI is processing your input.', 'dim');
+  aiService.ask(prompt).then((reply) => {
+    if (!reply) {
+      api.print('AI did not return a response. Try again later.', 'red');
+      return;
+    }
+    api.print(reply, 'cyan');
+  }).catch(() => {
+    api.print('AI did not return a response. Try again later.', 'red');
+  });
+}
+
 /* ======================= Menu ======================= */
 function renderMenu(api, state){
   if (!requireAuth(api, state)) return;
@@ -437,6 +513,7 @@ function renderMenu(api, state){
       b.printHTML(`<span style="color:#ff6b6b;font-weight:bold;">📬 NEW DIRECT MESSAGES: ${unreadCount} unread ${label}.</span>`);
     }
     b.print('  /chat            Enter the Commons Chat', 'cyan');
+    b.print('  /ai <question>   Ask the AI for info', 'cyan');
     b.print('  /post <text>     Share a short status update', 'cyan');
     b.print('  /feed [user]     View the latest updates', 'cyan');
     b.print('  /board           Bulletin board', 'cyan');
@@ -1771,6 +1848,7 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'play':         cmdPlay(api, state, args); return true;
 
     /* DMs / Suggestions */
+    case 'ai':           cmdAi(api, state, args); return true;
     case 'post':         cmdPost(api, state, args); return true;
     case 'feed':         cmdFeed(api, state, args); return true;
     case 'dm':           cmdDM(api, state, args); return true;
