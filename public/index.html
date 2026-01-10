@@ -634,7 +634,13 @@
   }
 
   function handleInputEvent(ev){
-    if (ev && ev.target) syncInputMirror(ev.target);
+    if (ev && ev.target) {
+      var target = ev.target;
+      if (target && typeof target.value === 'string' && target.value.charAt(0) === ' ') {
+        target.value = '/' + target.value.slice(1);
+      }
+      syncInputMirror(target);
+    }
     updatePromptDisplay();
   }
 
