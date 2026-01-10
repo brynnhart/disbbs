@@ -639,6 +639,17 @@
   }
 
   function handleInputKeydown(ev){
+    if (ev.key === ' ' || ev.code === 'Space') {
+      var target = ev.target;
+      if (target && String(target.value || '').length === 0) {
+        ev.preventDefault();
+        target.value = '/';
+        syncInputMirror(target);
+        updatePromptDisplay();
+        focusInputEnd(target);
+        return;
+      }
+    }
     if (ev.key === 'Enter'){
       if (isLimitExceeded()){
         ev.preventDefault();
