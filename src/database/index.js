@@ -231,6 +231,13 @@ CREATE TABLE IF NOT EXISTS users (
      ORDER BY (m.read_at IS NULL) DESC, m.created_at DESC
      LIMIT ?
   `);
+  const countUnreadDMs = db.prepare(`
+    SELECT COUNT(*) AS count
+      FROM dm_messages m
+     WHERE m.recipient_id = ?
+       AND m.read_at IS NULL
+       AND (m.expires_at IS NULL OR m.expires_at > strftime('%s','now'))
+  `);
   const markAllDMsRead = db.prepare(`
     UPDATE dm_messages SET read_at = strftime('%s','now')
      WHERE recipient_id = ? AND read_at IS NULL
@@ -622,6 +629,7 @@ CREATE TABLE IF NOT EXISTS users (
     sweepExpiredInvites,
     insertDM,
     listDMsForUser,
+    countUnreadDMs,
     markAllDMsRead,
     sweepExpiredDMs,
     insertSuggestion,

@@ -529,19 +529,26 @@ CREATE TABLE IF NOT EXISTS users (
     VALUES (?, ?, ?, ?, ?)
   `);
     const listDMsForUser = db.prepare(`
-    SELECT m.id, m.body, m.created_at, m.read_at,
-           u.username AS sender, u.display_name, u.preferred_color
-      FROM dm_messages m
-      LEFT JOIN users u ON u.id = m.sender_id
-     WHERE m.recipient_id = ?
-       AND (m.expires_at IS NULL OR m.expires_at > strftime('%s','now'))
-     ORDER BY (m.read_at IS NULL) DESC, m.created_at DESC
-     LIMIT ?
-  `);
+      SELECT m.id, m.body, m.created_at, m.read_at,
+             u.username AS sender, u.display_name, u.preferred_color
+        FROM dm_messages m
+        LEFT JOIN users u ON u.id = m.sender_id
+       WHERE m.recipient_id = ?
+         AND (m.expires_at IS NULL OR m.expires_at > strftime('%s','now'))
+       ORDER BY (m.read_at IS NULL) DESC, m.created_at DESC
+       LIMIT ?
+    `);
+    const countUnreadDMs = db.prepare(`
+      SELECT COUNT(*) AS count
+        FROM dm_messages m
+       WHERE m.recipient_id = ?
+         AND m.read_at IS NULL
+         AND (m.expires_at IS NULL OR m.expires_at > strftime('%s','now'))
+    `);
     const markAllDMsRead = db.prepare(`
-    UPDATE dm_messages SET read_at = strftime('%s','now')
-     WHERE recipient_id = ? AND read_at IS NULL
-  `);
+      UPDATE dm_messages SET read_at = strftime('%s','now')
+       WHERE recipient_id = ? AND read_at IS NULL
+    `);
     const sweepExpiredDMs = db.prepare(`
     DELETE FROM dm_messages WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')
   `);
@@ -934,6 +941,7 @@ CREATE TABLE IF NOT EXISTS users (
       sweepExpiredInvites,
       insertDM,
       listDMsForUser,
+      countUnreadDMs,
       markAllDMsRead,
       sweepExpiredDMs,
       insertSuggestion,
@@ -1723,6 +1731,7 @@ const {
   sweepExpiredInvites,
   insertDM,
   listDMsForUser,
+  countUnreadDMs,
   markAllDMsRead,
   sweepExpiredDMs,
   insertSuggestion,
@@ -2028,11 +2037,16 @@ function cmdHelp(api, state){
 /* ======================= Menu ======================= */
 function renderMenu(api, state){
   if (!requireAuth(api, state)) return;
+  const unreadCount = countUnreadDMs.get(state.userId)?.count || 0;
   api.batch(b=>{
     b.clear();
     b.setInputLimit(null);
     b.printHTML('<div class="banner"><div class="line"><span class="cyan">▄▄▄</span><span class="magenta"> Dead Internet Society </span><span class="cyan">▄▄▄</span></div><div class="line dim">Command Hub — use slash commands to navigate.</div></div>');
     b.print('Main Menu:', 'yellow');
+    if (unreadCount > 0) {
+      const label = unreadCount === 1 ? 'message' : 'messages';
+      b.printHTML(`<span style="color:#ff6b6b;font-weight:bold;">📬 NEW DIRECT MESSAGES: ${unreadCount} unread ${label}.</span>`);
+    }
     b.print('  /chat            Enter the Commons Chat', 'cyan');
     b.print('  /post <text>     Share a short status update', 'cyan');
     b.print('  /feed [user]     View the latest updates', 'cyan');
@@ -3042,7 +3056,9 @@ function cmdMessages(api, state){
       const disp = (r.display_name && r.display_name.trim()) ? r.display_name : (r.sender || 'anon');
       const body = sanitizeAndFormatDIS(r.body);
       const colored = r.preferred_color ? `<span style="color:${r.preferred_color}">${body}</span>` : body;
-      b.printHTML(`[${escapeHTML(ts)}] &lt;${sanitizeAndFormatDIS(disp)}&gt; ${colored}`);
+      const isUnread = !r.read_at;
+      const status = isUnread ? '<span style="color:#ff6b6b;font-weight:bold;">NEW</span> ' : '';
+      b.printHTML(`${status}[${escapeHTML(ts)}] &lt;${sanitizeAndFormatDIS(disp)}&gt; ${colored}`);
     });
     b.hr(); b.print('Use /dm <user> <message> to send. /main to leave.', 'dim');
   });
