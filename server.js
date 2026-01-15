@@ -344,7 +344,6 @@ function makeInitialState(){
     userColor:null,
     displayName:null,
     currentTopicId:null,
-    currentNewsId:null,
     newsHeadlines: [],
     newsFetchedAt: null
   };
@@ -1118,15 +1117,9 @@ function cmdRemoveTopic(api, state, args){
 }
 
 /* ======================= Guardian Headlines (/news) ======================= */
-function stripHtmlTags(text){
-  if (!text) return '';
-  return String(text).replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
-}
-
 function renderNewsList(api, state, { force = false } = {}){
   if (!requireAuth(api, state)) return;
   state.currentScreen = 'news:list';
-  state.currentNewsId = null;
 
   api.batch(b=>{
     b.clear();
@@ -1136,7 +1129,7 @@ function renderNewsList(api, state, { force = false } = {}){
     b.print('Loading the latest headlines…', 'dim');
     b.hr();
     b.print('Tip: /news refresh to pull the latest.', 'cyan');
-    b.setInputType('text', 'Use /news <id> to open a headline');
+    b.setInputType('text', 'Use /news refresh to update headlines');
   });
 
   guardianService.fetchHeadlines({ force }).then((result) => {
@@ -1169,11 +1162,13 @@ function renderNewsList(api, state, { force = false } = {}){
         b.print('No headlines returned right now.', 'dim');
       } else {
         b.print('Latest stories:', 'yellow');
-        result.items.forEach((item, index) => {
-          const title = sanitizeAndFormatDIS(item.webTitle || 'Untitled');
+        result.items.forEach((item) => {
+          const title = escapeHTML(item.webTitle || 'Untitled');
           const section = item.sectionName || 'News';
           const published = item.webPublicationDate ? new Date(item.webPublicationDate).toLocaleString() : 'Unknown time';
-          b.printHTML(`${index + 1}. ${title}`);
+          const url = item.webUrl ? escapeHTML(item.webUrl) : '';
+          const link = url ? `<a class="ext-link" href="${url}" target="_blank" rel="noopener noreferrer">${title}</a>` : title;
+          b.printHTML(link);
           b.printHTML(`   <span class="dim">${escapeHTML(section)} · ${escapeHTML(published)}</span>`);
         });
       }
@@ -1183,53 +1178,9 @@ function renderNewsList(api, state, { force = false } = {}){
         const stamp = new Date(result.fetchedAt).toLocaleString();
         b.print(`Updated ${stamp}${result.cached ? ' (cached)' : ''}.`, 'dim');
       }
-      b.print('Open: /news <id>   Refresh: /news refresh   Back: /main', 'cyan');
-      b.setInputType('text', 'Use /news <id> to open a headline');
+      b.print('Refresh: /news refresh   Back: /main', 'cyan');
+      b.setInputType('text', 'Use /news refresh to update headlines');
     });
-  });
-}
-
-function openNewsItem(api, state, id){
-  if (!requireAuth(api, state)) return;
-  const index = parseInt(id, 10) - 1;
-  if (!Number.isInteger(index) || index < 0){
-    api.print('Usage: /news <id>', 'yellow');
-    return;
-  }
-  const item = state.newsHeadlines && state.newsHeadlines[index];
-  if (!item){
-    api.print('Headline not found. Use /news to refresh.', 'red');
-    return;
-  }
-
-  state.currentScreen = 'news:item';
-  state.currentNewsId = index + 1;
-
-  const title = sanitizeAndFormatDIS(item.webTitle || 'Untitled');
-  const section = item.sectionName || 'News';
-  const published = item.webPublicationDate ? new Date(item.webPublicationDate).toLocaleString() : 'Unknown time';
-  const byline = item.fields?.byline ? sanitizeAndFormatDIS(item.fields.byline) : null;
-  const trail = stripHtmlTags(item.fields?.trailText || '');
-
-  api.batch(b=>{
-    b.clear();
-    b.setInputLimit(null);
-    b.printHTML(`== Guardian #${index + 1}: ${title} ==`, 'magenta');
-    b.printHTML(`<span class="yellow">${escapeHTML(section)}</span> <span class="dim">${escapeHTML(published)}</span>`);
-    if (byline) b.printHTML(`By ${byline}`);
-    b.hr();
-    if (trail) {
-      b.printHTML(sanitizeAndFormatDIS(trail));
-    } else {
-      b.print('No summary available.', 'dim');
-    }
-    b.hr();
-    if (item.webUrl) {
-      b.printHTML(`Link: ${sanitizeAndFormatDIS(item.webUrl)}`);
-    }
-    b.hr();
-    b.print('Commands: /news (back), /news refresh, /main', 'dim');
-    b.setInputType('text', 'Use /news to go back');
   });
 }
 
@@ -1245,45 +1196,12 @@ function newsListHandleCommand(cmd, api, state, args){
       renderNewsList(api, state, { force: true });
       return true;
     }
-    const id = parseInt(first, 10);
-    if (!id){ api.print('Usage: /news <id> or /news refresh', 'yellow'); return true; }
-    openNewsItem(api, state, id);
+    api.print('Usage: /news refresh', 'yellow');
     return true;
   }
   if (cmd === 'main' || cmd === 'menu'){ routeGo(api, state, 'menu'); return true; }
   return false;
 }
-
-function newsItemHandleCommand(cmd, api, state, args){
-  if (!requireAuth(api, state)) return true;
-  if (cmd === 'news' || cmd === 'links') {
-    if (!args.length) {
-      renderNewsList(api, state);
-      return true;
-    }
-    const first = String(args[0]).toLowerCase();
-    if (first === 'refresh') {
-      renderNewsList(api, state, { force: true });
-      return true;
-    }
-    const id = parseInt(first, 10);
-    if (!id){ api.print('Usage: /news <id> or /news refresh', 'yellow'); return true; }
-    openNewsItem(api, state, id);
-    return true;
-  }
-  if (cmd === 'main' || cmd === 'menu'){ routeGo(api, state, 'menu'); return true; }
-  return false;
-}
-
-function newsItemHandleRaw(text, api, state){
-  if (!requireAuth(api, state)) return true;
-  const body = (text || '').trim();
-  if (!body) return true;
-  api.print('Use /news to return to the list or /main for the menu.', 'dim');
-  return true;
-}
-
-
 
 function cmdAddNews(api, state, args){
   if (!requireAuth(api, state)) return;
@@ -1896,22 +1814,26 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'links':
       if (args.length && String(args[0]).toLowerCase() === 'refresh') {
         renderNewsList(api, state, { force: true });
-      } else if (args.length) {
-        openNewsItem(api, state, parseInt(args[0],10)||0);
-      } else {
-        renderNewsList(api, state);
+        return true;
       }
+      if (args.length) {
+        api.print('Usage: /news refresh', 'yellow');
+        return true;
+      }
+      renderNewsList(api, state);
       return true;
     case 'addlink':      cmdAddNews(api, state, args); return true;
     case 'removelink':   cmdRemoveNews(api, state, args); return true;
     case 'news':
       if (args.length && String(args[0]).toLowerCase() === 'refresh') {
         renderNewsList(api, state, { force: true });
-      } else if (args.length) {
-        openNewsItem(api, state, parseInt(args[0],10)||0);
-      } else {
-        renderNewsList(api, state);
+        return true;
       }
+      if (args.length) {
+        api.print('Usage: /news refresh', 'yellow');
+        return true;
+      }
+      renderNewsList(api, state);
       return true;
     case 'addnews':      cmdAddNews(api, state, args); return true;
     case 'removenews':   cmdRemoveNews(api, state, args); return true;
@@ -2040,7 +1962,6 @@ wss.on('connection', (ws) => {
         || (state.currentScreen === 'adminchat'  && adminChatHandleCommand && adminChatHandleCommand(cmd, api, state, args))
         || (state.currentScreen === 'topic'      && topicHandleCommand && topicHandleCommand(cmd, api, state, args))
         || (state.currentScreen === 'news:list'  && newsListHandleCommand && newsListHandleCommand(cmd, api, state, args))
-        || (state.currentScreen === 'news:item'  && newsItemHandleCommand && newsItemHandleCommand(cmd, api, state, args))
         || false;
 
       if (localHandled) return;
@@ -2054,7 +1975,6 @@ wss.on('connection', (ws) => {
     if (state.currentScreen === 'chat')       { chatHandleRaw && chatHandleRaw(raw, api, state);     return; }
     if (state.currentScreen === 'adminchat')  { adminChatHandleRaw && adminChatHandleRaw(raw, api, state); return; }
     if (state.currentScreen === 'topic')      { topicHandleRaw && topicHandleRaw(raw, api, state);   return; }
-    if (state.currentScreen === 'news:item')  { newsItemHandleRaw && newsItemHandleRaw(raw, api, state); return; }
     if (state.currentScreen === 'board')      { api.print('Use /topic <id> or /newtopic <title>.', 'dim'); return; }
 
     // Fallback
