@@ -2682,7 +2682,6 @@ function normalizeURL(u){
   try { const url = new URL(u.includes('://') ? u : 'https://' + u); return url.toString(); }
   catch { return null; }
 }
-function truncateUrl(u, max){ if (!u) return ''; return u.length<=max ? u : (u.slice(0, max-1)+'…'); }
 
 function renderNewsList(api, state){
   if (!requireAuth(api, state)) return;
@@ -2700,9 +2699,10 @@ function renderNewsList(api, state){
         const posterRaw = (r.display_name && r.display_name.trim()) ? r.display_name : (r.username || 'anon');
         const poster = sanitizeAndFormatDIS(posterRaw);
         const safeTitle = sanitizeAndFormatDIS(r.title);
-        const urlShown = truncateUrl(r.url, 80);
-        b.printHTML(`${r.id}. ${safeTitle}`);
-        b.printHTML(`   <span class="dim">${escapeHTML(urlShown)}</span>  by &lt;${poster}&gt;  <span class="dim">(${r.comments} comments)</span>`);
+        const normalizedUrl = normalizeURL(r.url) || r.url;
+        const safeUrl = escapeHTML(normalizedUrl);
+        b.printHTML(`${r.id}. <a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeTitle}</a>`);
+        b.printHTML(`   by &lt;${poster}&gt;  <span class="dim">(${r.comments} comments)</span>`);
       });
     }
     b.hr();
