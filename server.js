@@ -480,6 +480,7 @@ function cmdHelp(api, state){
   api.print('  /here      Show who is currently in the chat', 'cyan');
   api.print('  /post <text>  Share a short status update (swept after ~30 days)', 'cyan');
   api.print('  /feed [user]  View recent updates (optionally for a user)', 'cyan');
+  api.print('  /links     Browse community-shared links', 'cyan');
   api.print('  /news      View Guardian headlines', 'cyan');
   api.print('  /games     Door games status (coming soon)', 'cyan');
   api.print('  /dm        Send a direct message: /dm <user> <message>', 'cyan');
@@ -566,6 +567,7 @@ function renderMenu(api, state){
     b.print('  /post <text>     Share a short status update', 'cyan');
     b.print('  /feed [user]     View the latest updates', 'cyan');
     b.print('  /board           Bulletin board', 'cyan');
+    b.print('  /links           Community link share', 'cyan');
     b.print('  /news            Guardian headlines', 'cyan');
     b.print('  /games           Door games (coming soon)', 'cyan');
     b.print('  /messages        View your direct messages', 'cyan');
@@ -579,7 +581,7 @@ function renderMenu(api, state){
     b.print('For a full list of commands use /help command.', 'dim');
   });
 }
-function menuHandleRaw(text, api){ api.print('Use slash commands here. Try /chat, /board, /news or /help.', 'dim'); return true; }
+function menuHandleRaw(text, api){ api.print('Use slash commands here. Try /chat, /board, /links, /news or /help.', 'dim'); return true; }
 
 /* ======================= Announcements ======================= */
 function fetchActiveAnnouncements(){
@@ -1117,7 +1119,7 @@ function cmdRemoveTopic(api, state, args){
 }
 
 /* ======================= Guardian Headlines (/news) ======================= */
-function renderNewsList(api, state, { force = false } = {}){
+function renderGuardianList(api, state, { force = false } = {}){
   if (!requireAuth(api, state)) return;
   state.currentScreen = 'news:list';
 
@@ -1184,16 +1186,16 @@ function renderNewsList(api, state, { force = false } = {}){
   });
 }
 
-function newsListHandleCommand(cmd, api, state, args){
+function guardianListHandleCommand(cmd, api, state, args){
   if (!requireAuth(api, state)) return true;
-  if (cmd === 'news' || cmd === 'links'){
+  if (cmd === 'news'){
     if (!args.length){
-      renderNewsList(api, state);
+      renderGuardianList(api, state);
       return true;
     }
     const first = String(args[0]).toLowerCase();
     if (first === 'refresh') {
-      renderNewsList(api, state, { force: true });
+      renderGuardianList(api, state, { force: true });
       return true;
     }
     api.print('Usage: /news refresh', 'yellow');
@@ -1203,13 +1205,143 @@ function newsListHandleCommand(cmd, api, state, args){
   return false;
 }
 
-function cmdAddNews(api, state, args){
-  if (!requireAuth(api, state)) return;
-  api.print('Community link sharing is retired. Use /news for Guardian headlines.', 'yellow');
+/* ======================= Link Share (/links) ======================= */
+function normalizeURL(u){
+  try { const url = new URL(u.includes('://') ? u : 'https://' + u); return url.toString(); }
+  catch { return null; }
 }
-function cmdRemoveNews(api, state, args){
+
+function renderLinksList(api, state){
   if (!requireAuth(api, state)) return;
-  api.print('Community link removal is disabled. Use /news for Guardian headlines.', 'yellow');
+  const limit = +(getSetting.get('news_list_limit')?.value || 150);
+  const rows = selectNewsList.all(limit);
+  api.batch(b=>{
+    b.clear();
+    b.setInputLimit(null);
+    b.print('== Link Share ==', 'magenta'); b.hr();
+    if (!rows.length){
+      b.print('No links yet. Add one with /addlink <headline> <url>.', 'dim');
+    } else {
+      b.print('Recent links (most recently active first):', 'yellow');
+      rows.forEach(r=>{
+        const posterRaw = (r.display_name && r.display_name.trim()) ? r.display_name : (r.username || 'anon');
+        const poster = sanitizeAndFormatDIS(posterRaw);
+        const safeTitle = sanitizeAndFormatDIS(r.title);
+        const safeUrl = escapeHTML(r.url);
+        const linkedTitle = `<a class="ext-link" href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeTitle}</a>`;
+        b.printHTML(`${r.id}. ${linkedTitle}`);
+        b.printHTML(`   by &lt;${poster}&gt;  <span class="dim">(${r.comments} comments)</span>`);
+      });
+    }
+    b.hr();
+    b.print('Open: /links <id>    Add: /addlink <headline> <url>    Remove (admin): /removelink <id>', 'cyan');
+    b.setInputType('text', 'Use /links <id> or /addlink <headline> <url>');
+  });
+  state.currentScreen = 'links:list';
+  state.currentNewsId = null;
+}
+
+function openLinkItem(api, state, id){
+  const p = selectNewsPost.get(id);
+  if (!p){ api.print('No such link (maybe expired).', 'red'); return; }
+  state.currentScreen = 'links:item';
+  state.currentNewsId = id;
+
+  const maxLen = +(getSetting.get('news_comment_max_len')?.value || 600);
+
+  const comments = selectNewsComments.all(id);
+  const posterRaw = (p.display_name && p.display_name.trim()) ? p.display_name : (p.username || 'anon');
+  const poster = sanitizeAndFormatDIS(posterRaw);
+
+  api.batch(b=>{
+    b.clear();
+    b.printHTML(`== Link #${p.id}: ${sanitizeAndFormatDIS(p.title)} ==`, 'magenta');
+    b.printHTML(`<span class="dim">${escapeHTML(p.url)}</span>  by &lt;${poster}&gt;`);
+    b.hr();
+    if (!comments.length){
+      b.print('No comments yet. Type to comment.', 'dim');
+    } else {
+      comments.forEach(c=>{
+        const ts = new Date(c.created_at*1000).toLocaleString();
+        const authorRaw = (c.display_name && c.display_name.trim()) ? c.display_name : (c.username || 'anon');
+        const author = sanitizeAndFormatDIS(authorRaw);
+        const body = sanitizeAndFormatDIS(c.body);
+        const colored = c.preferred_color ? `<span style="color:${c.preferred_color}">${body}</span>` : body;
+        b.printHTML(`[${escapeHTML(ts)}] &lt;${author}&gt; ${colored}`);
+      });
+    }
+    b.hr();
+    b.print('Type to comment. Commands: /links (back), /main', 'dim');
+    b.setInputType('text', 'Type to comment… /links to go back');
+    b.setInputLimit(maxLen);
+  });
+}
+
+function linksListHandleCommand(cmd, api, state, args){
+  if (!requireAuth(api, state)) return true;
+  if (cmd === 'links' && args.length){
+    const id = parseInt(args[0], 10);
+    if (!id){ api.print('Usage: /links <id>', 'yellow'); return true; }
+    openLinkItem(api, state, id); return true;
+  }
+  if (cmd === 'main' || cmd === 'menu'){ routeGo(api, state, 'menu'); return true; }
+  return false;
+}
+
+function linkItemHandleRaw(text, api, state){
+  if (!requireAuth(api, state)) return true;
+  const body = (text||'').trim(); if (!body) return true;
+  const newsId = state.currentNewsId;
+  if (!newsId){ api.print('No link open.', 'red'); return true; }
+
+  const max = +(getSetting.get('news_comment_max_len')?.value || 600);
+  if (visibleLengthDIS(body) > max){ api.print(`Too long (max ${max} visible chars).`, 'red'); return true; }
+
+  const ts = nowEpoch();
+  insertNewsComment.run(newsId, state.userId || null, body, ts);
+
+  const days = +(getSetting.get('news_inactive_days')?.value || 30);
+  bumpNewsPost.run(ts, ts + days*86400, newsId);
+
+  openLinkItem(api, state, newsId);
+
+  const fromRow = { id: state.userId || null, username: state.username };
+  notifyMentions(body, fromRow, `news:${newsId}`);
+
+  return true;
+}
+
+function cmdAddLink(api, state, args){
+  if (!requireAuth(api, state)) return;
+  const raw = (args||[]).join(' ').trim();
+  if (!raw){ api.print('Usage: /addlink <headline> <url>', 'yellow'); return; }
+  const parts = raw.split(/\s+/);
+  if (parts.length < 2){ api.print('Usage: /addlink <headline> <url>', 'yellow'); return; }
+  const urlIn = parts.pop();
+  const headline = parts.join(' ').trim();
+
+  const maxLen = +(getSetting.get('news_title_max_len')?.value || 120);
+  if (visibleLengthDIS(headline) > maxLen){ api.print(`Headline too long (max ${maxLen} visible chars).`, 'red'); return; }
+  if (!headline){ api.print('Headline required.', 'yellow'); return; }
+  const url = normalizeURL(urlIn);
+  if (!url){ api.print('Invalid URL. Example: example.com or https://example.com/article', 'red'); return; }
+
+  const ts = nowEpoch();
+  const days = +(getSetting.get('news_inactive_days')?.value || 30);
+  insertNewsPost.run(headline, url, 'link', state.userId || null, ts, ts, ts + days*86400);
+  api.print('Link added.', 'green');
+  renderLinksList(api, state);
+}
+function cmdRemoveLink(api, state, args){
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin){ api.print('Admin only.', 'red'); return; }
+  const id = parseInt(args[0], 10);
+  if (!id){ api.print('Usage: /removelink <id>', 'yellow'); return; }
+  deleteNewsById.run(id);
+  api.print(`Removed link #${id}.`, 'green');
+  if (state.currentScreen && state.currentScreen.startsWith('links') && state.currentNewsId === id){
+    renderLinksList(api, state);
+  }
 }
 
 /* ======================= Profiles (/aboutme, /profile) ======================= */
@@ -1812,31 +1944,31 @@ function handleGlobalCommand(cmd, api, state, args){
 
     /* Links */
     case 'links':
-      if (args.length && String(args[0]).toLowerCase() === 'refresh') {
-        renderNewsList(api, state, { force: true });
+      if (!args.length) {
+        renderLinksList(api, state);
         return true;
       }
-      if (args.length) {
-        api.print('Usage: /news refresh', 'yellow');
+      {
+        const id = parseInt(args[0], 10);
+        if (!id){ api.print('Usage: /links <id>', 'yellow'); return true; }
+        openLinkItem(api, state, id);
         return true;
       }
-      renderNewsList(api, state);
-      return true;
-    case 'addlink':      cmdAddNews(api, state, args); return true;
-    case 'removelink':   cmdRemoveNews(api, state, args); return true;
+    case 'addlink':      cmdAddLink(api, state, args); return true;
+    case 'removelink':   cmdRemoveLink(api, state, args); return true;
     case 'news':
       if (args.length && String(args[0]).toLowerCase() === 'refresh') {
-        renderNewsList(api, state, { force: true });
+        renderGuardianList(api, state, { force: true });
         return true;
       }
       if (args.length) {
         api.print('Usage: /news refresh', 'yellow');
         return true;
       }
-      renderNewsList(api, state);
+      renderGuardianList(api, state);
       return true;
-    case 'addnews':      cmdAddNews(api, state, args); return true;
-    case 'removenews':   cmdRemoveNews(api, state, args); return true;
+    case 'addnews':      cmdAddLink(api, state, args); return true;
+    case 'removenews':   cmdRemoveLink(api, state, args); return true;
 
     /* Doors / Games */
     case 'games':        cmdGames(api, state); return true;
@@ -1961,7 +2093,8 @@ wss.on('connection', (ws) => {
         || (state.currentScreen === 'chat'       && chatHandleCommand && chatHandleCommand(cmd, api, state, args))
         || (state.currentScreen === 'adminchat'  && adminChatHandleCommand && adminChatHandleCommand(cmd, api, state, args))
         || (state.currentScreen === 'topic'      && topicHandleCommand && topicHandleCommand(cmd, api, state, args))
-        || (state.currentScreen === 'news:list'  && newsListHandleCommand && newsListHandleCommand(cmd, api, state, args))
+        || (state.currentScreen === 'news:list'  && guardianListHandleCommand && guardianListHandleCommand(cmd, api, state, args))
+        || (state.currentScreen === 'links:list' && linksListHandleCommand && linksListHandleCommand(cmd, api, state, args))
         || false;
 
       if (localHandled) return;
@@ -1975,6 +2108,7 @@ wss.on('connection', (ws) => {
     if (state.currentScreen === 'chat')       { chatHandleRaw && chatHandleRaw(raw, api, state);     return; }
     if (state.currentScreen === 'adminchat')  { adminChatHandleRaw && adminChatHandleRaw(raw, api, state); return; }
     if (state.currentScreen === 'topic')      { topicHandleRaw && topicHandleRaw(raw, api, state);   return; }
+    if (state.currentScreen === 'links:item') { linkItemHandleRaw && linkItemHandleRaw(raw, api, state); return; }
     if (state.currentScreen === 'board')      { api.print('Use /topic <id> or /newtopic <title>.', 'dim'); return; }
 
     // Fallback
