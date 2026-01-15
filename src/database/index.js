@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS board_comments (
 );
 CREATE INDEX IF NOT EXISTS idx_board_comments_topic_created ON board_comments(topic_id, created_at);
 
-/* News (posts & comments) */
+/* Links (posts & comments) */
 CREATE TABLE IF NOT EXISTS news_posts (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,
   title             TEXT NOT NULL,

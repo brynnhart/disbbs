@@ -14,7 +14,7 @@ function createNotificationService({ statements, helpers, hub, timeUtils }){
     const mTopic = /^topic:(\d+)$/.exec(ctx);
     if (mTopic) return `Topic #${mTopic[1]}`;
     const mNews = /^news:(\d+)$/.exec(ctx);
-    if (mNews) return `News #${mNews[1]}`;
+    if (mNews) return `Link #${mNews[1]}`;
     return ctx;
   }
 
