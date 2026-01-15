@@ -417,7 +417,7 @@ function cmdHelp(api, state){
   api.print('Global slash commands:', 'yellow');
   api.print('  /register  Create an account: /register <user> <pass> <invite>', 'cyan');
   api.print('  /chat      Enter the Commons Chat', 'cyan');
-  api.print('  /ai <question>  Ask the AI for an informational response', 'cyan');
+  //api.print('  /ai <question>  Ask the AI for an informational response', 'cyan');
   api.print('  /here      Show who is currently in the chat', 'cyan');
   api.print('  /post <text>  Share a short status update (swept after ~30 days)', 'cyan');
   api.print('  /feed [user]  View recent updates (optionally for a user)', 'cyan');
