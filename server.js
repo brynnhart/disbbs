@@ -3,6 +3,7 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 
 const { createDatabase } = require('./src/database');
 const { createHub } = require('./src/hub');
@@ -13,8 +14,13 @@ const timeUtils = require('./src/utils/time');
 
 const DB_PATH = process.env.DB_PATH || './dis.sqlite3';
 const PORT = process.env.PORT || 3000;
+// Required for signing SSO cookies shared across subdomains.
+const SSO_SECRET = process.env.SSO_SECRET || null;
+const AUTH_TOKEN_TTL_MS = 60 * 1000;
+const AUTH_TOKENS = new Map();
 
 const app = express();
+app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/ws' });
@@ -224,6 +230,83 @@ function printDayDivider(batchApi, epochSec){
   batchApi.printHTML(`<span class="dim">── ${escapeHTML(label)} ──</span>`);
 }
 
+function makeAuthToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function base64UrlEncode(input) {
+  return Buffer.from(input).toString('base64url');
+}
+
+function base64UrlDecode(input) {
+  return Buffer.from(input, 'base64url').toString('utf8');
+}
+
+function constantTimeEqual(a, b) {
+  if (!Buffer.isBuffer(a)) a = Buffer.from(a);
+  if (!Buffer.isBuffer(b)) b = Buffer.from(b);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+function signAuthPayload(payload) {
+  if (!SSO_SECRET) {
+    throw new Error('SSO_SECRET is required to sign auth cookies');
+  }
+  const body = base64UrlEncode(JSON.stringify(payload));
+  const signature = crypto.createHmac('sha256', SSO_SECRET).update(body).digest();
+  return `${body}.${signature.toString('base64url')}`;
+}
+
+function verifyAuthCookie(cookieValue) {
+  if (!cookieValue || typeof cookieValue !== 'string') return null;
+  const parts = cookieValue.split('.');
+  if (parts.length !== 2) return null;
+  const [body, signature] = parts;
+  if (!body || !signature) return null;
+  if (!SSO_SECRET) {
+    throw new Error('SSO_SECRET is required to verify auth cookies');
+  }
+  let sigBuf;
+  try {
+    sigBuf = Buffer.from(signature, 'base64url');
+  } catch (err) {
+    return null;
+  }
+  const expected = crypto.createHmac('sha256', SSO_SECRET).update(body).digest();
+  if (!constantTimeEqual(sigBuf, expected)) return null;
+  try {
+    const payload = JSON.parse(base64UrlDecode(body));
+    if (!payload || typeof payload.uid !== 'number' || typeof payload.u !== 'string') return null;
+    return payload;
+  } catch (err) {
+    return null;
+  }
+}
+
+function getCookie(req, name) {
+  const header = req.headers && req.headers.cookie;
+  if (!header) return null;
+  const parts = header.split(';');
+  for (const part of parts) {
+    const [rawKey, ...rest] = part.split('=');
+    if (!rawKey) continue;
+    const key = rawKey.trim();
+    if (key !== name) continue;
+    return rest.join('=').trim();
+  }
+  return null;
+}
+
+const SSO_COOKIE_OPTIONS = {
+  domain: '.disbbs.org',
+  path: '/',
+  httpOnly: true,
+  secure: true,
+  sameSite: 'lax',
+  maxAge: 14 * 24 * 60 * 60 * 1000,
+};
+
 /* ======================= SVG Splash ======================= */
 function splashSVG(){
   return [
@@ -381,6 +464,16 @@ function splashHandleRaw(text, api, state){
       state.userId   = user.id;
       state.username = user.username; // canonical case
       state.isAdmin  = !!user.is_admin;
+      const authToken = makeAuthToken();
+      AUTH_TOKENS.set(authToken, {
+        userId: state.userId,
+        username: state.username,
+        isAdmin: state.isAdmin,
+        expMs: Date.now() + AUTH_TOKEN_TTL_MS,
+      });
+      if (api && api.ws) {
+        sendOps(api.ws, [{ op: 'auth', token: authToken }]);
+      }
 
       // ensure normalization columns are up-to-date for this user
     
@@ -2167,7 +2260,78 @@ function adminChatHandleRaw(text, api, state){
   return true;
 }
 
+app.post('/api/auth/complete', (req, res) => {
+  if (!SSO_SECRET) {
+    res.status(500).json({ ok: false, error: 'SSO_SECRET is not set' });
+    return;
+  }
+  const token = req.body && typeof req.body.token === 'string' ? req.body.token : null;
+  if (!token) {
+    res.status(401).json({ ok: false });
+    return;
+  }
+  const record = AUTH_TOKENS.get(token);
+  if (!record) {
+    res.status(401).json({ ok: false });
+    return;
+  }
+  AUTH_TOKENS.delete(token);
+  if (record.expMs <= Date.now()) {
+    res.status(401).json({ ok: false });
+    return;
+  }
+  let cookieValue;
+  try {
+    cookieValue = signAuthPayload({
+      uid: record.userId,
+      u: record.username,
+      a: !!record.isAdmin,
+      iat: Math.floor(Date.now() / 1000),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false });
+    return;
+  }
+  res.cookie('disbbs_auth', cookieValue, SSO_COOKIE_OPTIONS);
+  res.json({ ok: true });
+});
 
+app.post('/api/logout', (req, res) => {
+  res.clearCookie('disbbs_auth', {
+    domain: SSO_COOKIE_OPTIONS.domain,
+    path: SSO_COOKIE_OPTIONS.path,
+    httpOnly: SSO_COOKIE_OPTIONS.httpOnly,
+    secure: SSO_COOKIE_OPTIONS.secure,
+    sameSite: SSO_COOKIE_OPTIONS.sameSite,
+  });
+  res.json({ ok: true });
+});
+
+app.get('/api/me', (req, res) => {
+  const cookieValue = getCookie(req, 'disbbs_auth');
+  if (!cookieValue) {
+    res.json({ user: null });
+    return;
+  }
+  let payload;
+  try {
+    payload = verifyAuthCookie(cookieValue);
+  } catch (err) {
+    res.status(500).json({ user: null });
+    return;
+  }
+  if (!payload) {
+    res.json({ user: null });
+    return;
+  }
+  res.json({
+    user: {
+      id: payload.uid,
+      username: payload.u,
+      isAdmin: !!payload.a,
+    },
+  });
+});
 
 app.get('/healthz', (req, res) => {
   // Liveness only — don't touch DB or do any work
