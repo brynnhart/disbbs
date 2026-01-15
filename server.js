@@ -502,7 +502,7 @@ function renderMenu(api, state){
       b.printHTML(`<span style="color:#ff6b6b;font-weight:bold;">📬 NEW DIRECT MESSAGES: ${unreadCount} unread ${label}.</span>`);
     }
     b.print('  /chat            Enter the Commons Chat', 'cyan');
-    b.print('  /ai <question>   Ask the AI for info', 'cyan');
+    //b.print('  /ai <question>   Ask the AI for info', 'cyan');
     b.print('  /post <text>     Share a short status update', 'cyan');
     b.print('  /feed [user]     View the latest updates', 'cyan');
     b.print('  /board           Bulletin board', 'cyan');
