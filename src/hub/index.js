@@ -38,38 +38,6 @@ function createHub({ timeUtils, formatting }){
         _send([{ op:'setInputLimit', limit:value }]);
       },
       setPrompt(prefix){ _send([{ op:'setPrompt', prefix:String(prefix||'DIS>') }]); },
-      openDoor(slug, options){
-        const id = String(slug || '').trim();
-        if (!id) return;
-        const opts = options || {};
-        const op = { op:'doorOpen', slug:id };
-        if (opts.title) op.title = String(opts.title);
-        if (opts.hint) op.hint = String(opts.hint);
-        if (opts.mountId) op.mountId = String(opts.mountId);
-        if (opts.width) {
-          const w = parseInt(opts.width, 10);
-          if (!Number.isNaN(w)) op.width = Math.max(240, Math.min(1920, w));
-        }
-        if (opts.height) {
-          const h = parseInt(opts.height, 10);
-          if (!Number.isNaN(h)) op.height = Math.max(180, Math.min(1080, h));
-        }
-        const doorOpts = { ...(opts.doorOpts || {}) };
-        if (op.width && !('width' in doorOpts)) doorOpts.width = op.width;
-        if (op.height && !('height' in doorOpts)) doorOpts.height = op.height;
-        if (Object.keys(doorOpts).length) op.doorOpts = doorOpts;
-        _send([op]);
-      },
-      closeDoor(slug){
-        const id = String(slug || '').trim();
-        if (!id) return;
-        _send([{ op:'doorClose', slug:id }]);
-      },
-      sendDoorEvent(slug, payload){
-        const id = String(slug || '').trim();
-        if (!id) return;
-        _send([{ op:'doorEvent', slug:id, payload }]);
-      },
       batch(fn){
         const ops = [];
         const api = {
@@ -91,38 +59,6 @@ function createHub({ timeUtils, formatting }){
             ops.push({ op:'setInputLimit', limit:value });
           },
           setPrompt(prefix){ ops.push({ op:'setPrompt', prefix:String(prefix||'DIS>') }); },
-          openDoor(slug, options){
-            const id = String(slug || '').trim();
-            if (!id) return;
-            const opts = options || {};
-            const op = { op:'doorOpen', slug:id };
-            if (opts.title) op.title = String(opts.title);
-            if (opts.hint) op.hint = String(opts.hint);
-            if (opts.mountId) op.mountId = String(opts.mountId);
-            if (opts.width) {
-              const w = parseInt(opts.width, 10);
-              if (!Number.isNaN(w)) op.width = Math.max(240, Math.min(1920, w));
-            }
-            if (opts.height) {
-              const h = parseInt(opts.height, 10);
-              if (!Number.isNaN(h)) op.height = Math.max(180, Math.min(1080, h));
-            }
-            const doorOpts = { ...(opts.doorOpts || {}) };
-            if (op.width && !('width' in doorOpts)) doorOpts.width = op.width;
-            if (op.height && !('height' in doorOpts)) doorOpts.height = op.height;
-            if (Object.keys(doorOpts).length) op.doorOpts = doorOpts;
-            ops.push(op);
-          },
-          closeDoor(slug){
-            const id = String(slug || '').trim();
-            if (!id) return;
-            ops.push({ op:'doorClose', slug:id });
-          },
-          sendDoorEvent(slug, payload){
-            const id = String(slug || '').trim();
-            if (!id) return;
-            ops.push({ op:'doorEvent', slug:id, payload });
-          },
         };
         fn(api);
         _send(ops);

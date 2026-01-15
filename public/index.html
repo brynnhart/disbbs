@@ -63,22 +63,6 @@
   border-left: 2px solid var(--accent);
   padding-left: 8px;
 }
-  .door-overlay[hidden]{display:none !important;}
-  .door-overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);z-index:2200;opacity:0;pointer-events:none;transition:opacity .18s ease;}
-  .door-overlay.visible{opacity:1;pointer-events:auto;}
-  .door-modal{--door-width:760px;--door-height:560px;background:linear-gradient(180deg,#0c0c0c 0%,#050505 100%);border:1px solid #151515;border-radius:14px;box-shadow:0 32px 64px rgba(0,0,0,0.55);width:min(94vw,var(--door-width));max-height:min(92vh,var(--door-height));display:flex;flex-direction:column;overflow:hidden;transform:translateY(12px);transition:transform .22s ease,box-shadow .22s ease;}
-  .door-overlay.visible .door-modal{transform:translateY(0);box-shadow:0 38px 72px rgba(0,0,0,0.6);}
-  .door-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid #1a1a1a;background:linear-gradient(180deg,#151515 0%,#0d0d0d 100%);}
-  .door-title{font-size:16px;font-weight:600;letter-spacing:.6px;color:var(--fg);}
-  .door-close{appearance:none;border:1px solid #222;background:#111;color:var(--fg);padding:7px 16px;border-radius:6px;cursor:pointer;font:inherit;letter-spacing:.4px;transition:background .16s ease,border-color .16s ease,transform .16s ease;}
-  .door-close:hover{border-color:#2d2d2d;background:#181818;}
-  .door-close:active{transform:translateY(1px);}
-  .door-body{padding:18px;display:flex;flex-direction:column;gap:14px;background:#080808;flex:1 1 auto;overflow:hidden;}
-  .door-mount-wrap{flex:1 1 auto;display:flex;align-items:center;justify-content:center;padding:14px;background:radial-gradient(circle at 50% 32%,rgba(25,195,195,0.14),rgba(5,5,5,0.92));border:1px solid #141414;border-radius:10px;min-height:240px;box-shadow:inset 0 0 22px rgba(0,0,0,0.45);}
-  .door-mount{display:flex;align-items:center;justify-content:center;}
-  .door-mount canvas{display:block;max-width:100%;height:auto;image-rendering:pixelated;}
-  .door-hint{font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#8a8a8a;padding:0 2px;}
-  body.door-open .app{filter:blur(0);}
 </style>
 </head>
 <body>
@@ -102,20 +86,6 @@
     </div>
   </div>
 
-  <div id="doorOverlay" class="door-overlay" hidden aria-hidden="true">
-    <div id="doorModal" class="door-modal" role="dialog" aria-modal="true" aria-labelledby="doorTitle" aria-describedby="doorHint">
-      <div class="door-header">
-        <div id="doorTitle" class="door-title">Door</div>
-        <button type="button" id="doorClose" class="door-close">Close</button>
-      </div>
-      <div class="door-body">
-        <div id="doorMountWrap" class="door-mount-wrap"></div>
-        <div id="doorHint" class="door-hint" hidden></div>
-      </div>
-    </div>
-  </div>
-
-<script src="/doors/doors-runtime.js"></script>
 <script>
 (function(){
   var term  = document.getElementById('terminal');
@@ -133,13 +103,6 @@
   var promptLabel = promptDefault;
   var inputLimit = null;
   var isExpandedInput = false;
-  var doorOverlay = document.getElementById('doorOverlay');
-  var doorModal = document.getElementById('doorModal');
-  var doorMountWrap = document.getElementById('doorMountWrap');
-  var doorTitleEl = document.getElementById('doorTitle');
-  var doorHintEl = document.getElementById('doorHint');
-  var doorCloseBtn = document.getElementById('doorClose');
-  var activeDoor = null;
 
   if (singleInput && textareaInput){
     textareaInput.value = singleInput.value || '';
@@ -450,9 +413,6 @@
           else if (op.op === 'setPrompt') op_setPrompt(op.prefix);
           else if (op.op === 'setInputLimit') setInputLimit(op.limit);
           else if (op.op === 'reload') op_reload();
-          else if (op.op === 'doorOpen') openDoorOverlay(op);
-          else if (op.op === 'doorClose') teardownDoor(op && op.slug);
-          else if (op.op === 'doorEvent') dispatchDoorEvent(op);
           else if (op.op === 'audio') op_audio(op.src, op.volume);
           else if (op.op === 'beep') op_beep(op.kind);
         });
@@ -462,7 +422,6 @@
     socket.addEventListener('close', function(ev){
       if (socket !== ws) return;
       ws = null;
-      teardownDoor();
       setInputLimit(null);
       if (ev && ev.code === 4001) {
         return;
@@ -485,135 +444,6 @@
       scheduleReconnect(true);
     }
   });
-
-  function doorRuntimeAvailable(){ return !!(window.DDR && typeof window.DDR.openDoor === 'function'); }
-
-  function clampDimension(value, min, max){
-    var n = Number(value);
-    if (!Number.isFinite(n)) return null;
-    return Math.max(min, Math.min(max, Math.round(n)));
-  }
-
-  function openDoorOverlay(op){
-    if (!op || !doorOverlay || !doorMountWrap) return;
-    var slug = String(op.slug || '').trim();
-    if (!slug) return;
-    var prevFocus = document.activeElement && typeof document.activeElement.focus === 'function'
-      ? document.activeElement
-      : null;
-    activeDoor = { slug: slug, prevFocus: prevFocus };
-
-    var doorWidth = clampDimension(op.width, 240, 1920);
-    var doorHeight = clampDimension(op.height, 180, 1080);
-    var modalWidth = doorWidth != null ? clampDimension(doorWidth + 120, 360, 1480) : null;
-    var modalHeight = doorHeight != null ? clampDimension(doorHeight + 200, 360, 1120) : null;
-
-    if (doorModal) {
-      if (modalWidth != null) doorModal.style.setProperty('--door-width', modalWidth + 'px');
-      else doorModal.style.removeProperty('--door-width');
-      if (modalHeight != null) doorModal.style.setProperty('--door-height', modalHeight + 'px');
-      else doorModal.style.removeProperty('--door-height');
-    }
-
-    doorMountWrap.innerHTML = '';
-    var mount = document.createElement('div');
-    mount.className = 'door-mount';
-    var mountId = (typeof op.mountId === 'string' && op.mountId.trim()) ? op.mountId.trim() : 'door-modal-mount';
-    mount.id = mountId;
-    if (doorHeight != null) mount.style.height = doorHeight + 'px';
-    doorMountWrap.appendChild(mount);
-    activeDoor.mountId = mountId;
-
-    if (doorTitleEl) doorTitleEl.textContent = op.title ? String(op.title) : slug;
-    if (doorHintEl) {
-      if (op.hint) { doorHintEl.textContent = String(op.hint); doorHintEl.hidden = false; }
-      else { doorHintEl.textContent = ''; doorHintEl.hidden = true; }
-    }
-
-    if (doorOverlay) {
-      doorOverlay.hidden = false;
-      doorOverlay.setAttribute('aria-hidden', 'false');
-      requestAnimationFrame(function(){ doorOverlay.classList.add('visible'); });
-    }
-    if (document.body) document.body.classList.add('door-open');
-    if (input && typeof input.blur === 'function') input.blur();
-
-    var runtimeOpts = {};
-    if (op.doorOpts && typeof op.doorOpts === 'object') {
-      for (var key in op.doorOpts) {
-        if (Object.prototype.hasOwnProperty.call(op.doorOpts, key)) runtimeOpts[key] = op.doorOpts[key];
-      }
-    }
-    if (doorWidth != null && !Object.prototype.hasOwnProperty.call(runtimeOpts, 'width')) runtimeOpts.width = doorWidth;
-    if (doorHeight != null && !Object.prototype.hasOwnProperty.call(runtimeOpts, 'height')) runtimeOpts.height = doorHeight;
-
-    if (doorRuntimeAvailable()) {
-      Promise.resolve(window.DDR.openDoor({
-        slug: slug,
-        mountId: mountId,
-        opts: runtimeOpts,
-        send: function(payload){ sendDoorEvent(slug, payload); }
-      })).catch(function(err){ console.error('Door failed to open', err); });
-    } else {
-      console.warn('Door runtime not available.');
-    }
-  }
-
-  function hideDoorOverlay(){
-    if (doorOverlay) {
-      doorOverlay.classList.remove('visible');
-      doorOverlay.setAttribute('aria-hidden', 'true');
-      setTimeout(function(){ if (doorOverlay && !doorOverlay.classList.contains('visible')) doorOverlay.hidden = true; }, 190);
-    }
-  }
-
-  function teardownDoor(slug){
-    var id = slug ? String(slug).trim() : (activeDoor && activeDoor.slug);
-    if (id && doorRuntimeAvailable()) {
-      try { window.DDR.closeDoor(id); } catch(e){ console.error('Door close failed', e); }
-    }
-    if (doorMountWrap) doorMountWrap.innerHTML = '';
-    hideDoorOverlay();
-    if (doorModal) {
-      doorModal.style.removeProperty('--door-width');
-      doorModal.style.removeProperty('--door-height');
-    }
-    if (doorHintEl) { doorHintEl.textContent = ''; doorHintEl.hidden = true; }
-    if (document.body) document.body.classList.remove('door-open');
-    var focusTarget = (activeDoor && activeDoor.prevFocus && typeof activeDoor.prevFocus.focus === 'function') ? activeDoor.prevFocus : input;
-    activeDoor = null;
-    setTimeout(function(){ try { focusTarget && focusTarget.focus(); } catch(e){} }, 0);
-  }
-
-  function dispatchDoorEvent(op){
-    if (!op || !op.slug || !doorRuntimeAvailable()) return;
-    try { window.DDR.dispatchToDoor(op.slug, op.payload); } catch(e){ console.error('Door event dispatch failed', e); }
-  }
-
-  function sendDoorEvent(slug, payload){
-    if (!slug || !ws || ws.readyState !== WebSocket.OPEN) return;
-    var id = String(slug).trim();
-    if (!id) return;
-    if (activeDoor && activeDoor.slug && activeDoor.slug.toLowerCase() !== id.toLowerCase()) return;
-    try { ws.send(JSON.stringify({ type:'doorEvent', slug:id, payload: payload })); } catch(e){ console.error('Door event send failed', e); }
-  }
-
-  function requestDoorExit(){
-    if (!activeDoor) return;
-    sendDoorEvent(activeDoor.slug, { type:'leave', source:'overlay' });
-  }
-
-  if (doorCloseBtn) {
-    doorCloseBtn.addEventListener('click', function(ev){
-      ev.preventDefault();
-      requestDoorExit();
-    });
-  }
-  if (doorOverlay) {
-    doorOverlay.addEventListener('click', function(ev){
-      if (ev.target === doorOverlay) requestDoorExit();
-    });
-  }
 
   function submitCurrentInput(){
     if (!input) return false;
@@ -716,7 +546,7 @@
 
   // ESC quickly refocuses prompt
   document.addEventListener('keydown', function(ev){
-    if (ev.key === 'Escape' && !activeDoor) focusInputEnd(input);
+    if (ev.key === 'Escape') focusInputEnd(input);
   });
 })();
 </script>
