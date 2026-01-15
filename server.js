@@ -455,7 +455,7 @@ function cmdHelp(api, state){
     api.print('  /listinvites [unused|used|all]  Show recent invites', 'cyan');
     api.print('  /revokeinvite <code>        Expire an unused invite', 'cyan');
     api.print('  /removesuggestion <#>  Remove a suggestion (from the current list)', 'cyan');
-    api.print('  /retention <area> <days>   Set auto-delete retention (board/news/messages/posts/users)', 'cyan');
+    api.print('  /retention <area> <days>   Set auto-delete retention (board/links/messages/posts/users)', 'cyan');
     api.print('  /adminchat   Admin live room (private)', 'cyan');
     api.print('  /announce <text>             Post a new announcement', 'cyan');
     api.print('  /removeannounce <id>         Remove an announcement', 'cyan');
@@ -506,7 +506,7 @@ function renderMenu(api, state){
     b.print('  /post <text>     Share a short status update', 'cyan');
     b.print('  /feed [user]     View the latest updates', 'cyan');
     b.print('  /board           Bulletin board', 'cyan');
-    b.print('  /news            Fark-like news links', 'cyan');
+    b.print('  /links           Community link share', 'cyan');
     b.print('  /games           Door games (coming soon)', 'cyan');
     b.print('  /messages        View your direct messages', 'cyan');
     b.print('  /announcements   View site announcements', 'cyan');
@@ -519,7 +519,7 @@ function renderMenu(api, state){
     b.print('For a full list of commands use /help command.', 'dim');
   });
 }
-function menuHandleRaw(text, api){ api.print('Use slash commands here. Try /chat, /board, /news or /help.', 'dim'); return true; }
+function menuHandleRaw(text, api){ api.print('Use slash commands here. Try /chat, /board, /links or /help.', 'dim'); return true; }
 
 /* ======================= Announcements ======================= */
 function fetchActiveAnnouncements(){
@@ -1056,12 +1056,7 @@ function cmdRemoveTopic(api, state, args){
   }
 }
 
-/* ======================= News (List + Item) ======================= */
-const NEWS_TAGS = [
-  'Florida','Not News','Hero','Facepalm','Breaking','Obvious','Science!',
-  'Oops','Money','Fail','Tech','Politics','World','Crime','Sports'
-];
-function isAllowedNewsTag(tag){ return NEWS_TAGS.includes(tag); }
+/* ======================= Links (List + Item) ======================= */
 function normalizeURL(u){
   try { const url = new URL(u.includes('://') ? u : 'https://' + u); return url.toString(); }
   catch { return null; }
@@ -1075,9 +1070,9 @@ function renderNewsList(api, state){
   api.batch(b=>{
     b.clear();
     b.setInputLimit(null);
-    b.print('== DIS News ==', 'magenta'); b.hr();
+    b.print('== Link Share ==', 'magenta'); b.hr();
     if (!rows.length){
-      b.print('No news yet. Add one with /addnews <headline> <url> <tag>.', 'dim');
+      b.print('No links yet. Add one with /addlink <headline> <url>.', 'dim');
     } else {
       b.print('Recent links (most recently active first):', 'yellow');
       rows.forEach(r=>{
@@ -1086,20 +1081,19 @@ function renderNewsList(api, state){
         const safeTitle = sanitizeAndFormatDIS(r.title);
         const urlShown = truncateUrl(r.url, 80);
         b.printHTML(`${r.id}. ${safeTitle}`);
-        b.printHTML(`   <span class="dim">${escapeHTML(urlShown)}</span>  <span class="cyan">[${escapeHTML(r.tag)}]</span>  by &lt;${poster}&gt;  <span class="dim">(${r.comments} comments)</span>`);
+        b.printHTML(`   <span class="dim">${escapeHTML(urlShown)}</span>  by &lt;${poster}&gt;  <span class="dim">(${r.comments} comments)</span>`);
       });
     }
     b.hr();
-    b.print('Open: /news <id>    Add: /addnews <headline> <url> <tag>    Remove (admin): /removenews <id>', 'cyan');
-    b.print('Tags: ' + NEWS_TAGS.join(', '), 'dim');
-    b.setInputType('text', 'Use /news <id> or /addnews <headline> <url> <tag>');
+    b.print('Open: /links <id>    Add: /addlink <headline> <url>    Remove (admin): /removelink <id>', 'cyan');
+    b.setInputType('text', 'Use /links <id> or /addlink <headline> <url>');
   });
   state.currentScreen = 'news:list';
   state.currentNewsId = null;
 }
 function openNewsItem(api, state, id){
   const p = selectNewsPost.get(id);
-  if (!p){ api.print('No such news item (maybe expired).', 'red'); return; }
+  if (!p){ api.print('No such link (maybe expired).', 'red'); return; }
   state.currentScreen = 'news:item';
   state.currentNewsId = id;
 
@@ -1111,7 +1105,7 @@ function openNewsItem(api, state, id){
 
   api.batch(b=>{
     b.clear();
-    b.printHTML(`== [${escapeHTML(p.tag)}] ${sanitizeAndFormatDIS(p.title)} ==`, 'magenta');
+    b.printHTML(`== Link #${p.id}: ${sanitizeAndFormatDIS(p.title)} ==`, 'magenta');
     b.printHTML(`<span class="dim">${escapeHTML(p.url)}</span>  by &lt;${poster}&gt;`);
     b.hr();
     if (!comments.length){
@@ -1127,16 +1121,16 @@ function openNewsItem(api, state, id){
       });
     }
     b.hr();
-    b.print('Type to comment. Commands: /news (back), /main', 'dim');
-    b.setInputType('text', 'Type to comment… /news to go back');
+    b.print('Type to comment. Commands: /links (back), /main', 'dim');
+    b.setInputType('text', 'Type to comment… /links to go back');
     b.setInputLimit(maxLen);
   });
 }
 function newsListHandleCommand(cmd, api, state, args){
   if (!requireAuth(api, state)) return true;
-  if (cmd === 'news' && args.length){
+  if ((cmd === 'links' || cmd === 'news') && args.length){
     const id = parseInt(args[0], 10);
-    if (!id){ api.print('Usage: /news <id>', 'yellow'); return true; }
+    if (!id){ api.print('Usage: /links <id>', 'yellow'); return true; }
     openNewsItem(api, state, id); return true;
   }
   if (cmd === 'main' || cmd === 'menu'){ routeGo(api, state, 'menu'); return true; }
@@ -1146,7 +1140,7 @@ function newsItemHandleRaw(text, api, state){
   if (!requireAuth(api, state)) return true;
   const body = (text||'').trim(); if (!body) return true;
   const newsId = state.currentNewsId;
-  if (!newsId){ api.print('No news item open.', 'red'); return true; }
+  if (!newsId){ api.print('No link open.', 'red'); return true; }
 
   const max = +(getSetting.get('news_comment_max_len')?.value || 600);
   if (visibleLengthDIS(body) > max){ api.print(`Too long (max ${max} visible chars).`, 'red'); return true; }
@@ -1173,32 +1167,31 @@ function newsItemHandleRaw(text, api, state){
 function cmdAddNews(api, state, args){
   if (!requireAuth(api, state)) return;
   const raw = (args||[]).join(' ').trim();
-  if (!raw){ api.print('Usage: /addnews <headline> <url> <tag>', 'yellow'); return; }
+  if (!raw){ api.print('Usage: /addlink <headline> <url>', 'yellow'); return; }
   const parts = raw.split(/\s+/);
-  if (parts.length < 3){ api.print('Usage: /addnews <headline> <url> <tag>', 'yellow'); return; }
-  const tag = parts.pop();
+  if (parts.length < 2){ api.print('Usage: /addlink <headline> <url>', 'yellow'); return; }
   const urlIn = parts.pop();
   const headline = parts.join(' ').trim();
 
   const maxLen = +(getSetting.get('news_title_max_len')?.value || 120);
   if (visibleLengthDIS(headline) > maxLen){ api.print(`Headline too long (max ${maxLen} visible chars).`, 'red'); return; }
-  if (!isAllowedNewsTag(tag)){ api.print(`Unknown tag "${tag}". Allowed: ${NEWS_TAGS.join(', ')}`, 'red'); return; }
+  if (!headline){ api.print('Headline required.', 'yellow'); return; }
   const url = normalizeURL(urlIn);
   if (!url){ api.print('Invalid URL. Example: example.com or https://example.com/article', 'red'); return; }
 
   const ts = nowEpoch();
   const days = +(getSetting.get('news_inactive_days')?.value || 30);
-  insertNewsPost.run(headline, url, tag, state.userId || null, ts, ts, ts + days*86400);
-  api.print('News link added.', 'green');
+  insertNewsPost.run(headline, url, 'link', state.userId || null, ts, ts, ts + days*86400);
+  api.print('Link added.', 'green');
   renderNewsList(api, state);
 }
 function cmdRemoveNews(api, state, args){
   if (!requireAuth(api, state)) return;
   if (!state.isAdmin){ api.print('Admin only.', 'red'); return; }
   const id = parseInt(args[0], 10);
-  if (!id){ api.print('Usage: /removenews <id>', 'yellow'); return; }
+  if (!id){ api.print('Usage: /removelink <id>', 'yellow'); return; }
   deleteNewsById.run(id);
-  api.print(`Removed news #${id}.`, 'green');
+  api.print(`Removed link #${id}.`, 'green');
   if (state.currentScreen && state.currentScreen.startsWith('news') && state.currentNewsId === id){
     renderNewsList(api, state);
   }
@@ -1396,6 +1389,7 @@ function cmdRetention(api, state, args){
   const keys = {
     board: 'board_inactive_days',
     news: 'news_inactive_days',
+    links: 'news_inactive_days',
     messages: 'dm_retention_days',
     dms: 'dm_retention_days',
     posts: 'status_retention_days',
@@ -1409,7 +1403,7 @@ function cmdRetention(api, state, args){
     api.print('Auto-delete retention (days):', 'yellow');
     Object.entries({
       board: keys.board,
-      news: keys.news,
+      links: keys.links,
       messages: keys.messages,
       posts: keys.posts,
       users: keys.users,
@@ -1417,19 +1411,19 @@ function cmdRetention(api, state, args){
       const value = Number(getSetting.get(key)?.value || 0);
       api.print(`  ${label}: ${value} day${value === 1 ? '' : 's'}`, 'cyan');
     });
-    api.print('Set with: /retention <board|news|messages|posts|users> <days>. Use 0 to disable.', 'dim');
+    api.print('Set with: /retention <board|links|messages|posts|users> <days>. Use 0 to disable.', 'dim');
     return;
   }
 
   if (args.length < 2){
-    api.print('Usage: /retention <board|news|messages|posts|users> <days>', 'yellow');
+    api.print('Usage: /retention <board|links|messages|posts|users> <days>', 'yellow');
     return;
   }
 
   const area = String(args[0] || '').trim().toLowerCase();
   const key = keys[area];
   if (!key){
-    api.print('Unknown retention area. Use: board, news, messages, posts, users.', 'yellow');
+    api.print('Unknown retention area. Use: board, links, messages, posts, users.', 'yellow');
     return;
   }
 
@@ -1662,7 +1656,7 @@ function cmdNotifications(api, state, args){
     b.print('== Notifications ==','magenta'); b.hr();
 
     if (!rows.length){
-      b.print('No notifications yet. Mention someone with @username in Chat/Boards/News.', 'dim');
+      b.print('No notifications yet. Mention someone with @username in Chat/Boards/Links.', 'dim');
     } else {
       rows.forEach(n=>{
         const when = new Date(n.created_at*1000).toLocaleString();
@@ -1801,7 +1795,10 @@ function handleGlobalCommand(cmd, api, state, args){
     // Admin-only removal by list index or id (cmdRemoveTopic should enforce admin)
     case 'removetopic':  return (cmdRemoveTopic(api, state, args), true);
 
-    /* News */
+    /* Links */
+    case 'links':        if (args.length) openNewsItem(api, state, parseInt(args[0],10)||0); else renderNewsList(api, state); return true;
+    case 'addlink':      cmdAddNews(api, state, args); return true;
+    case 'removelink':   cmdRemoveNews(api, state, args); return true;
     case 'news':         if (args.length) openNewsItem(api, state, parseInt(args[0],10)||0); else renderNewsList(api, state); return true;
     case 'addnews':      cmdAddNews(api, state, args); return true;
     case 'removenews':   cmdRemoveNews(api, state, args); return true;
@@ -1920,7 +1917,7 @@ wss.on('connection', (ws) => {
       const cmd  = head.toLowerCase();
       const args = rest;
 
-      // Global commands first (e.g., /chat, /news, /board, etc.)
+      // Global commands first (e.g., /chat, /links, /board, etc.)
       if (handleGlobalCommand && handleGlobalCommand(cmd, api, state, args)) return;
 
       // Optional screen-local commands
