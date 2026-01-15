@@ -103,64 +103,6 @@ const aiService = (() => {
   };
 })();
 
-const guardianService = (() => {
-  const fetchFn = typeof fetch === 'function' ? fetch.bind(globalThis) : null;
-  const apiKey = process.env.GUARDIAN_API_KEY || '598ae2be-3450-4b02-9a2b-47fa1a7d6799';
-  const endpoint = 'https://content.guardianapis.com/search';
-  const cache = { fetchedAt: 0, items: [] };
-  const ttlMs = 5 * 60 * 1000;
-  const pageSize = 12;
-
-  async function fetchHeadlines({ force = false } = {}) {
-    if (!fetchFn) {
-      return { ok: false, error: 'fetch() unavailable in this runtime.' };
-    }
-    if (!apiKey) {
-      return { ok: false, error: 'Guardian API key is missing.' };
-    }
-    const now = Date.now();
-    if (!force && cache.items.length && now - cache.fetchedAt < ttlMs) {
-      return { ok: true, items: cache.items, fetchedAt: cache.fetchedAt, cached: true };
-    }
-
-    const url = new URL(endpoint);
-    url.searchParams.set('api-key', apiKey);
-    url.searchParams.set('order-by', 'newest');
-    url.searchParams.set('page-size', String(pageSize));
-    url.searchParams.set('show-fields', 'trailText,byline,thumbnail');
-
-    try {
-      const res = await fetchFn(url.toString());
-      if (!res.ok) {
-        const errText = await res.text();
-        return { ok: false, error: `Guardian API error (${res.status}): ${errText}` };
-      }
-      const data = await res.json();
-      const results = data?.response?.results;
-      if (!Array.isArray(results)) {
-        return { ok: false, error: 'Guardian API response missing results.' };
-      }
-      const items = results.map((item) => ({
-        id: item.id,
-        webTitle: item.webTitle,
-        webUrl: item.webUrl,
-        sectionName: item.sectionName,
-        webPublicationDate: item.webPublicationDate,
-        fields: item.fields || {},
-      }));
-      cache.items = items;
-      cache.fetchedAt = now;
-      return { ok: true, items, fetchedAt: cache.fetchedAt, cached: false };
-    } catch (err) {
-      return { ok: false, error: `Guardian API request failed: ${err.message || err}` };
-    }
-  }
-
-  return {
-    fetchHeadlines,
-  };
-})();
-
 const {
   hub: HUB,
   sendOps,
@@ -344,8 +286,7 @@ function makeInitialState(){
     userColor:null,
     displayName:null,
     currentTopicId:null,
-    newsHeadlines: [],
-    newsFetchedAt: null
+    currentNewsId:null
   };
 }
 
@@ -480,7 +421,6 @@ function cmdHelp(api, state){
   api.print('  /here      Show who is currently in the chat', 'cyan');
   api.print('  /post <text>  Share a short status update (swept after ~30 days)', 'cyan');
   api.print('  /feed [user]  View recent updates (optionally for a user)', 'cyan');
-  api.print('  /news      View Guardian headlines', 'cyan');
   api.print('  /games     Door games status (coming soon)', 'cyan');
   api.print('  /dm        Send a direct message: /dm <user> <message>', 'cyan');
   api.print('  /messages  Show your recent direct messages', 'cyan');
@@ -515,7 +455,7 @@ function cmdHelp(api, state){
     api.print('  /listinvites [unused|used|all]  Show recent invites', 'cyan');
     api.print('  /revokeinvite <code>        Expire an unused invite', 'cyan');
     api.print('  /removesuggestion <#>  Remove a suggestion (from the current list)', 'cyan');
-    api.print('  /retention <area> <days>   Set auto-delete retention (board/news/messages/posts/users)', 'cyan');
+    api.print('  /retention <area> <days>   Set auto-delete retention (board/links/messages/posts/users)', 'cyan');
     api.print('  /adminchat   Admin live room (private)', 'cyan');
     api.print('  /announce <text>             Post a new announcement', 'cyan');
     api.print('  /removeannounce <id>         Remove an announcement', 'cyan');
@@ -566,7 +506,7 @@ function renderMenu(api, state){
     b.print('  /post <text>     Share a short status update', 'cyan');
     b.print('  /feed [user]     View the latest updates', 'cyan');
     b.print('  /board           Bulletin board', 'cyan');
-    b.print('  /news            Guardian headlines', 'cyan');
+    b.print('  /links           Community link share', 'cyan');
     b.print('  /games           Door games (coming soon)', 'cyan');
     b.print('  /messages        View your direct messages', 'cyan');
     b.print('  /announcements   View site announcements', 'cyan');
@@ -579,7 +519,7 @@ function renderMenu(api, state){
     b.print('For a full list of commands use /help command.', 'dim');
   });
 }
-function menuHandleRaw(text, api){ api.print('Use slash commands here. Try /chat, /board, /news or /help.', 'dim'); return true; }
+function menuHandleRaw(text, api){ api.print('Use slash commands here. Try /chat, /board, /links or /help.', 'dim'); return true; }
 
 /* ======================= Announcements ======================= */
 function fetchActiveAnnouncements(){
@@ -1116,100 +1056,145 @@ function cmdRemoveTopic(api, state, args){
   }
 }
 
-/* ======================= Guardian Headlines (/news) ======================= */
-function renderNewsList(api, state, { force = false } = {}){
-  if (!requireAuth(api, state)) return;
-  state.currentScreen = 'news:list';
+/* ======================= Links (List + Item) ======================= */
+function normalizeURL(u){
+  try { const url = new URL(u.includes('://') ? u : 'https://' + u); return url.toString(); }
+  catch { return null; }
+}
+function truncateUrl(u, max){ if (!u) return ''; return u.length<=max ? u : (u.slice(0, max-1)+'…'); }
 
+function renderNewsList(api, state){
+  if (!requireAuth(api, state)) return;
+  const limit = +(getSetting.get('news_list_limit')?.value || 150);
+  const rows = selectNewsList.all(limit);
   api.batch(b=>{
     b.clear();
     b.setInputLimit(null);
-    b.print('== Guardian Headlines ==', 'magenta');
-    b.hr();
-    b.print('Loading the latest headlines…', 'dim');
-    b.hr();
-    b.print('Tip: /news refresh to pull the latest.', 'cyan');
-    b.setInputType('text', 'Use /news refresh to update headlines');
-  });
-
-  guardianService.fetchHeadlines({ force }).then((result) => {
-    if (state.currentScreen !== 'news:list') return;
-    if (!result.ok) {
-      api.batch(b => {
-        b.clear();
-        b.print('== Guardian Headlines ==', 'magenta');
-        b.hr();
-        b.print('Unable to load headlines.', 'red');
-        b.print(result.error || 'Unknown error.', 'dim');
-        b.hr();
-        b.print('Try again with /news refresh or return to /main.', 'cyan');
-        b.setInputType('text', 'Use /news refresh or /main');
-        b.setInputLimit(null);
+    b.print('== Link Share ==', 'magenta'); b.hr();
+    if (!rows.length){
+      b.print('No links yet. Add one with /addlink <headline> <url>.', 'dim');
+    } else {
+      b.print('Recent links (most recently active first):', 'yellow');
+      rows.forEach(r=>{
+        const posterRaw = (r.display_name && r.display_name.trim()) ? r.display_name : (r.username || 'anon');
+        const poster = sanitizeAndFormatDIS(posterRaw);
+        const safeTitle = sanitizeAndFormatDIS(r.title);
+        const urlShown = truncateUrl(r.url, 80);
+        b.printHTML(`${r.id}. ${safeTitle}`);
+        b.printHTML(`   <span class="dim">${escapeHTML(urlShown)}</span>  by &lt;${poster}&gt;  <span class="dim">(${r.comments} comments)</span>`);
       });
-      return;
     }
+    b.hr();
+    b.print('Open: /links <id>    Add: /addlink <headline> <url>    Remove (admin): /removelink <id>', 'cyan');
+    b.setInputType('text', 'Use /links <id> or /addlink <headline> <url>');
+  });
+  state.currentScreen = 'news:list';
+  state.currentNewsId = null;
+}
+function openNewsItem(api, state, id){
+  const p = selectNewsPost.get(id);
+  if (!p){ api.print('No such link (maybe expired).', 'red'); return; }
+  state.currentScreen = 'news:item';
+  state.currentNewsId = id;
 
-    state.newsHeadlines = result.items;
-    state.newsFetchedAt = result.fetchedAt;
+  const maxLen = +(getSetting.get('news_comment_max_len')?.value || 600);
 
-    api.batch(b=>{
-      b.clear();
-      b.setInputLimit(null);
-      b.print('== Guardian Headlines ==', 'magenta');
-      b.hr();
+  const comments = selectNewsComments.all(id);
+  const posterRaw = (p.display_name && p.display_name.trim()) ? p.display_name : (p.username || 'anon');
+  const poster = sanitizeAndFormatDIS(posterRaw);
 
-      if (!result.items.length){
-        b.print('No headlines returned right now.', 'dim');
-      } else {
-        b.print('Latest stories:', 'yellow');
-        result.items.forEach((item) => {
-          const title = escapeHTML(item.webTitle || 'Untitled');
-          const section = item.sectionName || 'News';
-          const published = item.webPublicationDate ? new Date(item.webPublicationDate).toLocaleString() : 'Unknown time';
-          const url = item.webUrl ? escapeHTML(item.webUrl) : '';
-          const link = url ? `<a class="ext-link" href="${url}" target="_blank" rel="noopener noreferrer">${title}</a>` : title;
-          b.printHTML(link);
-          b.printHTML(`   <span class="dim">${escapeHTML(section)} · ${escapeHTML(published)}</span>`);
-        });
-      }
-
-      b.hr();
-      if (result.fetchedAt) {
-        const stamp = new Date(result.fetchedAt).toLocaleString();
-        b.print(`Updated ${stamp}${result.cached ? ' (cached)' : ''}.`, 'dim');
-      }
-      b.print('Refresh: /news refresh   Back: /main', 'cyan');
-      b.setInputType('text', 'Use /news refresh to update headlines');
-    });
+  api.batch(b=>{
+    b.clear();
+    b.printHTML(`== Link #${p.id}: ${sanitizeAndFormatDIS(p.title)} ==`, 'magenta');
+    b.printHTML(`<span class="dim">${escapeHTML(p.url)}</span>  by &lt;${poster}&gt;`);
+    b.hr();
+    if (!comments.length){
+      b.print('No comments yet. Type to comment.', 'dim');
+    } else {
+      comments.forEach(c=>{
+        const ts = new Date(c.created_at*1000).toLocaleString();
+        const authorRaw = (c.display_name && c.display_name.trim()) ? c.display_name : (c.username || 'anon');
+        const author = sanitizeAndFormatDIS(authorRaw);
+        const body = sanitizeAndFormatDIS(c.body);
+        const colored = c.preferred_color ? `<span style="color:${c.preferred_color}">${body}</span>` : body;
+        b.printHTML(`[${escapeHTML(ts)}] &lt;${author}&gt; ${colored}`);
+      });
+    }
+    b.hr();
+    b.print('Type to comment. Commands: /links (back), /main', 'dim');
+    b.setInputType('text', 'Type to comment… /links to go back');
+    b.setInputLimit(maxLen);
   });
 }
-
 function newsListHandleCommand(cmd, api, state, args){
   if (!requireAuth(api, state)) return true;
-  if (cmd === 'news' || cmd === 'links'){
-    if (!args.length){
-      renderNewsList(api, state);
-      return true;
-    }
-    const first = String(args[0]).toLowerCase();
-    if (first === 'refresh') {
-      renderNewsList(api, state, { force: true });
-      return true;
-    }
-    api.print('Usage: /news refresh', 'yellow');
-    return true;
+  if ((cmd === 'links' || cmd === 'news') && args.length){
+    const id = parseInt(args[0], 10);
+    if (!id){ api.print('Usage: /links <id>', 'yellow'); return true; }
+    openNewsItem(api, state, id); return true;
   }
   if (cmd === 'main' || cmd === 'menu'){ routeGo(api, state, 'menu'); return true; }
   return false;
 }
+function newsItemHandleRaw(text, api, state){
+  if (!requireAuth(api, state)) return true;
+  const body = (text||'').trim(); if (!body) return true;
+  const newsId = state.currentNewsId;
+  if (!newsId){ api.print('No link open.', 'red'); return true; }
+
+  const max = +(getSetting.get('news_comment_max_len')?.value || 600);
+  if (visibleLengthDIS(body) > max){ api.print(`Too long (max ${max} visible chars).`, 'red'); return true; }
+
+  const ts = nowEpoch();
+  insertNewsComment.run(newsId, state.userId || null, body, ts);
+
+  // FIX: pass 3 args to bumpNewsPost (last_commented_at, expires_at, id)
+  const days = +(getSetting.get('news_inactive_days')?.value || 30);
+  bumpNewsPost.run(ts, ts + days*86400, newsId);
+
+  // re-render so commenter sees their post
+  openNewsItem(api, state, newsId);
+
+  // mentions → notify
+  const fromRow = { id: state.userId || null, username: state.username };
+  notifyMentions(body, fromRow, `news:${newsId}`);
+
+  return true;
+}
+
+
 
 function cmdAddNews(api, state, args){
   if (!requireAuth(api, state)) return;
-  api.print('Community link sharing is retired. Use /news for Guardian headlines.', 'yellow');
+  const raw = (args||[]).join(' ').trim();
+  if (!raw){ api.print('Usage: /addlink <headline> <url>', 'yellow'); return; }
+  const parts = raw.split(/\s+/);
+  if (parts.length < 2){ api.print('Usage: /addlink <headline> <url>', 'yellow'); return; }
+  const urlIn = parts.pop();
+  const headline = parts.join(' ').trim();
+
+  const maxLen = +(getSetting.get('news_title_max_len')?.value || 120);
+  if (visibleLengthDIS(headline) > maxLen){ api.print(`Headline too long (max ${maxLen} visible chars).`, 'red'); return; }
+  if (!headline){ api.print('Headline required.', 'yellow'); return; }
+  const url = normalizeURL(urlIn);
+  if (!url){ api.print('Invalid URL. Example: example.com or https://example.com/article', 'red'); return; }
+
+  const ts = nowEpoch();
+  const days = +(getSetting.get('news_inactive_days')?.value || 30);
+  insertNewsPost.run(headline, url, 'link', state.userId || null, ts, ts, ts + days*86400);
+  api.print('Link added.', 'green');
+  renderNewsList(api, state);
 }
 function cmdRemoveNews(api, state, args){
   if (!requireAuth(api, state)) return;
-  api.print('Community link removal is disabled. Use /news for Guardian headlines.', 'yellow');
+  if (!state.isAdmin){ api.print('Admin only.', 'red'); return; }
+  const id = parseInt(args[0], 10);
+  if (!id){ api.print('Usage: /removelink <id>', 'yellow'); return; }
+  deleteNewsById.run(id);
+  api.print(`Removed link #${id}.`, 'green');
+  if (state.currentScreen && state.currentScreen.startsWith('news') && state.currentNewsId === id){
+    renderNewsList(api, state);
+  }
 }
 
 /* ======================= Profiles (/aboutme, /profile) ======================= */
@@ -1418,7 +1403,7 @@ function cmdRetention(api, state, args){
     api.print('Auto-delete retention (days):', 'yellow');
     Object.entries({
       board: keys.board,
-      news: keys.news,
+      links: keys.links,
       messages: keys.messages,
       posts: keys.posts,
       users: keys.users,
@@ -1426,19 +1411,19 @@ function cmdRetention(api, state, args){
       const value = Number(getSetting.get(key)?.value || 0);
       api.print(`  ${label}: ${value} day${value === 1 ? '' : 's'}`, 'cyan');
     });
-    api.print('Set with: /retention <board|news|messages|posts|users> <days>. Use 0 to disable.', 'dim');
+    api.print('Set with: /retention <board|links|messages|posts|users> <days>. Use 0 to disable.', 'dim');
     return;
   }
 
   if (args.length < 2){
-    api.print('Usage: /retention <board|news|messages|posts|users> <days>', 'yellow');
+    api.print('Usage: /retention <board|links|messages|posts|users> <days>', 'yellow');
     return;
   }
 
   const area = String(args[0] || '').trim().toLowerCase();
   const key = keys[area];
   if (!key){
-    api.print('Unknown retention area. Use: board, news, messages, posts, users.', 'yellow');
+    api.print('Unknown retention area. Use: board, links, messages, posts, users.', 'yellow');
     return;
   }
 
@@ -1811,30 +1796,10 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'removetopic':  return (cmdRemoveTopic(api, state, args), true);
 
     /* Links */
-    case 'links':
-      if (args.length && String(args[0]).toLowerCase() === 'refresh') {
-        renderNewsList(api, state, { force: true });
-        return true;
-      }
-      if (args.length) {
-        api.print('Usage: /news refresh', 'yellow');
-        return true;
-      }
-      renderNewsList(api, state);
-      return true;
+    case 'links':        if (args.length) openNewsItem(api, state, parseInt(args[0],10)||0); else renderNewsList(api, state); return true;
     case 'addlink':      cmdAddNews(api, state, args); return true;
     case 'removelink':   cmdRemoveNews(api, state, args); return true;
-    case 'news':
-      if (args.length && String(args[0]).toLowerCase() === 'refresh') {
-        renderNewsList(api, state, { force: true });
-        return true;
-      }
-      if (args.length) {
-        api.print('Usage: /news refresh', 'yellow');
-        return true;
-      }
-      renderNewsList(api, state);
-      return true;
+    case 'news':         if (args.length) openNewsItem(api, state, parseInt(args[0],10)||0); else renderNewsList(api, state); return true;
     case 'addnews':      cmdAddNews(api, state, args); return true;
     case 'removenews':   cmdRemoveNews(api, state, args); return true;
 
@@ -1952,7 +1917,7 @@ wss.on('connection', (ws) => {
       const cmd  = head.toLowerCase();
       const args = rest;
 
-      // Global commands first (e.g., /chat, /news, /board, etc.)
+      // Global commands first (e.g., /chat, /links, /board, etc.)
       if (handleGlobalCommand && handleGlobalCommand(cmd, api, state, args)) return;
 
       // Optional screen-local commands
@@ -1962,6 +1927,7 @@ wss.on('connection', (ws) => {
         || (state.currentScreen === 'adminchat'  && adminChatHandleCommand && adminChatHandleCommand(cmd, api, state, args))
         || (state.currentScreen === 'topic'      && topicHandleCommand && topicHandleCommand(cmd, api, state, args))
         || (state.currentScreen === 'news:list'  && newsListHandleCommand && newsListHandleCommand(cmd, api, state, args))
+        || (state.currentScreen === 'news:item'  && newsItemHandleCommand && newsItemHandleCommand(cmd, api, state, args))
         || false;
 
       if (localHandled) return;
@@ -1975,6 +1941,7 @@ wss.on('connection', (ws) => {
     if (state.currentScreen === 'chat')       { chatHandleRaw && chatHandleRaw(raw, api, state);     return; }
     if (state.currentScreen === 'adminchat')  { adminChatHandleRaw && adminChatHandleRaw(raw, api, state); return; }
     if (state.currentScreen === 'topic')      { topicHandleRaw && topicHandleRaw(raw, api, state);   return; }
+    if (state.currentScreen === 'news:item')  { newsItemHandleRaw && newsItemHandleRaw(raw, api, state); return; }
     if (state.currentScreen === 'board')      { api.print('Use /topic <id> or /newtopic <title>.', 'dim'); return; }
 
     // Fallback
