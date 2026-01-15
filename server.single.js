@@ -2700,9 +2700,10 @@ function renderNewsList(api, state){
         const posterRaw = (r.display_name && r.display_name.trim()) ? r.display_name : (r.username || 'anon');
         const poster = sanitizeAndFormatDIS(posterRaw);
         const safeTitle = sanitizeAndFormatDIS(r.title);
-        const urlShown = truncateUrl(r.url, 80);
-        b.printHTML(`${r.id}. ${safeTitle}`);
-        b.printHTML(`   <span class="dim">${escapeHTML(urlShown)}</span>  by &lt;${poster}&gt;  <span class="dim">(${r.comments} comments)</span>`);
+        const safeUrl = escapeHTML(r.url || '');
+        const link = safeUrl ? `<a class="ext-link" href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeTitle}</a>` : safeTitle;
+        b.printHTML(`${r.id}. ${link}`);
+        b.printHTML(`   by &lt;${poster}&gt;  <span class="dim">(${r.comments} comments)</span>`);
       });
     }
     b.hr();
