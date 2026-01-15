@@ -11,17 +11,6 @@ const { createRockoService } = require('./src/services/rocko');
 const formatting = require('./src/utils/formatting');
 const timeUtils = require('./src/utils/time');
 
-
-let DoorManager, lordDoor, casinoDoor;
-try {
-  const DM = require('./doors/manager');
-  DoorManager = DM?.DoorManager || DM;
-  lordDoor = require('./doors/lord');
-  casinoDoor = require('./doors/casino');
-} catch (e) {
-  console.error('Doors load failed:', e && e.message ? e.message : e);
-}
-
 const DB_PATH = process.env.DB_PATH || './dis.sqlite3';
 const PORT = process.env.PORT || 3000;
 
@@ -432,10 +421,10 @@ function cmdHelp(api, state){
   api.print('  /here      Show who is currently in the chat', 'cyan');
   api.print('  /post <text>  Share a short status update (swept after ~30 days)', 'cyan');
   api.print('  /feed [user]  View recent updates (optionally for a user)', 'cyan');
-  api.print('  /games     List available games', 'cyan');
+  api.print('  /games     Door games status (coming soon)', 'cyan');
   api.print('  /dm        Send a direct message: /dm <user> <message>', 'cyan');
   api.print('  /messages  Show your recent direct messages', 'cyan');
-  api.print('  /leave     Leave the current game', 'cyan');
+  api.print('  /leave     Return to the main menu from a room', 'cyan');
   api.print('  /about     About Dead Internet Society', 'cyan');
   api.print('  /rules     Community rules', 'cyan');
   api.print('  /passwd    Change your password: /passwd <old> <new>', 'cyan');
@@ -518,7 +507,7 @@ function renderMenu(api, state){
     b.print('  /feed [user]     View the latest updates', 'cyan');
     b.print('  /board           Bulletin board', 'cyan');
     b.print('  /news            Fark-like news links', 'cyan');
-    b.print('  /games           List door games', 'cyan');
+    b.print('  /games           Door games (coming soon)', 'cyan');
     b.print('  /messages        View your direct messages', 'cyan');
     b.print('  /announcements   View site announcements', 'cyan');
     b.print('  /about           About DIS', 'cyan');
@@ -874,7 +863,7 @@ function renderAbout(api, state){
     b.print('== About Dead Internet Society ==', 'magenta'); b.hr();
     b.print('Punk-style middle finger to the modern feed.', 'white');
     b.print('No engagement farming. No surveillance. No dopamine casinos.', 'white');
-    b.print('Small, hand-rolled, human-scale. ANSI glow, door games, weird rooms.', 'white'); b.hr();
+    b.print('Small, hand-rolled, human-scale. ANSI glow, weird rooms.', 'white'); b.hr();
     b.print('Design principles:', 'yellow');
     b.print('• Human first: rooms over feeds, presence over metrics.', 'cyan');
     b.print('• Anti-algorithm: no ranking engine shaping your mind.', 'cyan');
@@ -1695,38 +1684,14 @@ function cmdNotifications(api, state, args){
 
 
 /* ======================= Doors (Games) ======================= */
-function listDoors(){ return DoorManager?.list?.() || []; }
-
 function cmdGames(api, state){
   if (!requireAuth(api, state)) return;
-  const doors = listDoors();
   api.batch(b=>{
     b.clear(); b.print('== Door Games ==','magenta'); b.hr();
-    if (!doors.length){ b.print('No doors installed.', 'dim'); }
-    else doors.forEach(m => b.print(`${m.id} — ${m.name || m.id}`));
-    b.hr(); b.print('Play with /play <door>', 'cyan');
+    b.print('COMING SOON', 'cyan');
+    b.print('Door games are moving to standalone apps.', 'dim');
+    b.hr();
   });
-}
-
-function cmdPlay(api, state, args){
-  if (!requireAuth(api, state)) return;
-  const want = String((args[0]||'').trim().toLowerCase());
-  if (!want){ api.print('Usage: /play <door>', 'yellow'); return; }
-
-  const doors = listDoors();
-  const match = doors.find(d => String(d.id).toLowerCase() === want);
-  if (!match){
-    api.print('No such door.', 'red');
-    if (doors.length) api.print(`Available: ${doors.map(d=>d.id).join(', ')}`, 'dim');
-    return;
-  }
-
-  state.currentScreen = `door:${match.id}`;
-  try {
-    DoorManager.enter(match.id, api, state, []);
-  } catch (e) {
-    api.print(`Failed to enter door: ${e && e.message ? e.message : String(e)}`, 'red');
-  }
 }
 
 
@@ -1804,8 +1769,6 @@ function doLogout(api, state){
     return;
   }
 
-  try { DoorManager?.leave?.(api, state); } catch {}
-
   removeUserPresence(api, state);
   resetState(state);
 
@@ -1845,7 +1808,6 @@ function handleGlobalCommand(cmd, api, state, args){
 
     /* Doors / Games */
     case 'games':        cmdGames(api, state); return true;
-    case 'play':         cmdPlay(api, state, args); return true;
 
     /* DMs / Suggestions */
     case 'ai':           cmdAi(api, state, args); return true;
@@ -1903,7 +1865,7 @@ function handleGlobalCommand(cmd, api, state, args){
 }
 
 
-/* ======================= WS handling (containerized doors) ======================= */
+/* ======================= WS handling ======================= */
 const HEARTBEAT_MS = 30_000;
 function markAlive() { this.isAlive = true; }
 
@@ -1947,30 +1909,6 @@ wss.on('connection', (ws) => {
     // Handshake
     if (msg.type === 'init') { routeGo(api, state, 'splash'); return; }
 
-    const inDoor = !!(state.currentScreen && state.currentScreen.startsWith('door:'));
-    const doorId = inDoor ? state.currentScreen.slice(5) : null;
-
-    const exitDoor = () => {
-      try { DoorManager?.leave?.(api, state); } catch {}
-      api.setPrompt && api.setPrompt('DIS>');
-      api.setInputType && api.setInputType('text', 'type /help for commands');
-      routeGo(api, state, 'menu');
-    };
-
-    if (msg.type === 'doorEvent') {
-      if (!inDoor || !doorId) return;
-      const slug = String(msg.slug || '').trim().toLowerCase();
-      if (!slug || slug !== String(doorId || '').toLowerCase()) return;
-      const payload = msg.payload;
-      if (payload && typeof payload === 'object' && String(payload.type || '').toLowerCase() === 'leave') {
-        exitDoor();
-        return;
-      }
-      const handled = DoorManager?.dispatch?.(doorId, 'event', payload, api, state);
-      if (handled === 'leave') exitDoor();
-      return;
-    }
-
     if (msg.type !== 'input') return;
 
     const raw = String(msg.raw || '').trim();
@@ -1982,19 +1920,7 @@ wss.on('connection', (ws) => {
       const cmd  = head.toLowerCase();
       const args = rest;
 
-      if (inDoor) {
-        // Only /leave escapes; everything else is door-local
-        const handled = DoorManager?.dispatch?.(doorId, 'command', cmd, api, state, args);
-        if (handled === 'leave') {
-          exitDoor();
-          return;
-        }
-        if (handled) return;
-        api.print('You are inside a game. Use /leave to return to the BBS.', 'yellow');
-        return;
-      }
-
-      // Global commands outside doors first (e.g., /chat, /news, /board, etc.)
+      // Global commands first (e.g., /chat, /news, /board, etc.)
       if (handleGlobalCommand && handleGlobalCommand(cmd, api, state, args)) return;
 
       // Optional screen-local commands
@@ -2013,14 +1939,7 @@ wss.on('connection', (ws) => {
     }
 
     // Raw input
-    if (inDoor) {
-      const consumed = DoorManager?.dispatch?.(doorId, 'raw', raw, api, state);
-      if (consumed) return;
-      api.print('Game did not accept input. Use /leave to exit.', 'yellow');
-      return;
-    }
-
-    // === Raw input outside a door → route by current screen ===
+    // === Raw input → route by current screen ===
     if (state.currentScreen === 'splash')     { splashHandleRaw && splashHandleRaw(raw, api, state); return; }
     if (state.currentScreen === 'chat')       { chatHandleRaw && chatHandleRaw(raw, api, state);     return; }
     if (state.currentScreen === 'adminchat')  { adminChatHandleRaw && adminChatHandleRaw(raw, api, state); return; }
@@ -2034,7 +1953,6 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     HUB.clients.delete(ws);
-    try { DoorManager?.leave?.(api, state); } catch {}
     removeUserPresence(api, state);
   });
 
@@ -2066,38 +1984,6 @@ function runInactiveUserSweep(){
 setInterval(()=>{
   runChatSweep(); runDMSweep(); runInviteSweep(); runSuggestionSweep(); runStatusPostSweep(); runBoardSweep(); runNewsSweep(); runAdminChatSweep(); runAnnouncementSweep(); runInactiveUserSweep();
 }, 10 * 60 * 1000);
-
-/* ======================= Doors boot (optional) ======================= */
-if (DoorManager && typeof DoorManager.register === 'function') {
-  try {
-    if (lordDoor) {
-      if (typeof lordDoor === 'function') {
-        DoorManager.register('LORD', lordDoor, { name: 'Legend of the Redux Dragon' });
-      } else {
-        DoorManager.register(lordDoor); // expects { id:'tinyquest', name:'TinyQuest', create(...) }
-      }
-    }
-    const listed = DoorManager.list ? DoorManager.list() : [];
-    console.log('[doors] registered:', listed.map(d => d.id).join(', ') || '(none)');
-  } catch (e) {
-    console.error('Legend of the Redux Dragon register failed:', e && e.message ? e.message : e);
-  }
-  try {
-    if (casinoDoor) {
-      if (typeof casinoDoor === 'function') {
-        DoorManager.register('casino', casinoDoor, { name: 'Casino' });
-      } else {
-        DoorManager.register(casinoDoor); // expects { id:'tinyquest', name:'TinyQuest', create(...) }
-      }
-    }
-    const listed = DoorManager.list ? DoorManager.list() : [];
-    console.log('[doors] registered:', listed.map(d => d.id).join(', ') || '(none)');
-  } catch (e) {
-    console.error('Casino register failed:', e && e.message ? e.message : e);
-  }
-}
-
-
 
 
 function retentionSecondsAdmin(){
