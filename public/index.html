@@ -162,6 +162,20 @@
     } catch(e){ /* ignore */ }
   }
 
+  function op_auth(token){
+    if (!token) return;
+    fetch('/api/auth/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ token: token })
+    }).then(function(res){
+      if (!res.ok) throw new Error('Auth completion failed');
+    }).catch(function(err){
+      console.error('SSO auth completion failed', err);
+    });
+  }
+
   // ===== Autoscroll helpers =====
   function isNearBottom(el, threshold){ threshold = typeof threshold === 'number' ? threshold : 40;
     return (el.scrollHeight - el.scrollTop - el.clientHeight) < threshold; }
@@ -415,6 +429,7 @@
           else if (op.op === 'reload') op_reload();
           else if (op.op === 'audio') op_audio(op.src, op.volume);
           else if (op.op === 'beep') op_beep(op.kind);
+          else if (op.op === 'auth') op_auth(op.token);
         });
       }
     });
