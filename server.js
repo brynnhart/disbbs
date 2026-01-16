@@ -139,6 +139,13 @@ const {
   dayHeadingFromEpoch,
 } = timeUtils;
 
+const DOOR_GAMES = [
+  {
+    name: 'PacMan',
+    url: 'https://pac.disbbs.org',
+  },
+];
+
 const {
   notifyMentions,
   listMentionsForUser,
@@ -519,7 +526,8 @@ function cmdHelp(api, state){
   api.print('  /here      Show who is currently in the chat', 'cyan');
   api.print('  /post <text>  Share a short status update (swept after ~30 days)', 'cyan');
   api.print('  /feed [user]  View recent updates (optionally for a user)', 'cyan');
-  api.print('  /games     Door games status (coming soon)', 'cyan');
+  api.print('  /games     Door games list', 'cyan');
+  api.print('  /play <game>  Open a door game in a new tab', 'cyan');
   api.print('  /news      Latest headlines from The Guardian', 'cyan');
   api.print('  /dm        Send a direct message: /dm <user> <message>', 'cyan');
   api.print('  /messages  Show your recent direct messages', 'cyan');
@@ -607,7 +615,7 @@ function renderMenu(api, state){
     b.print('  /board           Bulletin board', 'cyan');
     b.print('  /links           Community link share', 'cyan');
     b.print('  /news            Latest headlines (The Guardian)', 'cyan');
-    b.print('  /games           Door games (coming soon)', 'cyan');
+    b.print('  /games           Door games', 'cyan');
     b.print('  /messages        View your direct messages', 'cyan');
     b.print('  /announcements   View site announcements', 'cyan');
     b.print('  /about           About DIS', 'cyan');
@@ -1865,10 +1873,42 @@ function cmdGames(api, state){
   if (!requireAuth(api, state)) return;
   api.batch(b=>{
     b.clear(); b.print('== Door Games ==','magenta'); b.hr();
-    b.print('COMING SOON', 'cyan');
-    b.print('Door games are moving to standalone apps.', 'dim');
+    if (!DOOR_GAMES.length){
+      b.print('No door games available yet.', 'dim');
+    } else {
+      DOOR_GAMES.forEach(game => {
+        const line = `${game.name} — ${game.url}`;
+        b.printHTML(sanitizeAndFormatDIS(line));
+      });
+      b.hr();
+      b.print('Tip: /play <game> to open in a new tab.', 'dim');
+    }
     b.hr();
   });
+}
+
+function cmdPlay(api, state, args){
+  if (!requireAuth(api, state)) return;
+  const query = (args || []).join(' ').trim();
+  if (!query) {
+    api.print('Usage: /play <game>', 'yellow');
+    return;
+  }
+
+  const normalized = query.toLowerCase();
+  const game = DOOR_GAMES.find(entry => entry.name.toLowerCase() === normalized);
+  if (!game) {
+    api.print(`Unknown game: ${query}`, 'yellow');
+    if (DOOR_GAMES.length) {
+      const names = DOOR_GAMES.map(entry => entry.name).join(', ');
+      api.print(`Available: ${names}`, 'dim');
+    }
+    return;
+  }
+
+  api.print(`Opening ${game.name}...`, 'cyan');
+  api.openUrl(game.url);
+  api.printHTML(sanitizeAndFormatDIS(`Link: ${game.url}`));
 }
 
 
@@ -1991,6 +2031,7 @@ function handleGlobalCommand(cmd, api, state, args){
 
     /* Doors / Games */
     case 'games':        cmdGames(api, state); return true;
+    case 'play':         cmdPlay(api, state, args); return true;
 
     /* DMs / Suggestions */
     case 'ai':           cmdAi(api, state, args); return true;
