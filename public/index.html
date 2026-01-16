@@ -337,6 +337,15 @@
   function op_setPrompt(prefix){
     setPromptLabel(prefix);
   }
+
+  function op_openUrl(url){
+    if (!url) return;
+    try {
+      window.open(String(url), '_blank', 'noopener,noreferrer');
+    } catch(e) {
+      console.error('Failed to open URL', e);
+    }
+  }
   function op_reload(){
     try {
       window.location.reload();
@@ -430,6 +439,7 @@
           else if (op.op === 'audio') op_audio(op.src, op.volume);
           else if (op.op === 'beep') op_beep(op.kind);
           else if (op.op === 'auth') op_auth(op.token);
+          else if (op.op === 'openUrl') op_openUrl(op.url);
         });
       }
     });
