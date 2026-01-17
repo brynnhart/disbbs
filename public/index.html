@@ -103,6 +103,7 @@
   var promptLabel = promptDefault;
   var inputLimit = null;
   var isExpandedInput = false;
+  var pendingPlayWindow = null;
 
   if (singleInput && textareaInput){
     textareaInput.value = singleInput.value || '';
@@ -475,6 +476,24 @@
     if (isLimitExceeded()) return false;
     var raw = (input.value || '').trim();
     if (!raw) return false;
+    if (/^\/play\b/i.test(raw)) {
+      var playArg = raw.replace(/^\/play\b/i, '').trim();
+      if (playArg) {
+        try {
+          pendingPlayWindow = window.open('about:blank', '_blank', 'noopener,noreferrer');
+          if (pendingPlayWindow) {
+            pendingPlayWindow.__playTimeoutId = setTimeout(function(){
+              if (pendingPlayWindow && !pendingPlayWindow.closed) {
+                pendingPlayWindow.close();
+              }
+              pendingPlayWindow = null;
+            }, 3000);
+          }
+        } catch (e) {
+          pendingPlayWindow = null;
+        }
+      }
+    }
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'input', raw: raw }));
     } else {
