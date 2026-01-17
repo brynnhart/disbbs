@@ -342,21 +342,9 @@
   function op_openUrl(url){
     if (!url) return;
     try {
-      var targetUrl = String(url);
-      if (pendingPlayWindow && !pendingPlayWindow.closed) {
-        pendingPlayWindow.location.href = targetUrl;
-        pendingPlayWindow.focus();
-      } else {
-        window.open(targetUrl, '_blank', 'noopener,noreferrer');
-      }
+      window.open(String(url), '_blank', 'noopener,noreferrer');
     } catch(e) {
       console.error('Failed to open URL', e);
-    } finally {
-      if (pendingPlayWindow && pendingPlayWindow.__playTimeoutId) {
-        clearTimeout(pendingPlayWindow.__playTimeoutId);
-        pendingPlayWindow.__playTimeoutId = null;
-      }
-      pendingPlayWindow = null;
     }
   }
   function op_reload(){
