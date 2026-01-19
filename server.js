@@ -143,7 +143,7 @@ const DOOR_GAMES = [
   {
     name: 'PacMan',
     url: 'https://pac.disbbs.org',
-    description: 'a procedurally generate clone of the classic arcade game.',
+    description: 'a procedurally generatde clone of the classic arcade game.',
   },
 ];
 
