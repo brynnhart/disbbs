@@ -2361,17 +2361,6 @@ function cmdRemoveAnnouncement(api, state, args){
 }
 
 /* ======================= Polls ======================= */
-function parseQuotedArgs(raw){
-  if (!raw) return [];
-  const out = [];
-  const rx = /"([^"]+)"|'([^']+)'|(\S+)/g;
-  let match;
-  while ((match = rx.exec(raw)) !== null) {
-    out.push(match[1] || match[2] || match[3]);
-  }
-  return out;
-}
-
 function formatPollPercent(votes, total){
   if (!total) return '0%';
   return `${Math.round((votes / total) * 100)}%`;
@@ -2445,14 +2434,8 @@ function renderPolls(api, state){
 }
 
 function splitPollParts(raw){
-  const quotedParts = parseQuotedArgs(raw);
-  if (quotedParts.length > 1) {
-    return quotedParts;
-  }
-  if (raw.includes('|')) {
-    return raw.split('|').map(part => part.trim()).filter(Boolean);
-  }
-  return raw.split(/\s+/).filter(Boolean);
+  if (!raw || !raw.includes('|')) return [];
+  return raw.split('|').map(part => part.trim()).filter(Boolean);
 }
 
 function cmdNewPoll(api, state, args){
@@ -2460,12 +2443,16 @@ function cmdNewPoll(api, state, args){
   const raw = (args || []).join(' ').trim();
   if (!raw){
     api.print('Usage: /newpoll <question> | <opt1> | <opt2> [| <opt3> ...]', 'yellow');
-    api.print('Tip: Use "|" or quotes. Example: /newpoll Best snack? | Popcorn | Pretzels', 'dim');
-    api.print('Tip: /newpoll "Best snack?" "Popcorn" "Pretzels"', 'dim');
+    api.print('Tip: Use "|" to separate items. Example: /newpoll Best snack? | Popcorn | Pretzels', 'dim');
     return;
   }
 
   const parts = splitPollParts(raw);
+  if (!parts.length){
+    api.print('Polls require "|" separators between the question and each option.', 'yellow');
+    api.print('Example: /newpoll Best snack? | Popcorn | Pretzels', 'dim');
+    return;
+  }
   const question = parts[0];
   const options = parts.slice(1);
 
@@ -2474,7 +2461,7 @@ function cmdNewPoll(api, state, args){
     return;
   }
   if (options.length < 2 || options.length > 5){
-    api.print('Polls need 2 to 5 options. Use "|" or quotes to separate items.', 'yellow');
+    api.print('Polls need 2 to 5 options. Use "|" to separate items.', 'yellow');
     return;
   }
 
