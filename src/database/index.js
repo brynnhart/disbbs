@@ -166,6 +166,37 @@ CREATE TABLE IF NOT EXISTS announcements (
 CREATE INDEX IF NOT EXISTS idx_announcements_expires_at ON announcements(expires_at);
 CREATE INDEX IF NOT EXISTS idx_announcements_created_at ON announcements(created_at);
 
+/* Polls */
+CREATE TABLE IF NOT EXISTS polls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  question TEXT NOT NULL,
+  creator_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  ended_by INTEGER REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_polls_created_at ON polls(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_polls_ended_at ON polls(ended_at DESC);
+
+CREATE TABLE IF NOT EXISTS poll_options (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  poll_id INTEGER NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+  option_index INTEGER NOT NULL,
+  option_text TEXT NOT NULL,
+  UNIQUE(poll_id, option_index)
+);
+CREATE INDEX IF NOT EXISTS idx_poll_options_poll ON poll_options(poll_id);
+
+CREATE TABLE IF NOT EXISTS poll_votes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  poll_id INTEGER NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+  option_id INTEGER NOT NULL REFERENCES poll_options(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  UNIQUE(poll_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_poll_votes_poll ON poll_votes(poll_id);
+
 CREATE TABLE IF NOT EXISTS users (
    id INTEGER PRIMARY KEY AUTOINCREMENT,
    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -427,6 +458,75 @@ CREATE TABLE IF NOT EXISTS users (
      WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')
   `);
 
+  const insertPoll = db.prepare(`
+    INSERT INTO polls (question, creator_id, created_at)
+    VALUES (?, ?, ?)
+  `);
+  const listActivePolls = db.prepare(`
+    SELECT p.id, p.question, p.creator_id, p.created_at,
+           u.username, u.display_name
+      FROM polls p
+      LEFT JOIN users u ON u.id = p.creator_id
+     WHERE p.ended_at IS NULL
+     ORDER BY p.created_at DESC
+  `);
+  const listEndedPolls = db.prepare(`
+    SELECT p.id, p.question, p.creator_id, p.created_at, p.ended_at,
+           u.username, u.display_name
+      FROM polls p
+      LEFT JOIN users u ON u.id = p.creator_id
+     WHERE p.ended_at IS NOT NULL
+     ORDER BY p.ended_at DESC
+     LIMIT ?
+  `);
+  const getPollById = db.prepare(`
+    SELECT p.id, p.question, p.creator_id, p.created_at, p.ended_at, p.ended_by,
+           u.username, u.display_name
+      FROM polls p
+      LEFT JOIN users u ON u.id = p.creator_id
+     WHERE p.id = ?
+  `);
+  const insertPollOption = db.prepare(`
+    INSERT INTO poll_options (poll_id, option_index, option_text)
+    VALUES (?, ?, ?)
+  `);
+  const listPollOptionsWithVotes = db.prepare(`
+    SELECT o.id, o.option_index, o.option_text,
+           COUNT(v.id) AS votes
+      FROM poll_options o
+      LEFT JOIN poll_votes v ON v.option_id = o.id
+     WHERE o.poll_id = ?
+     GROUP BY o.id
+     ORDER BY o.option_index ASC
+  `);
+  const getPollOptionByIndex = db.prepare(`
+    SELECT o.id, o.option_index, o.option_text
+      FROM poll_options o
+     WHERE o.poll_id = ? AND o.option_index = ?
+  `);
+  const countPollVotes = db.prepare(`
+    SELECT COUNT(1) AS total
+      FROM poll_votes
+     WHERE poll_id = ?
+  `);
+  const getPollVoteForUser = db.prepare(`
+    SELECT id, option_id
+      FROM poll_votes
+     WHERE poll_id = ? AND user_id = ?
+  `);
+  const insertPollVote = db.prepare(`
+    INSERT INTO poll_votes (poll_id, option_id, user_id, created_at)
+    VALUES (?, ?, ?, ?)
+  `);
+  const endPollById = db.prepare(`
+    UPDATE polls
+       SET ended_at = ?, ended_by = ?
+     WHERE id = ? AND ended_at IS NULL
+  `);
+  const removePollById = db.prepare(`
+    DELETE FROM polls WHERE id = ?
+  `);
+
   const sweepInactiveUsers = db.prepare(`
     DELETE FROM users
      WHERE is_admin = 0
@@ -666,6 +766,18 @@ CREATE TABLE IF NOT EXISTS users (
     listAnnouncements,
     deleteAnnouncementById,
     sweepExpiredAnnouncements,
+    insertPoll,
+    listActivePolls,
+    listEndedPolls,
+    getPollById,
+    insertPollOption,
+    listPollOptionsWithVotes,
+    getPollOptionByIndex,
+    countPollVotes,
+    getPollVoteForUser,
+    insertPollVote,
+    endPollById,
+    removePollById,
     sweepInactiveUsers,
     updateUserNorms,
     getUsersByNorm,

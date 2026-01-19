@@ -214,6 +214,18 @@ const {
   listAnnouncements,
   deleteAnnouncementById,
   sweepExpiredAnnouncements,
+  insertPoll,
+  listActivePolls,
+  listEndedPolls,
+  getPollById,
+  insertPollOption,
+  listPollOptionsWithVotes,
+  getPollOptionByIndex,
+  countPollVotes,
+  getPollVoteForUser,
+  insertPollVote,
+  endPollById,
+  removePollById,
   sweepInactiveUsers,
   updateUserNorms,
   getUsersByNorm,
@@ -427,6 +439,7 @@ function routeGo(api, state, name){
     case 'chat':   return renderChat(api, state);
     case 'about':  return renderAbout(api, state);
     case 'rules':  return renderRules(api, state);
+    case 'poll':   return renderPolls(api, state);
     default:       api.print('Unknown screen: '+name, 'red');
   }
 }
@@ -526,6 +539,11 @@ function cmdHelp(api, state){
   api.print('  /here      Show who is currently in the chat', 'cyan');
   api.print('  /post <text>  Share a short status update (swept after ~30 days)', 'cyan');
   api.print('  /feed [user]  View recent updates (optionally for a user)', 'cyan');
+  api.print('  /poll      Enter the poll booth', 'cyan');
+  api.print('  /newpoll <question> | <opt1> | <opt2> ...  Create a poll (2-5 options)', 'cyan');
+  api.print('  /vote <poll id> <option #>  Vote in a poll', 'cyan');
+  api.print('  /endpoll <id>   End your poll (or admin)', 'cyan');
+  api.print('  /removepoll <id> Remove your poll (or admin)', 'cyan');
   api.print('  /games     Door games list', 'cyan');
   api.print('  /play <game>  Open a door game in a new tab', 'cyan');
   api.print('  /news      Latest headlines from The Guardian', 'cyan');
@@ -612,6 +630,7 @@ function renderMenu(api, state){
     //b.print('  /ai <question>   Ask the AI for info', 'cyan');
     b.print('  /post <text>     Share a short status update', 'cyan');
     b.print('  /feed [user]     View the latest updates', 'cyan');
+    b.print('  /poll            Poll booth', 'cyan');
     b.print('  /board           Bulletin board', 'cyan');
     b.print('  /links           Community link share', 'cyan');
     b.print('  /news            Latest headlines (The Guardian)', 'cyan');
@@ -714,6 +733,229 @@ function cmdRemoveAnnouncement(api, state, args){
     console.error('Failed to remove announcement:', e && e.message ? e.message : e);
     api.print('Failed to remove announcement.', 'red');
   }
+}
+
+/* ======================= Polls ======================= */
+function formatPollPercent(votes, total){
+  if (!total) return '0%';
+  return `${Math.round((votes / total) * 100)}%`;
+}
+
+function getPollOptionsSummary(pollId){
+  const options = listPollOptionsWithVotes.all(pollId);
+  const total = options.reduce((sum, opt) => sum + (Number(opt.votes) || 0), 0);
+  return { options, total };
+}
+
+function renderPolls(api, state){
+  if (!requireAuth(api, state)) return;
+  const activePolls = listActivePolls.all();
+  const endedPolls = listEndedPolls.all(20);
+
+  api.batch(b => {
+    b.clear();
+    b.setInputLimit(null);
+    b.print('== Polls ==', 'magenta'); b.hr();
+
+    if (!activePolls.length){
+      b.print('No active polls. Create one with /newpoll <question> | <opt1> | <opt2> ...', 'dim');
+    } else {
+      b.print('Active polls:', 'yellow');
+      activePolls.forEach((poll) => {
+        const safeQuestion = sanitizeAndFormatDIS(poll.question || '');
+        b.printHTML(`<span class="yellow">[#${escapeHTML(String(poll.id))}]</span> ${safeQuestion}`);
+
+        const { options, total } = getPollOptionsSummary(poll.id);
+        options.forEach((opt) => {
+          const safeOpt = sanitizeAndFormatDIS(opt.option_text || '');
+          const votes = Number(opt.votes) || 0;
+          const percent = formatPollPercent(votes, total);
+          b.printHTML(`  ${escapeHTML(String(opt.option_index))}. ${safeOpt} <span class="dim">(${percent}, ${votes} vote${votes === 1 ? '' : 's'})</span>`);
+        });
+      });
+    }
+
+    b.hr();
+    b.print('== Ended Polls ==', 'magenta'); b.hr();
+
+    if (!endedPolls.length){
+      b.print('No polls have ended yet.', 'dim');
+    } else {
+      endedPolls.forEach((poll) => {
+        const safeQuestion = sanitizeAndFormatDIS(poll.question || '');
+        const { options, total } = getPollOptionsSummary(poll.id);
+        const maxVotes = options.reduce((max, opt) => Math.max(max, Number(opt.votes) || 0), 0);
+        const parts = options.map((opt) => {
+          const safeOpt = sanitizeAndFormatDIS(opt.option_text || '');
+          const votes = Number(opt.votes) || 0;
+          const percent = formatPollPercent(votes, total);
+          const text = `${opt.option_index}) ${safeOpt} ${percent} (${votes})`;
+          if (maxVotes > 0 && votes === maxVotes) {
+            return `<span class="green">${text}</span>`;
+          }
+          return text;
+        });
+        b.printHTML(`<span class="yellow">[#${escapeHTML(String(poll.id))}]</span> ${safeQuestion} <span class="dim">—</span> ${parts.join(' <span class="dim">|</span> ')}`);
+      });
+    }
+
+    b.hr();
+    b.print('Commands: /vote <poll id> <option #>  /newpoll <question> | <opt1> | <opt2> ...', 'cyan');
+    b.print('Owner/admin: /endpoll <id>  /removepoll <id>   /main to leave', 'cyan');
+    b.setInputType('text', 'Use /vote or /newpoll');
+  });
+
+  state.currentScreen = 'poll';
+}
+
+function splitPollParts(raw){
+  if (!raw || !raw.includes('|')) return [];
+  return raw.split('|').map(part => part.trim()).filter(Boolean);
+}
+
+function cmdNewPoll(api, state, args){
+  if (!requireAuth(api, state)) return;
+  const raw = (args || []).join(' ').trim();
+  if (!raw){
+    api.print('Usage: /newpoll <question> | <opt1> | <opt2> [| <opt3> ...]', 'yellow');
+    api.print('Tip: Use "|" to separate items. Example: /newpoll Best snack? | Popcorn | Pretzels', 'dim');
+    return;
+  }
+
+  const parts = splitPollParts(raw);
+  if (!parts.length){
+    api.print('Polls require "|" separators between the question and each option.', 'yellow');
+    api.print('Example: /newpoll Best snack? | Popcorn | Pretzels', 'dim');
+    return;
+  }
+  const question = parts[0];
+  const options = parts.slice(1);
+
+  if (!question){
+    api.print('Poll question is required.', 'yellow');
+    return;
+  }
+  if (options.length < 2 || options.length > 5){
+    api.print('Polls need 2 to 5 options. Use "|" to separate items.', 'yellow');
+    return;
+  }
+
+  try {
+    const createPoll = db.transaction(() => {
+      const createdAt = nowEpoch();
+      const info = insertPoll.run(question, state.userId || null, createdAt);
+      options.forEach((opt, idx) => {
+        insertPollOption.run(info.lastInsertRowid, idx + 1, opt);
+      });
+      return info.lastInsertRowid;
+    });
+    const pollId = createPoll();
+    api.print(`Poll #${pollId} created.`, 'green');
+    renderPolls(api, state);
+  } catch (e) {
+    console.error('Failed to create poll:', e && e.message ? e.message : e);
+    api.print('Failed to create poll.', 'red');
+  }
+}
+
+function cmdVote(api, state, args){
+  if (!requireAuth(api, state)) return;
+  const pollId = parseInt(args[0], 10);
+  const optionNum = parseInt(args[1], 10);
+  if (!pollId || !optionNum){
+    api.print('Usage: /vote <poll id> <option #>', 'yellow');
+    return;
+  }
+
+  const poll = getPollById.get(pollId);
+  if (!poll){
+    api.print('Poll not found.', 'red');
+    return;
+  }
+  if (poll.ended_at){
+    api.print('That poll has ended.', 'red');
+    return;
+  }
+
+  const existing = getPollVoteForUser.get(pollId, state.userId);
+  if (existing){
+    api.print('You already voted in this poll.', 'yellow');
+    return;
+  }
+
+  const opt = getPollOptionByIndex.get(pollId, optionNum);
+  if (!opt){
+    api.print('Invalid option number.', 'red');
+    return;
+  }
+
+  try {
+    insertPollVote.run(pollId, opt.id, state.userId, nowEpoch());
+    api.print('Vote recorded.', 'green');
+    renderPolls(api, state);
+  } catch (e) {
+    console.error('Failed to record vote:', e && e.message ? e.message : e);
+    api.print('Failed to record vote.', 'red');
+  }
+}
+
+function canManagePoll(poll, state){
+  if (!poll || !state) return false;
+  return state.isAdmin || (!!poll.creator_id && poll.creator_id === state.userId);
+}
+
+function cmdEndPoll(api, state, args){
+  if (!requireAuth(api, state)) return;
+  const pollId = parseInt(args[0], 10);
+  if (!pollId){
+    api.print('Usage: /endpoll <id>', 'yellow');
+    return;
+  }
+  const poll = getPollById.get(pollId);
+  if (!poll){
+    api.print('Poll not found.', 'red');
+    return;
+  }
+  if (!canManagePoll(poll, state)){
+    api.print('Only the poll creator or an admin can end this poll.', 'red');
+    return;
+  }
+  if (poll.ended_at){
+    api.print('That poll is already ended.', 'yellow');
+    return;
+  }
+  const info = endPollById.run(nowEpoch(), state.userId || null, pollId);
+  if (!info.changes){
+    api.print('Poll not updated.', 'red');
+    return;
+  }
+  api.print(`Poll #${pollId} ended.`, 'green');
+  renderPolls(api, state);
+}
+
+function cmdRemovePoll(api, state, args){
+  if (!requireAuth(api, state)) return;
+  const pollId = parseInt(args[0], 10);
+  if (!pollId){
+    api.print('Usage: /removepoll <id>', 'yellow');
+    return;
+  }
+  const poll = getPollById.get(pollId);
+  if (!poll){
+    api.print('Poll not found.', 'red');
+    return;
+  }
+  if (!canManagePoll(poll, state)){
+    api.print('Only the poll creator or an admin can remove this poll.', 'red');
+    return;
+  }
+  const info = removePollById.run(pollId);
+  if (!info.changes){
+    api.print('Poll not removed.', 'red');
+    return;
+  }
+  api.print(`Poll #${pollId} removed.`, 'green');
+  if (state.currentScreen === 'poll') renderPolls(api, state);
 }
 
 /* ======================= Status Posts / Feed ======================= */
@@ -2013,6 +2255,7 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'about':        routeGo(api, state, 'about'); return true;
     case 'rules':        routeGo(api, state, 'rules'); return true;
     case 'board':        renderBoard(api, state); return true;
+    case 'poll':         renderPolls(api, state); return true;
     case 'topic':        if (args.length) openTopic(api, state, parseInt(args[0],10)||0); else api.print('Usage: /topic <id>', 'yellow'); return true;
     case 'newtopic':     return (cmdNewTopic(api, state, args), true);
     // Admin-only removal by list index or id (cmdRemoveTopic should enforce admin)
@@ -2037,6 +2280,10 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'ai':           cmdAi(api, state, args); return true;
     case 'post':         cmdPost(api, state, args); return true;
     case 'feed':         cmdFeed(api, state, args); return true;
+    case 'newpoll':      cmdNewPoll(api, state, args); return true;
+    case 'vote':         cmdVote(api, state, args); return true;
+    case 'endpoll':      cmdEndPoll(api, state, args); return true;
+    case 'removepoll':   cmdRemovePoll(api, state, args); return true;
     case 'dm':           cmdDM(api, state, args); return true;
     case 'messages':     cmdMessages(api, state); return true;
     case 'suggest':      cmdSuggest(api, state, args); return true;
@@ -2171,6 +2418,7 @@ wss.on('connection', (ws) => {
     if (state.currentScreen === 'news:item')  { newsItemHandleRaw && newsItemHandleRaw(raw, api, state); return; }
     if (state.currentScreen === 'guardian')   { guardianNewsHandleRaw && guardianNewsHandleRaw(raw, api, state); return; }
     if (state.currentScreen === 'board')      { api.print('Use /topic <id> or /newtopic <title>.', 'dim'); return; }
+    if (state.currentScreen === 'poll')       { api.print('Use /vote <poll id> <option #> or /newpoll <question> | <opt1> | <opt2> ...', 'dim'); return; }
 
     // Fallback
     api.print('Use /help for commands.', 'dim');
