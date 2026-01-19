@@ -143,6 +143,7 @@ const DOOR_GAMES = [
   {
     name: 'PacMan',
     url: 'https://pac.disbbs.org',
+    description: 'a procedurally generate clone of the classic arcade game.',
   },
 ];
 
@@ -2119,7 +2120,7 @@ function cmdGames(api, state){
       b.print('No door games available yet.', 'dim');
     } else {
       DOOR_GAMES.forEach(game => {
-        const line = `${game.name} — ${game.url}`;
+        const line = `${game.name} — ${game.url} — ${game.description}`;
         b.printHTML(sanitizeAndFormatDIS(line));
       });
       b.hr();
