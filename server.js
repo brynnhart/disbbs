@@ -540,7 +540,7 @@ function cmdHelp(api, state){
   api.print('  /post <text>  Share a short status update (swept after ~30 days)', 'cyan');
   api.print('  /feed [user]  View recent updates (optionally for a user)', 'cyan');
   api.print('  /poll      Enter the poll booth', 'cyan');
-  api.print('  /newpoll <question> <opt1> <opt2> ...  Create a poll (2-5 options)', 'cyan');
+  api.print('  /newpoll <question> | <opt1> | <opt2> ...  Create a poll (2-5 options)', 'cyan');
   api.print('  /vote <poll id> <option #>  Vote in a poll', 'cyan');
   api.print('  /endpoll <id>   End your poll (or admin)', 'cyan');
   api.print('  /removepoll <id> Remove your poll (or admin)', 'cyan');
@@ -769,7 +769,7 @@ function renderPolls(api, state){
     b.print('== Polls ==', 'magenta'); b.hr();
 
     if (!activePolls.length){
-      b.print('No active polls. Create one with /newpoll <question> <opt1> <opt2> ...', 'dim');
+      b.print('No active polls. Create one with /newpoll <question> | <opt1> | <opt2> ...', 'dim');
     } else {
       b.print('Active polls:', 'yellow');
       activePolls.forEach((poll) => {
@@ -811,7 +811,7 @@ function renderPolls(api, state){
     }
 
     b.hr();
-    b.print('Commands: /vote <poll id> <option #>  /newpoll <question> <opt1> <opt2> ...', 'cyan');
+    b.print('Commands: /vote <poll id> <option #>  /newpoll <question> | <opt1> | <opt2> ...', 'cyan');
     b.print('Owner/admin: /endpoll <id>  /removepoll <id>   /main to leave', 'cyan');
     b.setInputType('text', 'Use /vote or /newpoll');
   });
@@ -819,16 +819,28 @@ function renderPolls(api, state){
   state.currentScreen = 'poll';
 }
 
+function splitPollParts(raw){
+  const quotedParts = parseQuotedArgs(raw);
+  if (quotedParts.length > 1) {
+    return quotedParts;
+  }
+  if (raw.includes('|')) {
+    return raw.split('|').map(part => part.trim()).filter(Boolean);
+  }
+  return raw.split(/\s+/).filter(Boolean);
+}
+
 function cmdNewPoll(api, state, args){
   if (!requireAuth(api, state)) return;
   const raw = (args || []).join(' ').trim();
   if (!raw){
-    api.print('Usage: /newpoll <question> <opt1> <opt2> <opt3> ...', 'yellow');
-    api.print('Tip: Use quotes for multi-word items, e.g. /newpoll "Best snack?" "Popcorn" "Pretzels"', 'dim');
+    api.print('Usage: /newpoll <question> | <opt1> | <opt2> [| <opt3> ...]', 'yellow');
+    api.print('Tip: Use "|" or quotes. Example: /newpoll Best snack? | Popcorn | Pretzels', 'dim');
+    api.print('Tip: /newpoll "Best snack?" "Popcorn" "Pretzels"', 'dim');
     return;
   }
 
-  const parts = parseQuotedArgs(raw);
+  const parts = splitPollParts(raw);
   const question = parts[0];
   const options = parts.slice(1);
 
@@ -837,7 +849,7 @@ function cmdNewPoll(api, state, args){
     return;
   }
   if (options.length < 2 || options.length > 5){
-    api.print('Polls need 2 to 5 options.', 'yellow');
+    api.print('Polls need 2 to 5 options. Use "|" or quotes to separate items.', 'yellow');
     return;
   }
 
@@ -2419,7 +2431,7 @@ wss.on('connection', (ws) => {
     if (state.currentScreen === 'news:item')  { newsItemHandleRaw && newsItemHandleRaw(raw, api, state); return; }
     if (state.currentScreen === 'guardian')   { guardianNewsHandleRaw && guardianNewsHandleRaw(raw, api, state); return; }
     if (state.currentScreen === 'board')      { api.print('Use /topic <id> or /newtopic <title>.', 'dim'); return; }
-    if (state.currentScreen === 'poll')       { api.print('Use /vote <poll id> <option #> or /newpoll <question> <opt1> <opt2> ...', 'dim'); return; }
+    if (state.currentScreen === 'poll')       { api.print('Use /vote <poll id> <option #> or /newpoll <question> | <opt1> | <opt2> ...', 'dim'); return; }
 
     // Fallback
     api.print('Use /help for commands.', 'dim');
