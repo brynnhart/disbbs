@@ -440,7 +440,7 @@ function routeGo(api, state, name){
     case 'chat':   return renderChat(api, state);
     case 'about':  return renderAbout(api, state);
     case 'rules':  return renderRules(api, state);
-    case 'poll':   return renderPolls(api, state);
+    case 'polls':   return renderPolls(api, state);
     default:       api.print('Unknown screen: '+name, 'red');
   }
 }
@@ -540,7 +540,7 @@ function cmdHelp(api, state){
   api.print('  /here      Show who is currently in the chat', 'cyan');
   api.print('  /post <text>  Share a short status update (swept after ~30 days)', 'cyan');
   api.print('  /feed [user]  View recent updates (optionally for a user)', 'cyan');
-  api.print('  /poll      Enter the poll booth', 'cyan');
+  api.print('  /polls      Enter the poll booth', 'cyan');
   api.print('  /newpoll <question> | <opt1> | <opt2> ...  Create a poll (2-5 options)', 'cyan');
   api.print('  /vote <poll id> <option #>  Vote in a poll', 'cyan');
   api.print('  /endpoll <id>   End your poll (or admin)', 'cyan');
@@ -631,7 +631,7 @@ function renderMenu(api, state){
     //b.print('  /ai <question>   Ask the AI for info', 'cyan');
     b.print('  /post <text>     Share a short status update', 'cyan');
     b.print('  /feed [user]     View the latest updates', 'cyan');
-    b.print('  /poll            Poll booth', 'cyan');
+    b.print('  /polls            Poll booth', 'cyan');
     b.print('  /board           Bulletin board', 'cyan');
     b.print('  /links           Community link share', 'cyan');
     b.print('  /news            Latest headlines (The Guardian)', 'cyan');
@@ -806,7 +806,7 @@ function renderPolls(api, state){
     b.setInputType('text', 'Use /vote or /newpoll');
   });
 
-  state.currentScreen = 'poll';
+  state.currentScreen = 'polls';
 }
 
 function splitPollParts(raw){
@@ -2256,7 +2256,7 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'about':        routeGo(api, state, 'about'); return true;
     case 'rules':        routeGo(api, state, 'rules'); return true;
     case 'board':        renderBoard(api, state); return true;
-    case 'poll':         renderPolls(api, state); return true;
+    case 'polls':         renderPolls(api, state); return true;
     case 'topic':        if (args.length) openTopic(api, state, parseInt(args[0],10)||0); else api.print('Usage: /topic <id>', 'yellow'); return true;
     case 'newtopic':     return (cmdNewTopic(api, state, args), true);
     // Admin-only removal by list index or id (cmdRemoveTopic should enforce admin)
