@@ -145,6 +145,11 @@ const DOOR_GAMES = [
     url: 'https://pac.disbbs.org',
     description: 'a procedurally generated clone of the classic arcade game.',
   },
+  {
+    name: 'ASCIIcraft',
+    url: 'https://craft.disbbs.org',
+    description: 'Minecraft meets terminal style game.',
+  },
 ];
 
 const {
