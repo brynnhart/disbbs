@@ -143,13 +143,18 @@ const DOOR_GAMES = [
   {
     name: 'PacMan',
     url: 'https://pac.disbbs.org',
-    description: 'a procedurally generated clone of the classic arcade game.',
+    description: 'a procedurally generated clone of the classic arcade game (IN DEVELOPMENT).',
   },
   {
     name: 'ASCIIcraft',
     url: 'https://craft.disbbs.org',
-    description: 'Minecraft meets terminal style game.',
+    description: 'Minecraft meets terminal style game (IN DEVELOPMENT).',
   },
+  {
+    name: 'LORD',
+    url: 'https://lord.disbbs.org',
+    description: 'Custom Legend of the Red Dragon port (SEPARATE LOGIN REQUIRED!)',
+  }
 ];
 
 const {
