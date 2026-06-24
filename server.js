@@ -183,9 +183,7 @@ const {
   getUserAboutById,
   getUserAboutByName,
   setUserAboutById,
-  getInvite,
-  redeemInvite,
-  sweepExpiredInvites,
+  setUserSignupReason,
   insertDM,
   listDMsForUser,
   countUnreadDMs,
@@ -249,8 +247,6 @@ const {
   refreshUserNormsByRow,
   resolveUserHandle,
   normalizeHandle,
-  createInvite,
-  validateInvite,
   createUser,
   verifyLogin,
 } = helpers;
@@ -399,6 +395,7 @@ function makeInitialState(){
     username:null,
     currentScreen:'splash',
     login:{ step:'username', tempUser:'' },
+    register:null,
     userId:null,
     isAdmin:false,
     userColor:null,
@@ -470,15 +467,14 @@ function renderSplash(api, state){
     b.clear();
     b.printHTML(splashSVG());
     b.print('Enter username to log in', 'cyan');
-    b.print('or type /register <user> <pass> <invite> to create a new account.', 'dim');
-     b.print('Accounts removed after 60 days of inactivity. Issues? sysop@disbbs.org', 'red');
+    b.print('or type /register <user> <pass> to create a new account.', 'dim');
     b.setInputType('text', 'Username or /register');
     b.setInputLimit(null);
   });
   state.login.step='username'; state.login.tempUser='';
 }
 function splashHandleCommand(cmd, api){
-  if (cmd==='help'){ api.hr(); api.print('Splash commands:', 'yellow'); api.print('  /help','cyan'); api.print('  /clear','cyan'); api.print('  /register <user> <pass> <invite>','cyan'); return true; }
+  if (cmd==='help'){ api.hr(); api.print('Splash commands:', 'yellow'); api.print('  /help','cyan'); api.print('  /clear','cyan'); api.print('  /register <user> <pass>','cyan'); return true; }
   if (cmd==='clear'){ api.clear(); return true; }
   return false;
 }
@@ -544,7 +540,7 @@ function splashHandleRaw(text, api, state){
 function cmdHelp(api, state){
   api.hr();
   api.print('Global slash commands:', 'yellow');
-  api.print('  /register  Create an account: /register <user> <pass> <invite>', 'cyan');
+  api.print('  /register  Create an account: /register <user> <pass>', 'cyan');
   api.print('  /chat      Enter the Commons Chat', 'cyan');
   //api.print('  /ai <question>  Ask the AI for an informational response', 'cyan');
   api.print('  /here      Show who is currently in the chat', 'cyan');
@@ -587,9 +583,6 @@ function cmdHelp(api, state){
 
   if (state && state.isAdmin){
     api.hr(); api.print('Admin:', 'yellow');
-    api.print('  /makeinvite [days] [note]   Create a single-use invite', 'cyan');
-    api.print('  /listinvites [unused|used|all]  Show recent invites', 'cyan');
-    api.print('  /revokeinvite <code>        Expire an unused invite', 'cyan');
     api.print('  /removesuggestion <#>  Remove a suggestion (from the current list)', 'cyan');
     api.print('  /retention <area> <days>   Set auto-delete retention (board/links/messages/posts/users)', 'cyan');
     api.print('  /adminchat   Admin live room (private)', 'cyan');
@@ -661,7 +654,6 @@ function menuHandleRaw(text, api){ api.print('Use slash commands here. Try /chat
 
 /* ======================= Announcements ======================= */
 function fetchActiveAnnouncements(){
-  try { runAnnouncementSweep(); } catch {}
   const limit = Math.max(1, Math.min(200, ANNOUNCEMENT_LIST_LIMIT));
   return listAnnouncements.all(limit);
 }
@@ -1033,7 +1025,6 @@ function printStatusFeed(api, rows, opts = {}){
 
 function cmdFeed(api, state, args){
   if (!requireAuth(api, state)) return;
-  runStatusPostSweep();
 
   const limit = getStatusFeedLimit();
   const targetRaw = (args || []).join(' ').trim();
@@ -1110,8 +1101,6 @@ function cmdPost(api, state, args){
     api.print('Failed to publish update.', 'red');
     return;
   }
-
-  try { runStatusPostSweep(); } catch {}
 
   const fromRow = { id: state.userId, username: state.username };
   notifyMentions(text, fromRow, 'status');
@@ -1368,8 +1357,8 @@ function topicHandleRaw(text, api, state){
 
   const ts = nowEpoch();
   insertComment.run(topicId, state.userId || null, body, ts);
-  const days = +(getSetting.get('board_inactive_days')?.value || 30);
-  updateTopicBump.run(ts, ts + days*86400, topicId);
+  const days = +(getSetting.get('board_inactive_days')?.value || 0);
+  updateTopicBump.run(ts, days > 0 ? ts + days*86400 : null, topicId);
 
   // re-render topic so commenter sees their post immediately
   openTopic(api, state, topicId);
@@ -1389,8 +1378,8 @@ function topicPostRaw(raw, api, state){
   if (visible > maxLen){ api.print(`Reply too long (max ${maxLen} visible chars).`, 'red'); return; }
   const ts = nowEpoch();
   insertComment.run(state.currentTopicId, state.userId || null, raw, ts);
-  const days = +(getSetting.get('board_inactive_days')?.value || 30);
-  updateTopicBump.run(ts, ts + days*86400, state.currentTopicId);
+  const days = +(getSetting.get('board_inactive_days')?.value || 0);
+  updateTopicBump.run(ts, days > 0 ? ts + days*86400 : null, state.currentTopicId);
   openTopic(api, state, state.currentTopicId);
 }
 function cmdNewTopic(api, state, args){
@@ -1400,8 +1389,8 @@ function cmdNewTopic(api, state, args){
   const maxLen = +(getSetting.get('board_title_max_len')?.value || 120);
   if (visibleLengthDIS(raw) > maxLen){ api.print(`Title too long (max ${maxLen} visible chars).`, 'red'); return; }
   const ts = nowEpoch();
-  const days = +(getSetting.get('board_inactive_days')?.value || 30);
-  insertTopic.run(raw, state.userId || null, ts, ts, ts + days*86400);
+  const days = +(getSetting.get('board_inactive_days')?.value || 0);
+  insertTopic.run(raw, state.userId || null, ts, ts, days > 0 ? ts + days*86400 : null);
   api.print('Topic created.', 'green');
   renderBoard(api, state);
 }
@@ -1509,9 +1498,8 @@ function newsItemHandleRaw(text, api, state){
   const ts = nowEpoch();
   insertNewsComment.run(newsId, state.userId || null, body, ts);
 
-  // FIX: pass 3 args to bumpNewsPost (last_commented_at, expires_at, id)
-  const days = +(getSetting.get('news_inactive_days')?.value || 30);
-  bumpNewsPost.run(ts, ts + days*86400, newsId);
+  const days = +(getSetting.get('news_inactive_days')?.value || 0);
+  bumpNewsPost.run(ts, days > 0 ? ts + days*86400 : null, newsId);
 
   // re-render so commenter sees their post
   openNewsItem(api, state, newsId);
@@ -1624,8 +1612,8 @@ function cmdAddNews(api, state, args){
   if (!url){ api.print('Invalid URL. Example: example.com or https://example.com/article', 'red'); return; }
 
   const ts = nowEpoch();
-  const days = +(getSetting.get('news_inactive_days')?.value || 30);
-  insertNewsPost.run(headline, url, 'link', state.userId || null, ts, ts, ts + days*86400);
+  const days = +(getSetting.get('news_inactive_days')?.value || 0);
+  insertNewsPost.run(headline, url, 'link', state.userId || null, ts, ts, days > 0 ? ts + days*86400 : null);
   api.print('Link added.', 'green');
   renderNewsList(api, state);
 }
@@ -1775,57 +1763,6 @@ function cmdSetDisplay(api, state, args){
 }
 
 
-function cmdMakeInvite(api, state, args){
-  if (!requireAuth(api, state)) return;
-  let days = 7, note = '';
-  if (args && args.length) {
-    const maybe = parseInt(args[0], 10);
-    if (!Number.isNaN(maybe) && maybe >= 0) { days = maybe; note = args.slice(1).join(' ').trim(); }
-    else { note = args.join(' ').trim(); }
-  }
-  const out = createInvite({ creatorId: state.userId, creatorName: state.username, days, note });
-  if (!out.ok) { api.print('Failed to create invite.', 'red'); return; }
-  const expiresLine = out.expires_at ? new Date(out.expires_at*1000).toLocaleString() : 'never';
-  api.print('Invite created:', 'green');
-  api.print(`  Code: ${out.code}`, 'cyan');
-  api.print(`  Expires: ${expiresLine}`, 'cyan');
-  if (note) api.print(`  Note: ${note}`, 'cyan');
-  api.print('Share this code privately. It can be used only once.', 'dim');
-}
-function cmdWho(api){
-  const list = Array.from(HUB.online);
-  api.print(list.length ? `Online: ${list.join(', ')}` : 'Nobody online', 'cyan');
-}
-
-function cmdListInvites(api, state, args){
-  if (!requireAuth(api, state)) return;
-  if (!state.isAdmin){ api.print('Unknown command.', 'red'); return; } // hidden to non-admins
-  const mode = (args[0]||'unused').toLowerCase(); // unused|used|all
-  let where = 'used_at IS NULL'; if (mode==='used') where='used_at IS NOT NULL'; else if (mode==='all') where='1=1';
-  const rows = db.prepare(`SELECT code, created_at, expires_at, used_at, note, created_by_name, used_by_name FROM invites WHERE ${where} ORDER BY created_at DESC LIMIT 50`).all();
-  if (!rows.length){ api.print('No invites found.', 'dim'); return; }
-  api.hr(); api.print(`Invites (${mode}):`, 'yellow');
-  rows.forEach(r=>{
-    const exp = r.expires_at ? new Date(r.expires_at*1000).toLocaleString() : 'never';
-    const used = r.used_at ? new Date(r.used_at*1000).toLocaleString() : '—';
-    const maker = r.created_by_name ? ` by ${r.created_by_name}` : '';
-    const usedBy = r.used_by_name ? ` → ${r.used_by_name}` : '';
-    const noteBit = r.note ? ` - ${r.note}` : '';
-    api.print(`• ${r.code}${maker}${usedBy}  exp:${exp}  used:${used}${noteBit}`, r.used_at?'dim':'cyan');
-  });
-}
-
-function cmdRevokeInvite(api, state, args){
-  if (!requireAuth(api, state)) return;
-  if (!state.isAdmin){ api.print('Unknown command.', 'red'); return; }
-  const code = (args[0]||'').trim(); if (!code){ api.print('Usage: /revokeinvite <code>', 'yellow'); return; }
-  const row = getInvite.get(code);
-  if (!row){ api.print('No such invite.', 'red'); return; }
-  if (row.used_at){ api.print('Invite already used; cannot revoke.', 'yellow'); return; }
-  db.prepare(`UPDATE invites SET expires_at = strftime('%s','now') WHERE code = ? AND used_at IS NULL`).run(code);
-  api.print('Invite revoked.', 'green');
-}
-
 function cmdRetention(api, state, args){
   if (!requireAuth(api, state)) return;
   if (!state.isAdmin){ api.print('Unknown command.', 'red'); return; }
@@ -1882,7 +1819,7 @@ function cmdRetention(api, state, args){
   api.print(`Retention updated: ${area} → ${days} day${days === 1 ? '' : 's'}.`, 'green');
 }
 
-/* ======================= DMs, Suggestions, Invites (brevity) ======================= */
+/* ======================= DMs & Suggestions ======================= */
 function cmdDM(api, state, args){
   if (!requireAuth(api, state)) return;
 
@@ -2017,8 +1954,8 @@ function cmdSuggest(api, state, args){
   if (!body){ api.print('Usage: /suggest <text>', 'yellow'); return; }
   const max = +(getSetting.get('suggestion_max_len')?.value || 400);
   if (body.length > max){ api.print(`Too long (max ${max}).`, 'red'); return; }
-  const ts = nowEpoch(); const days = +(getSetting.get('suggestion_retention_days')?.value || 60);
-  insertSuggestion.run(state.userId || null, body, ts, ts + days*86400);
+  const ts = nowEpoch(); const days = +(getSetting.get('suggestion_retention_days')?.value || 0);
+  insertSuggestion.run(state.userId || null, body, ts, days > 0 ? ts + days*86400 : null);
   api.print('Thanks for the suggestion.', 'green');
 }
 function cmdSuggestions(api, state){
@@ -2165,12 +2102,12 @@ function cmdPlay(api, state, args){
 }
 
 
-/* ======================= Splash: Register & Invites ======================= */
+/* ======================= Splash: Register ======================= */
 function cmdRegister(api, state, args){
-  const [username, password, inviteCode] = args || [];
+  const [username, password] = args || [];
 
-  if (!username || !password || !inviteCode) {
-    api.print('Usage: /register <username> <password> <invite>', 'yellow');
+  if (!username || !password) {
+    api.print('Usage: /register <username> <password>', 'yellow');
     return;
   }
   if (password.length < 6) {
@@ -2178,44 +2115,59 @@ function cmdRegister(api, state, args){
     return;
   }
 
-  // 1) validate invite
-  const vi = validateInvite(inviteCode);
-  if (!vi.ok) {
-    const why = vi.reason === 'no_such' ? 'Invite not found.'
-              : vi.reason === 'used'    ? 'Invite already used.'
-              : vi.reason === 'expired' ? 'Invite expired.'
-              : 'Invalid invite.';
-    api.print(why, 'red');
-    return;
-  }
-
-  // 2) create the account (re-use your existing createUser)
-  const res = createUser(username, password);
-  if (!res.ok) {
+  // Pre-check username availability before asking the question
+  const existing = getUserByName.get(username);
+  if (existing) {
     api.print('That username is taken.', 'red');
     return;
   }
 
-  // 3) redeem invite (single-use)
-  try {
-    const newUser = getUserByName.get(username);
-    const changed = redeemInvite.run(newUser.id, newUser.username, inviteCode).changes;
-    if (!changed) {
-      api.print('Invite could not be redeemed (race condition). Try another.', 'red');
-      // Rollback user creation here only if you want strict semantics.
-      return;
-    }
-  } catch(e) {
-    api.print('Invite redemption failed. Try another code.', 'red');
-    return;
+  state.register = { step: 'question', username, password };
+  api.print('One question before we continue:', 'cyan');
+  api.print('What brought you to DIS?', 'cyan');
+  api.setInputType('text', 'What brought you to DIS?');
+  api.setInputLimit(null);
+}
+
+function handleRegisterAnswer(answer, api, state){
+  if (!state.register || state.register.step !== 'question') return false;
+
+  const { username, password } = state.register;
+  state.register = null;
+
+  if (!answer || !answer.trim()) {
+    api.print('Please tell us what brought you to DIS.', 'dim');
+    state.register = { step: 'question', username, password };
+    return true;
   }
 
-  // 4) success messages differ based on session state
+  const res = createUser(username, password);
+  if (!res.ok) {
+    api.print('That username is already taken. Try /register again with a different name.', 'red');
+    // Return to login prompt
+    state.login.step = 'username';
+    api.print('Enter username:', 'cyan');
+    api.setInputType('text', 'Username');
+    api.setInputLimit(null);
+    return true;
+  }
+
+  try {
+    setUserSignupReason.run(answer.trim(), res.id);
+  } catch (e) {
+    console.error('Failed to save signup reason:', e && e.message ? e.message : e);
+  }
+
   if (state && state.authenticated) {
     api.print(`Account created: ${username}. You remain logged in as ${state.username}.`, 'green');
   } else {
     api.print('Account created. Please log in with your new credentials.', 'green');
+    state.login.step = 'username';
+    api.print('Enter username:', 'cyan');
+    api.setInputType('text', 'Username');
+    api.setInputLimit(null);
   }
+  return true;
 }
 
 function cmdPasswd(api, state, args){
@@ -2309,10 +2261,7 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'display':      (typeof cmdShowDisplay === 'function' ? cmdShowDisplay : cmdDisplay)(api, state); return true;
     case 'displayreset': cmdDisplayReset(api, state); return true;
 
-    /* Invites + Register */
-    case 'makeinvite':   return (cmdMakeInvite(api, state, args), true);
-    case 'listinvites':  return (cmdListInvites(api, state, args), true);
-    case 'revokeinvite': return (cmdRevokeInvite(api, state, args), true);
+    /* Register */
     case 'retention':    return (cmdRetention(api, state, args), true);
     case 'register':     cmdRegister(api, state, args); return true;
 
@@ -2422,6 +2371,7 @@ wss.on('connection', (ws) => {
 
     // Raw input
     // === Raw input → route by current screen ===
+    if (state.register && state.register.step === 'question') { handleRegisterAnswer(raw, api, state); return; }
     if (state.currentScreen === 'splash')     { splashHandleRaw && splashHandleRaw(raw, api, state); return; }
     if (state.currentScreen === 'chat')       { chatHandleRaw && chatHandleRaw(raw, api, state);     return; }
     if (state.currentScreen === 'adminchat')  { adminChatHandleRaw && adminChatHandleRaw(raw, api, state); return; }
@@ -2450,7 +2400,6 @@ function runBoardSweep(){ try { sweepExpiredTopics.run(); } catch {} }
 function runNewsSweep(){ try { sweepExpiredNews.run(); } catch {} }
 function runChatSweep(){ try { sweepExpiredMessages.run(); } catch {} }
 function runDMSweep(){ try { sweepExpiredDMs.run(); } catch {} }
-function runInviteSweep(){ try { sweepExpiredInvites.run(); } catch {} }
 function runSuggestionSweep(){ try { sweepExpiredSuggestions.run(); } catch {} }
 function runStatusPostSweep(){ try { sweepExpiredStatusPosts.run(); } catch {} }
 function runAdminChatSweep(){ try { sweepExpiredAdminMessages.run(); } catch {} }
@@ -2466,7 +2415,7 @@ function runInactiveUserSweep(){
 
 
 setInterval(()=>{
-  runChatSweep(); runDMSweep(); runInviteSweep(); runSuggestionSweep(); runStatusPostSweep(); runBoardSweep(); runNewsSweep(); runAdminChatSweep(); runAnnouncementSweep(); runInactiveUserSweep();
+  runChatSweep(); runDMSweep();
 }, 10 * 60 * 1000);
 
 
@@ -2476,7 +2425,7 @@ function retentionSecondsAdmin(){
 }
 
 function inactiveUserAgeSeconds(){
-  const days = +(getSetting.get('user_inactive_days')?.value || 60);
+  const days = +(getSetting.get('user_inactive_days')?.value || 0);
   return days > 0 ? days*86400 : 0;
 }
 

@@ -2,8 +2,6 @@
 
 const Database = require('better-sqlite3');
 const bcrypt = require('bcryptjs');
-const crypto = require('crypto');
-
 const { stripDISFormatting } = require('../utils/formatting');
 const { nowEpoch } = require('../utils/time');
 
@@ -34,23 +32,6 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS invites (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  code TEXT NOT NULL UNIQUE,
-  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-  created_by_name TEXT,
-  created_at INTEGER NOT NULL,
-  expires_at INTEGER,
-  used_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-  used_by_name TEXT,
-  used_at INTEGER,
-  note TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_invites_code       ON invites(code);
-CREATE INDEX IF NOT EXISTS idx_invites_expires_at ON invites(expires_at);
-CREATE INDEX IF NOT EXISTS idx_invites_used_at    ON invites(used_at);
 
 /* DMs */
 CREATE TABLE IF NOT EXISTS dm_messages (
@@ -212,7 +193,7 @@ CREATE TABLE IF NOT EXISTS users (
   ensureNotificationsSchema(db);
   ensureAboutColumn(db);
   ensureNormalizationColumns(db);
-  ensureInviteAuditColumns(db);
+  ensureSignupReasonColumn(db);
 
   const getSetting = db.prepare('SELECT value FROM settings WHERE key=?');
   const setSetting = db.prepare(`
@@ -233,20 +214,7 @@ CREATE TABLE IF NOT EXISTS users (
   const getUserAboutByName = db.prepare('SELECT about FROM users WHERE username = ?');
   const setUserAboutById = db.prepare('UPDATE users SET about = ? WHERE id = ?');
 
-  const insertInvite = db.prepare(`
-    INSERT INTO invites (code, created_by, created_by_name, created_at, expires_at, note)
-    VALUES (?, ?, ?, strftime('%s','now'), ?, ?)
-  `);
-  const getInvite = db.prepare('SELECT * FROM invites WHERE code = ?');
-  const redeemInvite = db.prepare(`
-    UPDATE invites
-       SET used_by = ?, used_by_name = ?, used_at = strftime('%s','now')
-     WHERE code = ? AND used_at IS NULL
-  `);
-  const sweepExpiredInvites = db.prepare(`
-    DELETE FROM invites
-     WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')
-  `);
+  const setUserSignupReason = db.prepare('UPDATE users SET signup_reason = ? WHERE id = ?');
 
   const insertDM = db.prepare(`
     INSERT INTO dm_messages (sender_id, recipient_id, body, created_at, expires_at)
@@ -587,24 +555,24 @@ CREATE TABLE IF NOT EXISTS users (
   defSetting('chat_retention_days', 7);
   defSetting('dm_retention_days', 14);
   defSetting('dm_max_len', 160);
-  defSetting('suggestion_retention_days', 60);
+  defSetting('suggestion_retention_days', 0);
   defSetting('suggestion_max_len', 400);
-  defSetting('board_inactive_days', 30);
+  defSetting('board_inactive_days', 0);
   defSetting('board_title_max_len', 120);
   defSetting('board_reply_max_len', 600);
   defSetting('board_list_limit', 100);
-  defSetting('news_inactive_days', 30);
+  defSetting('news_inactive_days', 0);
   defSetting('news_title_max_len', 120);
   defSetting('news_reply_max_len', 600);
   defSetting('news_list_limit', 150);
   defSetting('admin_chat_retention_days', 7);
-  defSetting('announcement_retention_days', 30);
+  defSetting('announcement_retention_days', 0);
   defSetting('about_max_len', 600);
   defSetting('users_page_size', 20);
-  defSetting('status_retention_days', 30);
+  defSetting('status_retention_days', 0);
   defSetting('status_max_len', 280);
   defSetting('status_feed_limit', 50);
-  defSetting('user_inactive_days', 60);
+  defSetting('user_inactive_days', 0);
 
   function normalizeHandle(s){
     if (!s) return '';
@@ -630,30 +598,6 @@ CREATE TABLE IF NOT EXISTS users (
     if (rows.length === 1) return { row: rows[0] };
     if (rows.length > 1)   return { ambiguous: rows.map(r => ({ id:r.id, username:r.username })) };
     return null;
-  }
-
-  function makeInviteCode(){
-    const hex = crypto.randomBytes(20).toString('hex').toUpperCase();
-    return hex.match(/.{1,4}/g).join('-');
-  }
-
-  function createInvite({ creatorId, creatorName, days, note }){
-    const expires_at = (typeof days === 'number' && days > 0) ? (nowEpoch() + days*86400) : null;
-    const code = makeInviteCode();
-    try {
-      insertInvite.run(code, creatorId || null, creatorName || null, expires_at, note || null);
-      return { ok:true, code, expires_at };
-    } catch (e) {
-      return { ok:false, err: e && e.message ? e.message : String(e) };
-    }
-  }
-
-  function validateInvite(code){
-    const row = getInvite.get(code);
-    if (!row) return { ok:false, reason:'no_such' };
-    if (row.used_at) return { ok:false, reason:'used' };
-    if (row.expires_at && row.expires_at <= nowEpoch()) return { ok:false, reason:'expired' };
-    return { ok:true, invite: row };
   }
 
   function createUser(username, password, opts = {}){
@@ -723,10 +667,7 @@ CREATE TABLE IF NOT EXISTS users (
     getUserAboutById,
     getUserAboutByName,
     setUserAboutById,
-    insertInvite,
-    getInvite,
-    redeemInvite,
-    sweepExpiredInvites,
+    setUserSignupReason,
     insertDM,
     listDMsForUser,
     countUnreadDMs,
@@ -795,9 +736,6 @@ CREATE TABLE IF NOT EXISTS users (
     normalizeHandle,
     refreshUserNormsByRow,
     resolveUserHandle,
-    createInvite,
-    validateInvite,
-    makeInviteCode,
     createUser,
     verifyLogin,
   };
@@ -856,34 +794,14 @@ function ensureNormalizationColumns(db){
   }
 }
 
-function ensureInviteAuditColumns(db){
+function ensureSignupReasonColumn(db){
   try {
-    const cols = db.prepare('PRAGMA table_info(invites)').all().map(c => c.name);
-    if (!cols.includes('created_by_name')) {
-      db.exec('ALTER TABLE invites ADD COLUMN created_by_name TEXT');
-    }
-    if (!cols.includes('used_by_name')) {
-      db.exec('ALTER TABLE invites ADD COLUMN used_by_name TEXT');
+    const has = db.prepare('PRAGMA table_info(users)').all().some(c => c.name === 'signup_reason');
+    if (!has) {
+      db.exec('ALTER TABLE users ADD COLUMN signup_reason TEXT');
     }
   } catch (e) {
-    console.error('invites.*_name add failed (ok if already exists):', e && e.message ? e.message : e);
-  }
-
-  try {
-    db.exec(`
-      UPDATE invites
-         SET created_by_name = (
-               SELECT username FROM users WHERE id = invites.created_by
-             )
-       WHERE created_by IS NOT NULL AND created_by_name IS NULL;
-      UPDATE invites
-         SET used_by_name = (
-               SELECT username FROM users WHERE id = invites.used_by
-             )
-       WHERE used_by IS NOT NULL AND used_by_name IS NULL;
-    `);
-  } catch (e) {
-    console.error('invites.*_name backfill failed:', e && e.message ? e.message : e);
+    console.error('Failed to add users.signup_reason column:', e && e.message ? e.message : e);
   }
 }
 
