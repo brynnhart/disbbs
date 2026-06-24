@@ -1210,15 +1210,25 @@ function renderAbout(api, state){
   api.batch(b=>{
     b.clear();
     b.setInputLimit(null);
-    b.print('== About Dead Internet Society ==', 'magenta'); b.hr();
-    b.print('Punk-style middle finger to the modern feed.', 'white');
-    b.print('No engagement farming. No surveillance. No dopamine casinos.', 'white');
-    b.print('Small, hand-rolled, human-scale. ANSI glow, weird rooms.', 'white'); b.hr();
-    b.print('Design principles:', 'yellow');
-    b.print('• Human first: rooms over feeds, presence over metrics.', 'cyan');
-    b.print('• Anti-algorithm: no ranking engine shaping your mind.', 'cyan');
-    b.print('• Data minimalism: collect the least, store the least.', 'cyan');
-    b.print('• Minimal Use: no infinite scroll; we refuse to imprison attention.', 'cyan');
+    b.print('== About Dead Information Society ==', 'magenta'); b.hr();
+    b.print('I built this because the internet I loved is gone.', 'white');
+    b.print('', 'white');
+    b.print('Not gone like deleted. Gone like a neighborhood that slowly', 'white');
+    b.print('becomes unrecognizable. The weirdos moved out. The storefronts', 'white');
+    b.print('became chains. Everything got optimized until there was nothing', 'white');
+    b.print('left to stumble into.', 'white');
+    b.print('', 'white');
+    b.print('DIS is my attempt to build something back. Small, hand-rolled,', 'white');
+    b.print('deliberately slow. A place with no algorithm deciding what you', 'white');
+    b.print('see. No metrics telling you how well you performed today. No', 'white');
+    b.print('infinite scroll. Just people, text, and whatever we make together.', 'white');
+    b.print('', 'white');
+    b.print('It won\'t be for everyone. It\'s probably for you if you already', 'white');
+    b.print('miss something you can\'t quite name.', 'white');
+    b.print('', 'white');
+    b.print('Come in. Leave a mark. See what grows.', 'white');
+    b.print('', 'white');
+    b.print('-- Punky, sysop', 'dim');
     b.hr(); b.print('Navigation: /main', 'dim');
   });
 }
@@ -1228,8 +1238,8 @@ function renderRules(api, state){
     b.clear();
     b.setInputLimit(null);
     b.print('== Rules ==', 'magenta'); b.hr();
-    b.print('Be kind. No bigotry. No harassment. No brigading.', 'white');
-    b.print('We moderate for safety, not for virality.', 'white');
+    b.print('One rule that covers everything: be a person worth being around.', 'white');
+    b.print('No bigotry. No harassment. We moderate for safety, not virality.', 'white');
     b.hr(); b.print('Navigation: /main', 'dim');
   });
 }
