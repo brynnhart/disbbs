@@ -126,7 +126,7 @@ const {
 } = hubApi;
 
 const {
-  sanitizeAndFormatDIS,
+  sanitizeAndFormatDIS: _sanitizeAndFormatDIS,
   escapeHTML,
   visibleLengthDIS,
   stripDISFormatting,
@@ -241,6 +241,13 @@ const {
   listUsersBasic,
   countUsers,
   listUsersPage,
+  insertPixelArt,
+  listPixelArt,
+  getPixelArtByName,
+  getPixelArtById,
+  getPixelArtEmoji,
+  updatePixelArt,
+  deletePixelArt,
 } = statements;
 
 const {
@@ -250,6 +257,14 @@ const {
   createUser,
   verifyLogin,
 } = helpers;
+
+function pixelArtEmojiLookup(name){
+  try { return getPixelArtEmoji.get(name) || null; } catch { return null; }
+}
+
+function sanitizeAndFormatDIS(text){
+  return _sanitizeAndFormatDIS(text, pixelArtEmojiLookup);
+}
 
 function printDayDivider(batchApi, epochSec){
   const label = dayHeadingFromEpoch(epochSec);
@@ -350,11 +365,6 @@ function splashSVG(){
     '<g font-family="ui-monospace, Menlo, Consolas, monospace" text-anchor="middle">',
     '<text x="600" y="320" font-size="20" fill="#E6E6E6" opacity="0.9">no feeds • no infinite scroll • just people</text>',
     '<text x="600" y="352" font-size="16" fill="#19C3C3" opacity="0.9">punk-built • human-scale • honest connection</text>',
-    '</g>',
-
-    '<g font-family="ui-monospace, Menlo, Consolas, monospace" text-anchor="middle">',
-    '<text x="600" y="402" font-size="26" font-weight="bold" fill="#c32419ff" opacity="0.9">proudly ANTI-FAscist</text>',
-    '<text x="600" y="422" font-size="13" font-weight="bold" fill="#c32419ff" opacity="0.5">(which should... ya know... be the default)</text>',
     '</g>',
 
     // Pride flag (left)
@@ -580,6 +590,10 @@ function cmdHelp(api, state){
   api.print('  /announcements     View site announcements', 'cyan');
   api.print('  /main      Return to Command Hub', 'cyan');
   api.print('  /logout    Sign out', 'cyan');
+  api.print('  /draw      Open the pixel art editor (16×16)', 'cyan');
+  api.print('  /art       Browse the pixel art library', 'cyan');
+  api.print('  /editart <name or id>    Edit your own pixel art', 'cyan');
+  api.print('  /deleteart <name or id>  Delete pixel art (yours; admins can delete any)', 'cyan');
 
   if (state && state.isAdmin){
     api.hr(); api.print('Admin:', 'yellow');
@@ -617,6 +631,149 @@ function cmdAi(api, state, args) {
   });
 }
 
+
+/* ======================= Pixel Art ======================= */
+function isValidPixelColor(v){
+  return typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v);
+}
+
+function cmdDraw(api, state){
+  if (!requireAuth(api, state)) return;
+  sendOps(api.ws, [{ op: 'openPixelEditor' }]);
+}
+
+function cmdArt(api, state, args){
+  if (!requireAuth(api, state)) return;
+  const rows = listPixelArt.all();
+  api.batch(b => {
+    b.clear();
+    b.setInputLimit(null);
+    b.print('== Pixel Art Library ==', 'magenta');
+    b.hr();
+    if (!rows.length){
+      b.print('No pixel art yet. Use /draw to create some.', 'dim');
+    } else {
+      rows.forEach(r => {
+        let data;
+        try { data = JSON.parse(r.pixel_data); } catch { data = null; }
+        if (!Array.isArray(data) || data.length !== 256) data = new Array(256).fill(null);
+        const pixelsAttr = escapeHTML(JSON.stringify(data));
+        b.printHTML(
+          `<canvas class="pxa-thumb" width="64" height="64" data-pixels="${pixelsAttr}"></canvas> ` +
+          `<span class="cyan">${escapeHTML(r.name)}</span> ` +
+          `<span class="yellow">(#${escapeHTML(String(r.id))})</span> ` +
+          `<span class="dim">by ${escapeHTML(r.creator_username)}</span>`
+        );
+      });
+      b.hr();
+      b.print('Create new: /draw  |  Edit your art: /editart <name or id>  |  Delete your art: /deleteart <name or id>', 'dim');
+    }
+  });
+}
+
+function handleSavePixelArt(saveMsg, api, state){
+  if (!requireAuth(api, state)) return;
+  const rawName = String(saveMsg.name || '').trim().toLowerCase();
+  if (!rawName || !/^[a-z0-9-]{1,32}$/.test(rawName)){
+    api.print('Invalid name. Use lowercase letters, numbers, and hyphens only (max 32 chars).', 'red');
+    return;
+  }
+  const pixelData = saveMsg.pixel_data;
+  if (!Array.isArray(pixelData) || pixelData.length !== 256){
+    api.print('Invalid pixel data.', 'red');
+    return;
+  }
+  for (const v of pixelData){
+    if (v !== null && !isValidPixelColor(v)){
+      api.print('Invalid pixel data: bad color value.', 'red');
+      return;
+    }
+  }
+  try {
+    insertPixelArt.run(rawName, state.username, JSON.stringify(pixelData), nowEpoch());
+    api.print(`Saved "${rawName}". View with: /art ${rawName}`, 'green');
+  } catch(e){
+    const emsg = (e && e.message) || '';
+    if (emsg.toLowerCase().includes('unique')){
+      api.print(`A piece named "${rawName}" already exists. Choose a different name.`, 'red');
+    } else {
+      console.error('Failed to save pixel art:', e);
+      api.print('Failed to save pixel art.', 'red');
+    }
+  }
+}
+
+function findPixelArtByNameOrId(nameOrId){
+  const trimmed = String(nameOrId || '').trim();
+  if (!trimmed) return null;
+  if (/^\d+$/.test(trimmed)){
+    const row = getPixelArtById.get(parseInt(trimmed, 10));
+    if (row) return row;
+  }
+  return getPixelArtByName.get(trimmed.toLowerCase()) || null;
+}
+
+function cmdEditArt(api, state, args){
+  if (!requireAuth(api, state)) return;
+  if (!args.length){ api.print('Usage: /editart <name or id>', 'yellow'); return; }
+  const row = findPixelArtByNameOrId(args.join(' '));
+  if (!row){ api.print('No art found with that name or id.', 'red'); return; }
+  if (row.creator_username.toLowerCase() !== state.username.toLowerCase()){
+    api.print('You can only edit your own art.', 'red'); return;
+  }
+  let pixelData;
+  try { pixelData = typeof row.pixel_data === 'string' ? JSON.parse(row.pixel_data) : row.pixel_data; } catch { pixelData = null; }
+  if (!Array.isArray(pixelData) || pixelData.length !== 256) pixelData = new Array(256).fill(null);
+  sendOps(api.ws, [{ op: 'openPixelEditor', id: row.id, name: row.name, pixel_data: pixelData }]);
+}
+
+function cmdDeleteArt(api, state, args){
+  if (!requireAuth(api, state)) return;
+  if (!args.length){ api.print('Usage: /deleteart <name or id>', 'yellow'); return; }
+  const row = findPixelArtByNameOrId(args.join(' '));
+  if (!row){ api.print('No art found with that name or id.', 'red'); return; }
+  if (row.creator_username.toLowerCase() !== state.username.toLowerCase() && !state.isAdmin){
+    api.print('You can only delete your own art.', 'red'); return;
+  }
+  deletePixelArt.run(row.id);
+  api.print(`Art "${row.name}" (#${row.id}) deleted.`, 'green');
+}
+
+function handleUpdatePixelArt(msg, api, state){
+  if (!requireAuth(api, state)) return;
+  const id = parseInt(msg.id, 10);
+  if (!id || isNaN(id)){ api.print('Invalid art id.', 'red'); return; }
+  const existing = getPixelArtById.get(id);
+  if (!existing){ api.print('No art found with that id.', 'red'); return; }
+  if (existing.creator_username.toLowerCase() !== state.username.toLowerCase()){
+    api.print('You can only edit your own art.', 'red'); return;
+  }
+  const rawName = String(msg.name || '').trim().toLowerCase();
+  if (!rawName || !/^[a-z0-9-]{1,32}$/.test(rawName)){
+    api.print('Invalid name. Use lowercase letters, numbers, and hyphens only (max 32 chars).', 'red'); return;
+  }
+  const pixelData = msg.pixel_data;
+  if (!Array.isArray(pixelData) || pixelData.length !== 256){
+    api.print('Invalid pixel data.', 'red'); return;
+  }
+  for (const v of pixelData){
+    if (v !== null && !isValidPixelColor(v)){
+      api.print('Invalid pixel data: bad color value.', 'red'); return;
+    }
+  }
+  const conflict = getPixelArtByName.get(rawName);
+  if (conflict && conflict.id !== id){
+    api.print(`A piece named "${rawName}" already exists. Choose a different name.`, 'red'); return;
+  }
+  try {
+    updatePixelArt.run(rawName, JSON.stringify(pixelData), id);
+    api.print('Art updated successfully.', 'green');
+  } catch(e){
+    console.error('Failed to update pixel art:', e);
+    api.print('Failed to update pixel art.', 'red');
+  }
+}
+
 /* ======================= Menu ======================= */
 function renderMenu(api, state){
   if (!requireAuth(api, state)) return;
@@ -637,6 +794,7 @@ function renderMenu(api, state){
     b.print('  /polls            Poll booth', 'cyan');
     b.print('  /board           Bulletin board', 'cyan');
     b.print('  /links           Community link share', 'cyan');
+    b.print('  /art             Pixel art library — browse and create community emoji', 'cyan');
     b.print('  /news            Latest headlines (The Guardian)', 'cyan');
     b.print('  /games           Door games', 'cyan');
     b.print('  /messages        View your direct messages', 'cyan');
@@ -1212,23 +1370,23 @@ function renderAbout(api, state){
     b.setInputLimit(null);
     b.print('== About Dead Information Society ==', 'magenta'); b.hr();
     b.print('I built this because the internet I loved is gone.', 'white');
-    b.print('', 'white');
+    b.print(' ', 'white');
     b.print('Not gone like deleted. Gone like a neighborhood that slowly', 'white');
     b.print('becomes unrecognizable. The weirdos moved out. The storefronts', 'white');
     b.print('became chains. Everything got optimized until there was nothing', 'white');
     b.print('left to stumble into.', 'white');
-    b.print('', 'white');
+    b.print(' ', 'white');
     b.print('DIS is my attempt to build something back. Small, hand-rolled,', 'white');
     b.print('deliberately slow. A place with no algorithm deciding what you', 'white');
     b.print('see. No metrics telling you how well you performed today. No', 'white');
     b.print('infinite scroll. Just people, text, and whatever we make together.', 'white');
-    b.print('', 'white');
+    b.print(' ', 'white');
     b.print('It won\'t be for everyone. It\'s probably for you if you already', 'white');
     b.print('miss something you can\'t quite name.', 'white');
-    b.print('', 'white');
+    b.print(' ', 'white');
     b.print('Come in. Leave a mark. See what grows.', 'white');
-    b.print('', 'white');
-    b.print('-- Punky, sysop', 'dim');
+    b.print(' ', 'white');
+    b.print('-- PunkyRoo, sysop', 'dim');
     b.hr(); b.print('Navigation: /main', 'dim');
   });
 }
@@ -2249,6 +2407,12 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'games':        cmdGames(api, state); return true;
     case 'play':         cmdPlay(api, state, args); return true;
 
+    /* Pixel Art */
+    case 'draw':         cmdDraw(api, state); return true;
+    case 'art':          cmdArt(api, state, args); return true;
+    case 'editart':      cmdEditArt(api, state, args); return true;
+    case 'deleteart':    cmdDeleteArt(api, state, args); return true;
+
     /* DMs / Suggestions */
     case 'ai':           cmdAi(api, state, args); return true;
     case 'post':         cmdPost(api, state, args); return true;
@@ -2350,6 +2514,8 @@ wss.on('connection', (ws) => {
     // Handshake
     if (msg.type === 'init') { routeGo(api, state, 'splash'); return; }
 
+    if (msg.type === 'save_pixel_art')   { handleSavePixelArt(msg, api, state); return; }
+    if (msg.type === 'update_pixel_art') { handleUpdatePixelArt(msg, api, state); return; }
     if (msg.type !== 'input') return;
 
     const raw = String(msg.raw || '').trim();

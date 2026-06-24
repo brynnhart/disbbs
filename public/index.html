@@ -63,6 +63,28 @@
   border-left: 2px solid var(--accent);
   padding-left: 8px;
 }
+#pxa-overlay{position:fixed;inset:0;background:rgba(0,0,0,.88);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px;box-sizing:border-box}
+#pxa-modal{--cell:clamp(22px,3.5vmin,32px);background:#0a0a0a;border:1px solid #222;border-radius:6px;display:flex;flex-direction:column;gap:10px;padding:16px;max-height:98vh;overflow:auto;width:fit-content;max-width:98vw}
+#pxa-title{color:var(--cyan);font-weight:bold;font-size:13px;letter-spacing:1px;text-align:center}
+#pxa-grid{display:grid;grid-template-columns:repeat(16,var(--cell));grid-template-rows:repeat(16,var(--cell));border:1px solid #2a2a2a;cursor:crosshair;touch-action:none;user-select:none;-webkit-user-select:none}
+canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixelated;image-rendering:crisp-edges;flex-shrink:0}
+.pxa-cell{width:var(--cell);height:var(--cell);box-sizing:border-box;background:#111}
+.pxa-cell:hover{outline:1px solid rgba(255,255,255,.25);outline-offset:-1px;z-index:1}
+#pxa-palette{display:flex;flex-wrap:wrap;gap:4px}
+.pxa-swatch{width:22px;height:22px;border-radius:3px;border:2px solid transparent;cursor:pointer;box-sizing:border-box;flex-shrink:0}
+.pxa-swatch.active{border-color:#fff;box-shadow:0 0 0 1px #000}
+#pxa-tools{display:flex;gap:6px;align-items:center}
+.pxa-tool-btn{appearance:none;border:1px solid #333;background:#111;color:var(--fg);padding:5px 10px;border-radius:4px;cursor:pointer;font:inherit;font-size:12px}
+.pxa-tool-btn.active{border-color:var(--cyan);color:var(--cyan)}
+.pxa-tool-btn:hover{border-color:#555}
+#pxa-bottom{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+#pxa-name{background:#0c0c0c;color:var(--fg);border:1px solid #222;border-radius:4px;padding:6px 10px;font:inherit;font-size:12px;flex:1;min-width:120px;outline:none;caret-color:var(--cyan)}
+#pxa-name:focus{border-color:#444}
+#pxa-name::placeholder{color:#555}
+.pxa-action-btn{appearance:none;border:1px solid #333;background:#111;color:var(--fg);padding:6px 14px;border-radius:4px;cursor:pointer;font:inherit;font-size:12px}
+.pxa-action-btn.primary{border-color:var(--cyan);color:var(--cyan)}
+.pxa-action-btn:hover{border-color:#555}
+.pxa-action-btn.primary:hover{background:rgba(25,195,195,.1)}
 </style>
 </head>
 <body>
@@ -197,8 +219,35 @@
     var d = document.createElement('div');
     d.className = 'line' + (cls ? ' ' + cls : '');
     d.innerHTML = html || '';
+    d.querySelectorAll('canvas.pxa-thumb').forEach(function(c){ renderPixelThumb(c); });
     term.appendChild(d);
     if (stick) scrollToBottom(term);
+  }
+
+  function renderPixelThumb(canvas){
+    var raw = canvas.getAttribute('data-pixels');
+    if (!raw) return;
+    var data; try { data = JSON.parse(raw); } catch { return; }
+    if (!Array.isArray(data) || data.length !== 256) return;
+    var ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.imageSmoothingEnabled = false;
+    ctx.mozImageSmoothingEnabled = false;
+    ctx.webkitImageSmoothingEnabled = false;
+    ctx.msImageSmoothingEnabled = false;
+    canvas.style.imageRendering = 'pixelated';
+    canvas.style.background = 'transparent';
+    canvas.style.border = 'none';
+    canvas.style.outline = 'none';
+    var scale = canvas.width / 16;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (var i = 0; i < 256; i++){
+      var c = data[i];
+      if (!c || typeof c !== 'string' || !/^#[0-9a-f]{6}$/i.test(c)) continue;
+      var px = i % 16, py = Math.floor(i / 16);
+      ctx.fillStyle = c;
+      ctx.fillRect(px * scale, py * scale, scale, scale);
+    }
   }
   function op_hr(){
     var stick = isNearBottom(term);
@@ -441,6 +490,7 @@
           else if (op.op === 'beep') op_beep(op.kind);
           else if (op.op === 'auth') op_auth(op.token);
           else if (op.op === 'openUrl') op_openUrl(op.url);
+          else if (op.op === 'openPixelEditor') openPixelEditor(op.id || null, op.name || null, op.pixel_data || null);
         });
       }
     });
@@ -590,8 +640,180 @@
 
   // ESC quickly refocuses prompt
   document.addEventListener('keydown', function(ev){
-    if (ev.key === 'Escape') focusInputEnd(input);
+    if (ev.key === 'Escape' && !document.getElementById('pxa-overlay')) focusInputEnd(input);
   });
+
+  // ===== Pixel Art Editor =====
+  var PXA_PALETTE = [
+    '#000000','#1a1a1a','#555555','#aaaaaa',
+    '#ffffff','#ff4545','#ff8c00','#e3c600',
+    '#2fd44f','#19c3c3','#3aa0ff','#cc66ff',
+    '#ff69b4','#8b4513','#33ff00','#ff6b35'
+  ];
+  var pxaData = null, pxaEditId = null, pxaColor = PXA_PALETTE[4], pxaEraser = false, pxaPainting = false;
+  document.addEventListener('mouseup', function(){ pxaPainting = false; });
+
+  function openPixelEditor(editId, editName, editPixels){
+    if (document.getElementById('pxa-overlay')) return;
+    if (typeof editPixels === 'string'){ try { editPixels = JSON.parse(editPixels); } catch { editPixels = null; } }
+    pxaEditId = (typeof editId === 'number' && editId > 0) ? editId : null;
+    pxaData = new Array(256).fill(null);
+    if (pxaEditId && Array.isArray(editPixels)){
+      for (var pi = 0; pi < editPixels.length && pi < 256; pi++){
+        var pv = editPixels[pi];
+        if (pv && typeof pv === 'string' && /^#[0-9a-f]{6}$/i.test(pv)) pxaData[pi] = pv;
+      }
+    }
+    pxaColor = PXA_PALETTE[4]; pxaEraser = false; pxaPainting = false;
+
+    var overlay = document.createElement('div'); overlay.id = 'pxa-overlay';
+    var modal = document.createElement('div'); modal.id = 'pxa-modal';
+
+    var title = document.createElement('div'); title.id = 'pxa-title';
+    title.textContent = 'PIXEL EDITOR — 16\xd716'; modal.appendChild(title);
+
+    var grid = document.createElement('div'); grid.id = 'pxa-grid';
+    var cells = new Array(256);
+    for (var gi = 0; gi < 256; gi++){
+      var cell = document.createElement('div');
+      cell.className = 'pxa-cell'; cell.dataset.i = gi;
+      cells[gi] = cell; grid.appendChild(cell);
+    }
+    if (pxaEditId){
+      for (var ci = 0; ci < 256; ci++){
+        if (pxaData[ci]) cells[ci].style.background = pxaData[ci];
+      }
+    }
+    modal.appendChild(grid);
+
+    var paletteEl = document.createElement('div'); paletteEl.id = 'pxa-palette';
+    var swatches = [];
+    var pencilBtn, eraserBtn;
+    PXA_PALETTE.forEach(function(c){
+      var sw = document.createElement('div');
+      sw.className = 'pxa-swatch' + (c === pxaColor ? ' active' : '');
+      sw.style.background = c; sw.title = c;
+      sw.addEventListener('click', function(){
+        pxaColor = c; pxaEraser = false;
+        swatches.forEach(function(s){ s.classList.remove('active'); });
+        sw.classList.add('active');
+        if (pencilBtn){ pencilBtn.classList.add('active'); }
+        if (eraserBtn){ eraserBtn.classList.remove('active'); }
+      });
+      swatches.push(sw); paletteEl.appendChild(sw);
+    });
+    modal.appendChild(paletteEl);
+
+    var toolsEl = document.createElement('div'); toolsEl.id = 'pxa-tools';
+    pencilBtn = document.createElement('button');
+    pencilBtn.className = 'pxa-tool-btn active'; pencilBtn.type = 'button';
+    pencilBtn.textContent = '✏ Pencil';
+    eraserBtn = document.createElement('button');
+    eraserBtn.className = 'pxa-tool-btn'; eraserBtn.type = 'button';
+    eraserBtn.textContent = '□ Eraser';
+    var clearBtn = document.createElement('button');
+    clearBtn.className = 'pxa-tool-btn'; clearBtn.type = 'button';
+    clearBtn.textContent = '× Clear';
+    pencilBtn.addEventListener('click', function(){
+      pxaEraser = false;
+      pencilBtn.classList.add('active'); eraserBtn.classList.remove('active');
+    });
+    eraserBtn.addEventListener('click', function(){
+      pxaEraser = true;
+      eraserBtn.classList.add('active'); pencilBtn.classList.remove('active');
+    });
+    clearBtn.addEventListener('click', function(){
+      pxaData = new Array(256).fill(null);
+      cells.forEach(function(c){ c.style.background = ''; });
+    });
+    toolsEl.appendChild(pencilBtn); toolsEl.appendChild(eraserBtn); toolsEl.appendChild(clearBtn);
+    modal.appendChild(toolsEl);
+
+    var bottomEl = document.createElement('div'); bottomEl.id = 'pxa-bottom';
+    var nameInput = document.createElement('input');
+    nameInput.id = 'pxa-name'; nameInput.type = 'text';
+    nameInput.placeholder = 'name (a-z, 0-9, hyphens)';
+    nameInput.maxLength = 32; nameInput.spellcheck = false; nameInput.autocomplete = 'off';
+    nameInput.addEventListener('input', function(){
+      nameInput.value = nameInput.value.toLowerCase().replace(/[^a-z0-9-]/g, '');
+    });
+    if (editName) nameInput.value = editName;
+    var saveBtn = document.createElement('button');
+    saveBtn.className = 'pxa-action-btn primary'; saveBtn.type = 'button'; saveBtn.textContent = 'Save';
+    var cancelBtn = document.createElement('button');
+    cancelBtn.className = 'pxa-action-btn'; cancelBtn.type = 'button'; cancelBtn.textContent = 'Cancel';
+    nameInput.addEventListener('keydown', function(e){ if (e.key === 'Enter') saveBtn.click(); });
+    saveBtn.addEventListener('click', function(){
+      var name = nameInput.value.trim();
+      if (!name){ op_print('Enter a name before saving.', 'yellow'); return; }
+      if (!/^[a-z0-9-]{1,32}$/.test(name)){ op_print('Name must be lowercase letters, numbers, and hyphens only.', 'yellow'); return; }
+      if (ws && ws.readyState === WebSocket.OPEN){
+        if (pxaEditId){
+          ws.send(JSON.stringify({ type: 'update_pixel_art', id: pxaEditId, name: name, pixel_data: pxaData }));
+        } else {
+          ws.send(JSON.stringify({ type: 'save_pixel_art', name: name, pixel_data: pxaData }));
+        }
+        closePixelEditor();
+        ws.send(JSON.stringify({ type: 'input', raw: '/art' }));
+      } else {
+        op_print('Not connected. Cannot save.', 'red');
+      }
+    });
+    cancelBtn.addEventListener('click', function(){
+      var wasEditing = !!pxaEditId;
+      closePixelEditor();
+      if (wasEditing && ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', raw: '/art' }));
+    });
+    bottomEl.appendChild(nameInput); bottomEl.appendChild(saveBtn); bottomEl.appendChild(cancelBtn);
+    modal.appendChild(bottomEl);
+    overlay.appendChild(modal); document.body.appendChild(overlay);
+
+    function paintAt(target){
+      if (!target || !target.classList || !target.classList.contains('pxa-cell')) return;
+      var idx = parseInt(target.dataset.i, 10);
+      if (isNaN(idx) || idx < 0 || idx >= 256) return;
+      if (pxaEraser){ pxaData[idx] = null; target.style.background = ''; }
+      else { pxaData[idx] = pxaColor; target.style.background = pxaColor; }
+    }
+    grid.addEventListener('mousedown', function(e){
+      if (e.button !== 0) return;
+      pxaPainting = true; paintAt(e.target); e.preventDefault();
+    });
+    grid.addEventListener('mousemove', function(e){
+      if (!pxaPainting) return; paintAt(e.target);
+    });
+    grid.addEventListener('touchstart', function(e){
+      pxaPainting = true;
+      var t = e.touches[0];
+      paintAt(document.elementFromPoint(t.clientX, t.clientY));
+      e.preventDefault();
+    }, { passive: false });
+    grid.addEventListener('touchmove', function(e){
+      if (!pxaPainting) return;
+      var t = e.touches[0];
+      paintAt(document.elementFromPoint(t.clientX, t.clientY));
+      e.preventDefault();
+    }, { passive: false });
+    grid.addEventListener('touchend', function(){ pxaPainting = false; });
+
+    function pxaEscHandler(e){
+      if (e.key === 'Escape'){
+        var wasEditing = !!pxaEditId;
+        closePixelEditor();
+        document.removeEventListener('keydown', pxaEscHandler);
+        if (wasEditing && ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', raw: '/art' }));
+      }
+    }
+    document.addEventListener('keydown', pxaEscHandler);
+    setTimeout(function(){ nameInput.focus(); }, 50);
+  }
+
+  function closePixelEditor(){
+    var overlay = document.getElementById('pxa-overlay');
+    if (overlay) overlay.remove();
+    pxaData = null; pxaEditId = null; pxaPainting = false;
+    focusInputEnd(input);
+  }
 })();
 </script>
 

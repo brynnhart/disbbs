@@ -194,6 +194,7 @@ CREATE TABLE IF NOT EXISTS users (
   ensureAboutColumn(db);
   ensureNormalizationColumns(db);
   ensureSignupReasonColumn(db);
+  ensurePixelArtSchema(db);
 
   const getSetting = db.prepare('SELECT value FROM settings WHERE key=?');
   const setSetting = db.prepare(`
@@ -547,6 +548,14 @@ CREATE TABLE IF NOT EXISTS users (
      WHERE to_user_id = ? AND seen_at IS NULL
   `);
 
+  const insertPixelArt    = db.prepare(`INSERT INTO pixel_art (name, creator_username, pixel_data, created_at) VALUES (?, ?, ?, ?)`);
+  const listPixelArt      = db.prepare(`SELECT id, name, creator_username, created_at, pixel_data FROM pixel_art ORDER BY created_at DESC LIMIT 200`);
+  const getPixelArtByName = db.prepare('SELECT * FROM pixel_art WHERE name = ?');
+  const getPixelArtById   = db.prepare('SELECT * FROM pixel_art WHERE id = ?');
+  const getPixelArtEmoji  = db.prepare('SELECT id, name, pixel_data FROM pixel_art WHERE name = LOWER(?)');
+  const updatePixelArt    = db.prepare('UPDATE pixel_art SET name = ?, pixel_data = ? WHERE id = ?');
+  const deletePixelArt    = db.prepare('DELETE FROM pixel_art WHERE id = ?');
+
   function defSetting(key, val){
     if (!getSetting.get(key)) setSetting.run(key, String(val));
   }
@@ -728,6 +737,13 @@ CREATE TABLE IF NOT EXISTS users (
     insertNotification,
     listNotificationsForUser,
     markAllNotificationsSeen,
+    insertPixelArt,
+    listPixelArt,
+    getPixelArtByName,
+    getPixelArtById,
+    getPixelArtEmoji,
+    updatePixelArt,
+    deletePixelArt,
     setSetting,
   };
 
@@ -803,6 +819,20 @@ function ensureSignupReasonColumn(db){
   } catch (e) {
     console.error('Failed to add users.signup_reason column:', e && e.message ? e.message : e);
   }
+}
+
+function ensurePixelArtSchema(db){
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pixel_art (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      name             TEXT NOT NULL UNIQUE,
+      creator_username TEXT NOT NULL,
+      pixel_data       TEXT NOT NULL,
+      created_at       INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_pixel_art_name       ON pixel_art(name);
+    CREATE INDEX IF NOT EXISTS idx_pixel_art_created_at ON pixel_art(created_at DESC);
+  `);
 }
 
 module.exports = {

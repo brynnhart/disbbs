@@ -156,36 +156,47 @@ function disColors(s){
   }, s);
 }
 
-function renderEmojis(html){
+function renderEmojis(html, lookupPixelArt){
   if (!html) return '';
+  const hasPixelLookup = typeof lookupPixelArt === 'function';
   return String(html).replace(EMOJI_PATTERN, (match, name, offset, source) => {
     const key = name.toLowerCase();
     const def = EMOJI_DEFINITIONS[key];
-    if (!def) return match;
 
+    // Nothing to do with this token
+    if (!def && !hasPixelLookup) return match;
+
+    // Boundary check — don't match :name: that abuts a word character
     const prev = offset > 0 ? source[offset - 1] : '';
     if (prev && /[A-Za-z0-9_]/.test(prev)) return match;
-
     const nextIndex = offset + match.length;
     const next = nextIndex < source.length ? source[nextIndex] : '';
     if (next && /[A-Za-z0-9_]/.test(next)) return match;
 
-    const alt = def.alt || `:${key}:`;
-    const title = def.title || def.label || alt;
-    const src = def.src;
+    // Static SVG emoji takes priority
+    if (def) {
+      const alt = def.alt || `:${key}:`;
+      const title = def.title || def.label || alt;
+      return `<img class="emoji" src="${escapeHTML(def.src)}" alt="${escapeHTML(alt)}" title="${escapeHTML(title)}">`;
+    }
 
-    return `<img class="emoji" src="${escapeHTML(src)}" alt="${escapeHTML(alt)}" title="${escapeHTML(title)}">`;
+    // Pixel art lookup
+    let row;
+    try { row = lookupPixelArt(key); } catch { return match; }
+    if (!row || !row.pixel_data) return match;
+
+    return `<canvas class="pxa-thumb" width="32" height="32" data-pixels="${escapeHTML(row.pixel_data)}" title=":${escapeHTML(key)}:"></canvas>`;
   });
 }
 
-function sanitizeAndFormatDIS(text){
+function sanitizeAndFormatDIS(text, lookupPixelArt){
   let out = escapeAndLinkify(text);
   out = disUnderline(out);
   out = disBold(out);
   out = disItalics(out);
   out = disDim(out);
   out = disColors(out);
-  out = renderEmojis(out);
+  out = renderEmojis(out, lookupPixelArt);
   return out;
 }
 
