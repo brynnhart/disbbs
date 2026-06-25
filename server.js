@@ -1365,7 +1365,7 @@ function renderAbout(api, state){
     b.clear();
     b.setInputLimit(null);
     b.print('== About Dead Internet Society ==', 'magenta'); b.hr();
-    b.print('The internet has largely become the bane of modern human existence.  What was once supposed to be a repository of knowledge and unlimited human connection has become a swirling cesspool of algorithm-driven content gluttony, consumerism, competitive idiocy, and bots emotionally abusing bots.  the internet as it once was, and what was once promised to us is dead.  so we retreat back into the familiar embrace of the BBS.', 'white');
+    b.print('The internet has largely become the bane of modern human existence.  What was once supposed to be a repository of knowledge and unlimited human connection has become a swirling cesspool of algorithm-driven content gluttony, consumerism, competitive idiocy, and bots emotionally abusing bots.  The internet as it once was, and what was once promised to us is dead.  So we retreat back into the familiar embrace of the BBS.', 'white');
     b.print(' ', 'white');
     b.print('-- PunkyRoo, sysop', 'dim');
     b.print(' ', 'white');
