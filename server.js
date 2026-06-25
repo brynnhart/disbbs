@@ -563,12 +563,10 @@ function cmdHelp(api, state){
   api.print('  /removepoll <id> Remove your poll (or admin)', 'cyan');
   api.print('  /games     Door games list', 'cyan');
   api.print('  /play <game>  Open a door game in a new tab', 'cyan');
-  api.print('  /news      Latest headlines from The Guardian', 'cyan');
   api.print('  /dm        Send a direct message: /dm <user> <message>', 'cyan');
   api.print('  /messages  Show your recent direct messages', 'cyan');
   api.print('  /leave     Return to the main menu from a room', 'cyan');
   api.print('  /about     About Dead Internet Society', 'cyan');
-  api.print('  /rules     Community rules', 'cyan');
   api.print('  /passwd    Change your password: /passwd <old> <new>', 'cyan');
   api.print('  /format    Show DIS-Markdown examples', 'cyan');
   api.print('  /colors    Show color swatches', 'cyan');
@@ -795,12 +793,10 @@ function renderMenu(api, state){
     b.print('  /board           Bulletin board', 'cyan');
     b.print('  /links           Community link share', 'cyan');
     b.print('  /art             Pixel art library — browse and create community emoji', 'cyan');
-    b.print('  /news            Latest headlines (The Guardian)', 'cyan');
     b.print('  /games           Door games', 'cyan');
     b.print('  /messages        View your direct messages', 'cyan');
     b.print('  /announcements   View site announcements', 'cyan');
     b.print('  /about           About DIS', 'cyan');
-    b.print('  /rules           Community rules', 'cyan');
     b.print('  /profile         View your profile (or /profile <user>)', 'cyan');
     b.print('  /logout          Sign out', 'cyan');
     b.hr();
@@ -808,7 +804,7 @@ function renderMenu(api, state){
     b.print('For a full list of commands use /help command.', 'dim');
   });
 }
-function menuHandleRaw(text, api){ api.print('Use slash commands here. Try /chat, /board, /links, /news or /help.', 'dim'); return true; }
+function menuHandleRaw(text, api){ api.print('Use slash commands here. Try /chat, /board, /links or /help.', 'dim'); return true; }
 
 /* ======================= Announcements ======================= */
 function fetchActiveAnnouncements(){
@@ -1368,25 +1364,16 @@ function renderAbout(api, state){
   api.batch(b=>{
     b.clear();
     b.setInputLimit(null);
-    b.print('== About Dead Information Society ==', 'magenta'); b.hr();
-    b.print('I built this because the internet I loved is gone.', 'white');
-    b.print(' ', 'white');
-    b.print('Not gone like deleted. Gone like a neighborhood that slowly', 'white');
-    b.print('becomes unrecognizable. The weirdos moved out. The storefronts', 'white');
-    b.print('became chains. Everything got optimized until there was nothing', 'white');
-    b.print('left to stumble into.', 'white');
-    b.print(' ', 'white');
-    b.print('DIS is my attempt to build something back. Small, hand-rolled,', 'white');
-    b.print('deliberately slow. A place with no algorithm deciding what you', 'white');
-    b.print('see. No metrics telling you how well you performed today. No', 'white');
-    b.print('infinite scroll. Just people, text, and whatever we make together.', 'white');
-    b.print(' ', 'white');
-    b.print('It won\'t be for everyone. It\'s probably for you if you already', 'white');
-    b.print('miss something you can\'t quite name.', 'white');
-    b.print(' ', 'white');
-    b.print('Come in. Leave a mark. See what grows.', 'white');
+    b.print('== About Dead Internet Society ==', 'magenta'); b.hr();
+    b.print('The internet has largely become the bane of modern human existence.  What was once supposed to be a repository of knowledge and unlimited human connection has become a swirling cesspool of algorithm-driven content gluttony, consumerism, competitive idiocy, and bots emotionally abusing bots.  the internet as it once was, and what was once promised to us is dead.  so we retreat back into the familiar embrace of the BBS.', 'white');
     b.print(' ', 'white');
     b.print('-- PunkyRoo, sysop', 'dim');
+    b.print(' ', 'white');
+    b.print(' ', 'white');
+    b.print('-=-= RULES =-=-', 'white');
+    b.print(' ', 'white');
+    b.print('Dont be a badger-sized dickhole.', 'white');
+    b.print(' ', 'white');
     b.hr(); b.print('Navigation: /main', 'dim');
   });
 }
