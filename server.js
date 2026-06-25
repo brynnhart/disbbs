@@ -561,7 +561,6 @@ function cmdHelp(api, state){
   api.print('  /vote <poll id> <option #>  Vote in a poll', 'cyan');
   api.print('  /endpoll <id>   End your poll (or admin)', 'cyan');
   api.print('  /removepoll <id> Remove your poll (or admin)', 'cyan');
-  api.print('  /games     Door games list', 'cyan');
   api.print('  /play <game>  Open a door game in a new tab', 'cyan');
   api.print('  /dm        Send a direct message: /dm <user> <message>', 'cyan');
   api.print('  /messages  Show your recent direct messages', 'cyan');
@@ -793,7 +792,6 @@ function renderMenu(api, state){
     b.print('  /board           Bulletin board', 'cyan');
     b.print('  /links           Community link share', 'cyan');
     b.print('  /art             Pixel art library — browse and create community emoji', 'cyan');
-    b.print('  /games           Door games', 'cyan');
     b.print('  /messages        View your direct messages', 'cyan');
     b.print('  /announcements   View site announcements', 'cyan');
     b.print('  /about           About DIS', 'cyan');
