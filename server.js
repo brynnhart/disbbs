@@ -656,7 +656,7 @@ function cmdArt(api, state, args){
         if (!Array.isArray(data) || data.length !== 256) data = new Array(256).fill(null);
         const pixelsAttr = escapeHTML(JSON.stringify(data));
         b.printHTML(
-          `<canvas class="pxa-thumb" width="64" height="64" data-pixels="${pixelsAttr}"></canvas> ` +
+          `<canvas class="pxa-thumb" width="32" height="32" data-pixels="${pixelsAttr}"></canvas> ` +
           `<span class="cyan">${escapeHTML(r.name)}</span> ` +
           `<span class="yellow">(#${escapeHTML(String(r.id))})</span> ` +
           `<span class="dim">by ${escapeHTML(r.creator_username)}</span>`
