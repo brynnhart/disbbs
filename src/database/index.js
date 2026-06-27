@@ -609,6 +609,13 @@ CREATE TABLE IF NOT EXISTS users (
     SELECT id FROM ban_list WHERE fingerprint_hash IS NOT NULL AND fingerprint_hash = ? LIMIT 1
   `);
 
+  const listRecentUsers = db.prepare(`
+    SELECT id, username, created_at, registration_ip, user_agent, email, fingerprint_hash, last_login_ip
+      FROM users
+     ORDER BY created_at DESC
+     LIMIT ?
+  `);
+
   const insertPixelArt    = db.prepare(`INSERT INTO pixel_art (name, creator_username, pixel_data, created_at) VALUES (?, ?, ?, ?)`);
   const listPixelArt      = db.prepare(`SELECT id, name, creator_username, created_at, pixel_data FROM pixel_art ORDER BY created_at DESC LIMIT 200`);
   const getPixelArtByName = db.prepare('SELECT * FROM pixel_art WHERE name = ?');
@@ -811,6 +818,7 @@ CREATE TABLE IF NOT EXISTS users (
     checkBanByUsername,
     checkBanByIp,
     checkBanByFingerprint,
+    listRecentUsers,
     insertPixelArt,
     listPixelArt,
     getPixelArtByName,

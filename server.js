@@ -283,6 +283,7 @@ const {
   checkBanByUsername,
   checkBanByIp,
   checkBanByFingerprint,
+  listRecentUsers,
 } = statements;
 
 const {
@@ -668,6 +669,7 @@ function cmdHelp(api, state){
     api.print('  /adminchat   Admin live room (private)', 'cyan');
     api.print('  /announce <text>             Post a new announcement', 'cyan');
     api.print('  /removeannounce <id>         Remove an announcement', 'cyan');
+    api.print('  /newusers [n]                Most recent registrations with ban-list match check (default 20, max 50)', 'cyan');
     api.print('  /ban <username>              Ban user (deletes content, blocks IP + fingerprint)', 'cyan');
     api.print('  /banlist                     Show all ban list entries', 'cyan');
     api.print('  /unban <id>                  Remove a ban list entry by id', 'cyan');
@@ -2410,6 +2412,51 @@ function cmdPasswd(api, state, args){
 
 
 
+/* ======================= Admin: recent registrations ======================= */
+function cmdNewUsers(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
+
+  const requested = parseInt(args[0], 10);
+  const limit = (!isNaN(requested) && requested > 0) ? Math.min(requested, 50) : 20;
+
+  const rows = listRecentUsers.all(limit);
+  if (!rows.length) { api.print('No users found.', 'dim'); return; }
+
+  api.print(`== Recent Registrations (${rows.length}) ==`, 'magenta');
+  api.hr();
+
+  for (const r of rows) {
+    const dt    = new Date(r.created_at * 1000);
+    const stamp = dt.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+    const ua    = r.user_agent ? r.user_agent.slice(0, 60) + (r.user_agent.length > 60 ? '…' : '') : '—';
+    const ip    = r.registration_ip || '—';
+    const hasEmail = r.email ? 'yes' : 'no';
+
+    const hitIp = r.registration_ip ? checkBanByIp.get(r.registration_ip) : null;
+    const hitFp = r.fingerprint_hash ? checkBanByFingerprint.get(r.fingerprint_hash) : null;
+    const hitLoginIp = r.last_login_ip && r.last_login_ip !== r.registration_ip
+      ? checkBanByIp.get(r.last_login_ip) : null;
+    const banned = hitIp || hitFp || hitLoginIp;
+
+    const prefix = banned ? '[BAN MATCH] ' : '';
+    const color  = banned ? 'red' : 'cyan';
+
+    api.print(`${prefix}${stamp}  ${r.username}`, color);
+    api.print(`  ip:${ip}  email:${hasEmail}  ua:${ua}`, banned ? 'red' : 'dim');
+    if (banned) {
+      const reasons = [
+        hitIp      ? `reg IP matches ban #${hitIp.id}`      : null,
+        hitLoginIp ? `login IP matches ban #${hitLoginIp.id}` : null,
+        hitFp      ? `fingerprint matches ban #${hitFp.id}` : null,
+      ].filter(Boolean).join(', ');
+      api.print(`  !! ${reasons}`, 'red');
+    }
+  }
+
+  api.hr();
+}
+
 /* ======================= Admin ban commands ======================= */
 function cmdBan(api, state, args) {
   if (!requireAuth(api, state)) return;
@@ -2670,6 +2717,7 @@ function handleGlobalCommand(cmd, api, state, args){
       return true;
 
     /* Admin ban / blacklist */
+    case 'newusers':    cmdNewUsers(api, state, args); return true;
     case 'ban':         cmdBan(api, state, args); return true;
     case 'banlist':     cmdBanList(api, state); return true;
     case 'unban':       cmdUnban(api, state, args); return true;
