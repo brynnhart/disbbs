@@ -8,7 +8,6 @@ const crypto = require('crypto');
 const { createDatabase } = require('./src/database');
 const { createHub } = require('./src/hub');
 const { createNotificationService } = require('./src/services/notifications');
-const { createRockoService } = require('./src/services/rocko');
 const formatting = require('./src/utils/formatting');
 const timeUtils = require('./src/utils/time');
 
@@ -61,80 +60,6 @@ const notifications = createNotificationService({
   timeUtils,
 });
 
-const rocko = createRockoService({
-  statements,
-  helpers,
-  formatting,
-  timeUtils,
-  notifications,
-  hub: hubApi,
-  openAI: {
-    apiKey: process.env.OPENAI_API_KEY,
-    model: process.env.ROCKO_MODEL || 'gpt-5-nano',
-  },
-  logger: console,
-});
-
-if (rocko && typeof rocko.start === 'function') {
-  rocko.start();
-}
-
-const guardianConfig = {
-  apiKey: process.env.GUARDIAN_API_KEY || '598ae2be-3450-4b02-9a2b-47fa1a7d6799',
-  apiUrl: 'https://content.guardianapis.com/search',
-};
-
-const aiService = (() => {
-  const fetchFn = typeof fetch === 'function' ? fetch.bind(globalThis) : null;
-  const apiKey = process.env.OPENAI_API_KEY || null;
-  const model = process.env.AI_MODEL || 'gpt-5-nano';
-  const enabled = !!(fetchFn && apiKey);
-
-  async function ask(prompt, { temperature = 0.2, maxTokens = 240 } = {}) {
-    if (!enabled) return null;
-    try {
-      const res = await fetchFn('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            {
-              role: 'system',
-              content: 'You are a concise, factual assistant for a BBS. Provide clear, informative answers in plain text without roleplay.',
-            },
-            { role: 'user', content: prompt },
-          ],
-          temperature,
-          max_completion_tokens: maxTokens,
-        }),
-      });
-
-      if (!res.ok) {
-        const errText = await res.text();
-        console.warn(`[ai] OpenAI request failed: ${res.status} ${errText}`);
-        return null;
-      }
-
-      const data = await res.json();
-      const choice = data?.choices?.[0];
-      const content = choice?.message?.content;
-      if (!content) return null;
-      return String(content).trim();
-    } catch (err) {
-      console.warn('[ai] OpenAI call failed', err);
-      return null;
-    }
-  }
-
-  return {
-    enabled,
-    ask,
-  };
-})();
 
 const {
   hub: HUB,
@@ -160,24 +85,6 @@ const {
   ymdFromEpoch,
   dayHeadingFromEpoch,
 } = timeUtils;
-
-const DOOR_GAMES = [
-  {
-    name: 'PacMan',
-    url: 'https://pac.disbbs.org',
-    description: 'a procedurally generated clone of the classic arcade game (IN DEVELOPMENT).',
-  },
-  {
-    name: 'ASCIIcraft',
-    url: 'https://craft.disbbs.org',
-    description: 'Minecraft meets terminal style game (IN DEVELOPMENT).',
-  },
-  {
-    name: 'LORD',
-    url: 'https://lord.disbbs.org',
-    description: 'Custom Legend of the Red Dragon port (SEPARATE LOGIN REQUIRED!)',
-  }
-];
 
 const {
   notifyMentions,
@@ -631,7 +538,6 @@ function cmdHelp(api, state){
   api.print('Global slash commands:', 'yellow');
   api.print('  /register  Create an account: /register <user> <pass>', 'cyan');
   api.print('  /chat      Enter the Commons Chat', 'cyan');
-  //api.print('  /ai <question>  Ask the AI for an informational response', 'cyan');
   api.print('  /here      Show who is currently in the chat', 'cyan');
   api.print('  /post <text>  Share a short status update (swept after ~30 days)', 'cyan');
   api.print('  /feed [user]  View recent updates (optionally for a user)', 'cyan');
@@ -640,7 +546,6 @@ function cmdHelp(api, state){
   api.print('  /vote <poll id> <option #>  Vote in a poll', 'cyan');
   api.print('  /endpoll <id>   End your poll (or admin)', 'cyan');
   api.print('  /removepoll <id> Remove your poll (or admin)', 'cyan');
-  api.print('  /play <game>  Open a door game in a new tab', 'cyan');
   api.print('  /dm        Send a direct message: /dm <user> <message>', 'cyan');
   api.print('  /messages  Show your recent direct messages', 'cyan');
   api.print('  /leave     Return to the main menu from a room', 'cyan');
@@ -670,6 +575,8 @@ function cmdHelp(api, state){
   api.print('  /art       Browse the pixel art library', 'cyan');
   api.print('  /editart <name or id>    Edit your own pixel art', 'cyan');
   api.print('  /deleteart <name or id>  Delete pixel art (yours; admins can delete any)', 'cyan');
+  api.print('  /games     Games menu', 'cyan');
+  api.print('  /wordle    Daily word puzzle', 'cyan');
 
   if (state && state.isAdmin){
     api.hr(); api.print('Admin:', 'yellow');
@@ -687,29 +594,6 @@ function cmdHelp(api, state){
   }
   api.hr();
   api.print('DIS-Markdown: **bold**, _italics_, __underline__, [dim]…[/dim], and color tags like [cyan]…[/cyan].', 'dim');
-}
-
-function cmdAi(api, state, args) {
-  if (!requireAuth(api, state)) return;
-  if (!aiService.enabled) {
-    api.print('AI is unavailable right now.', 'red');
-    return;
-  }
-  const prompt = (args || []).join(' ').trim();
-  if (!prompt) {
-    api.print('Usage: /ai <question>', 'yellow');
-    return;
-  }
-  api.print('AI is processing your input.', 'dim');
-  aiService.ask(prompt).then((reply) => {
-    if (!reply) {
-      api.print('AI did not return a response. Try again later.', 'red');
-      return;
-    }
-    api.print(reply, 'cyan');
-  }).catch(() => {
-    api.print('AI did not return a response. Try again later.', 'red');
-  });
 }
 
 
@@ -912,13 +796,13 @@ function renderMenu(api, state){
       if (newItems.unreadDMs)  b.print(`  ${pl(newItems.unreadDMs,  'unread direct message')}`, 'yellow');
     }
     b.print('  /chat            Enter the Commons Chat', 'cyan');
-    //b.print('  /ai <question>   Ask the AI for info', 'cyan');
     b.print('  /post <text>     Share a short status update', 'cyan');
     b.print('  /feed [user]     View the latest updates', 'cyan');
     b.print('  /polls            Poll booth', 'cyan');
     b.print('  /board           Bulletin board', 'cyan');
     b.print('  /links           Community link share', 'cyan');
     b.print('  /art             Pixel art library — browse and create community emoji', 'cyan');
+    b.print('  /games           Games', 'cyan');
     b.print('  /messages        View your direct messages', 'cyan');
     b.print('  /announcements   View site announcements', 'cyan');
     b.print('  /about           About DIS', 'cyan');
@@ -1414,11 +1298,9 @@ function renderChat(api, state){
         }
         const ts = new Date(r.created_at*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
         const usernameRaw = typeof r.username === 'string' ? r.username : '';
-        const isRocko = !!(rocko && usernameRaw && typeof rocko.usernameLower === 'string' && usernameRaw.toLowerCase() === rocko.usernameLower);
         const displaySource = r.display_name && typeof r.display_name === 'string' ? r.display_name.trim() : '';
-        const shouldUseRockoDisplay = isRocko && (!displaySource || displaySource.toLowerCase() === usernameRaw.toLowerCase());
-        const disp = shouldUseRockoDisplay ? (rocko.displayName || usernameRaw || 'anon') : (displaySource || usernameRaw || 'anon');
-        const color = r.color || (isRocko ? rocko.color : '');
+        const disp = displaySource || usernameRaw || 'anon';
+        const color = r.color || '';
         const safeBody = sanitizeAndFormatDIS(r.body);
         const bodyWithColor = color ? `<span style="color:${color}">${safeBody}</span>` : safeBody;
         const html = `[${ts}] &lt;${sanitizeAndFormatDIS(disp)}&gt; ${bodyWithColor}`;
@@ -1465,19 +1347,6 @@ function chatHandleRaw(text, api, state){
   // === NEW: mentions → notify
   const fromRow = { id: uid, username: state.username };
   notifyMentions(msgText, fromRow, 'chat');
-
-  if (rocko && typeof rocko.handleChatMessage === 'function') {
-    try {
-      rocko.handleChatMessage({
-        text: msgText,
-        fromUsername: state.username,
-        displayName: state.displayName,
-        userId: state.userId,
-      });
-    } catch (e) {
-      console.warn('[rocko] chat hook failed:', e && e.message ? e.message : e);
-    }
-  }
 
   return true;
 }
@@ -1758,7 +1627,7 @@ function openNewsItem(api, state, id){
 }
 function newsListHandleCommand(cmd, api, state, args){
   if (!requireAuth(api, state)) return true;
-  if ((cmd === 'links' || cmd === 'news') && args.length){
+  if (cmd === 'links' && args.length){
     const id = parseInt(args[0], 10);
     if (!id){ api.print('Usage: /links <id>', 'yellow'); return true; }
     openNewsItem(api, state, id); return true;
@@ -1790,90 +1659,6 @@ function newsItemHandleRaw(text, api, state){
 
   return true;
 }
-
-/* ======================= Guardian News ======================= */
-async function fetchGuardianHeadlines(){
-  const fetchFn = typeof fetch === 'function' ? fetch.bind(globalThis) : null;
-  if (!fetchFn) {
-    return { error: 'Fetch is unavailable on this server.' };
-  }
-  if (!guardianConfig.apiKey) {
-    return { error: 'Guardian API key is not configured.' };
-  }
-  const url = new URL(guardianConfig.apiUrl);
-  url.searchParams.set('api-key', guardianConfig.apiKey);
-  url.searchParams.set('page-size', '10');
-  url.searchParams.set('order-by', 'newest');
-
-  try {
-    const res = await fetchFn(url.toString());
-    if (!res.ok) {
-      const errText = await res.text();
-      return { error: `Guardian API error (${res.status}): ${errText}` };
-    }
-    const data = await res.json();
-    const results = data?.response?.results || [];
-    const items = results.map((item) => ({
-      title: item.webTitle || 'Untitled',
-      url: item.webUrl || '',
-      section: item.sectionName || '',
-    }));
-    return { items };
-  } catch (err) {
-    return { error: 'Failed to reach The Guardian API.' };
-  }
-}
-
-function renderGuardianNews(api, state){
-  if (!requireAuth(api, state)) return;
-  state.currentScreen = 'guardian';
-  state.guardianRequestId = (state.guardianRequestId || 0) + 1;
-  const requestId = state.guardianRequestId;
-
-  api.batch(b=>{
-    b.clear();
-    b.setInputLimit(null);
-    b.print('== News (The Guardian) ==', 'magenta');
-    b.hr();
-    b.print('Loading latest headlines…', 'dim');
-    b.hr();
-    b.print('Commands: /news (refresh), /main', 'cyan');
-    b.setInputType('text', 'Use /news to refresh or /main to go back');
-  });
-
-  fetchGuardianHeadlines().then((result) => {
-    if (state.currentScreen !== 'guardian' || state.guardianRequestId !== requestId) return;
-    api.batch(b=>{
-      b.clear();
-      b.setInputLimit(null);
-      b.print('== News (The Guardian) ==', 'magenta');
-      b.hr();
-      if (result.error) {
-        b.print(result.error, 'red');
-      } else if (!result.items || result.items.length === 0) {
-        b.print('No headlines returned.', 'dim');
-      } else {
-        b.print('Latest 10 headlines:', 'yellow');
-        result.items.forEach((item, idx) => {
-          const safeTitle = escapeHTML(item.title);
-          const safeUrl = escapeHTML(item.url);
-          const safeSection = item.section ? ` <span class="dim">[${escapeHTML(item.section)}]</span>` : '';
-          b.printHTML(`${idx + 1}. <a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeTitle}</a>${safeSection}`);
-        });
-      }
-      b.hr();
-      b.print('Commands: /news (refresh), /main', 'cyan');
-      b.setInputType('text', 'Use /news to refresh or /main to go back');
-    });
-  });
-}
-
-function guardianNewsHandleRaw(text, api, state){
-  if (!requireAuth(api, state)) return true;
-  api.print('Use /news to refresh headlines or /main to return.', 'dim');
-  return true;
-}
-
 
 
 function cmdAddNews(api, state, args){
@@ -1907,6 +1692,32 @@ function cmdRemoveNews(api, state, args){
   if (state.currentScreen && state.currentScreen.startsWith('news') && state.currentNewsId === id){
     renderNewsList(api, state);
   }
+}
+
+/* ======================= Games ======================= */
+function renderGames(api, state){
+  if (!requireAuth(api, state)) return;
+  api.batch(b=>{
+    b.clear();
+    b.setInputLimit(null);
+    b.print('== Games ==', 'magenta'); b.hr();
+    b.print('  /wordle    daily word puzzle — new word every day, same for everyone', 'cyan');
+    b.hr();
+    b.print('more games coming soon.', 'dim');
+    b.print('/leave to return to the main menu', 'dim');
+  });
+  state.currentScreen = 'games';
+}
+
+function gamesHandleCommand(cmd, api, state){
+  if (!requireAuth(api, state)) return true;
+  if (cmd === 'leave' || cmd === 'menu' || cmd === 'main'){ routeGo(api, state, 'menu'); return true; }
+  return false;
+}
+
+function cmdWordle(api, state){
+  if (!requireAuth(api, state)) return;
+  api.print('Wordle coming soon.', 'dim');
 }
 
 /* ======================= Profiles (/aboutme, /profile) ======================= */
@@ -2156,29 +1967,6 @@ function cmdDM(api, state, args){
 
   api.print('Sent.', 'green');
 
-  if (
-    rocko
-    && typeof rocko.handleDM === 'function'
-    && recipient
-    && recipient.username
-    && recipient.username.toLowerCase() === rocko.usernameLower
-  ) {
-    try {
-      rocko.handleDM({
-        text: body,
-        fromUsername: state.username,
-        displayName: state.displayName,
-        userRow: {
-          id: state.userId,
-          username: state.username,
-          display_name: state.displayName,
-        },
-      });
-    } catch (e) {
-      console.warn('[rocko] dm hook failed:', e && e.message ? e.message : e);
-    }
-  }
-
   // --- live notify recipient if online ---
   // socketsByUser is keyed by canonical username
   const canonical = recipient.username;
@@ -2336,50 +2124,6 @@ function cmdNotifications(api, state, args){
 }
 
 
-
-
-/* ======================= Doors (Games) ======================= */
-function cmdGames(api, state){
-  if (!requireAuth(api, state)) return;
-  api.batch(b=>{
-    b.clear(); b.print('== Door Games ==','magenta'); b.hr();
-    if (!DOOR_GAMES.length){
-      b.print('No door games available yet.', 'dim');
-    } else {
-      DOOR_GAMES.forEach(game => {
-        const line = `${game.name} — ${game.url} — ${game.description}`;
-        b.printHTML(sanitizeAndFormatDIS(line));
-      });
-      b.hr();
-      b.print('Tip: /play <game> to open in a new tab.', 'dim');
-    }
-    b.hr();
-  });
-}
-
-function cmdPlay(api, state, args){
-  if (!requireAuth(api, state)) return;
-  const query = (args || []).join(' ').trim();
-  if (!query) {
-    api.print('Usage: /play <game>', 'yellow');
-    return;
-  }
-
-  const normalized = query.toLowerCase();
-  const game = DOOR_GAMES.find(entry => entry.name.toLowerCase() === normalized);
-  if (!game) {
-    api.print(`Unknown game: ${query}`, 'yellow');
-    if (DOOR_GAMES.length) {
-      const names = DOOR_GAMES.map(entry => entry.name).join(', ');
-      api.print(`Available: ${names}`, 'dim');
-    }
-    return;
-  }
-
-  api.print(`Opening ${game.name}...`, 'cyan');
-  api.openUrl(game.url);
-  api.printHTML(sanitizeAndFormatDIS(`Link: ${game.url}`));
-}
 
 
 /* ======================= Splash: Register ======================= */
@@ -2700,16 +2444,6 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'links':        if (args.length) openNewsItem(api, state, parseInt(args[0],10)||0); else renderNewsList(api, state); return true;
     case 'addlink':      cmdAddNews(api, state, args); return true;
     case 'removelink':   cmdRemoveNews(api, state, args); return true;
-    case 'news':
-      if (args.length) { api.print('Usage: /news', 'yellow'); return true; }
-      renderGuardianNews(api, state);
-      return true;
-    case 'addnews':      cmdAddNews(api, state, args); return true;
-    case 'removenews':   cmdRemoveNews(api, state, args); return true;
-
-    /* Doors / Games */
-    case 'games':        cmdGames(api, state); return true;
-    case 'play':         cmdPlay(api, state, args); return true;
 
     /* Pixel Art */
     case 'draw':         cmdDraw(api, state); return true;
@@ -2717,8 +2451,11 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'editart':      cmdEditArt(api, state, args); return true;
     case 'deleteart':    cmdDeleteArt(api, state, args); return true;
 
+    /* Games */
+    case 'games':        renderGames(api, state); return true;
+    case 'wordle':       cmdWordle(api, state); return true;
+
     /* DMs / Suggestions */
-    case 'ai':           cmdAi(api, state, args); return true;
     case 'post':         cmdPost(api, state, args); return true;
     case 'feed':         cmdFeed(api, state, args); return true;
     case 'newpoll':      cmdNewPoll(api, state, args); return true;
@@ -2902,6 +2639,7 @@ wss.on('connection', (ws, req) => {
         || (state.currentScreen === 'topic'      && topicHandleCommand && topicHandleCommand(cmd, api, state, args))
         || (state.currentScreen === 'news:list'  && newsListHandleCommand && newsListHandleCommand(cmd, api, state, args))
         || (state.currentScreen === 'news:item'  && newsItemHandleCommand && newsItemHandleCommand(cmd, api, state, args))
+        || (state.currentScreen === 'games'      && gamesHandleCommand   && gamesHandleCommand(cmd, api, state))
         || false;
 
       if (localHandled) return;
@@ -2917,7 +2655,6 @@ wss.on('connection', (ws, req) => {
     if (state.currentScreen === 'adminchat')  { adminChatHandleRaw && adminChatHandleRaw(raw, api, state); return; }
     if (state.currentScreen === 'topic')      { topicHandleRaw && topicHandleRaw(raw, api, state);   return; }
     if (state.currentScreen === 'news:item')  { newsItemHandleRaw && newsItemHandleRaw(raw, api, state); return; }
-    if (state.currentScreen === 'guardian')   { guardianNewsHandleRaw && guardianNewsHandleRaw(raw, api, state); return; }
     if (state.currentScreen === 'board')      { api.print('Use /topic <id> or /newtopic <title>.', 'dim'); return; }
     if (state.currentScreen === 'poll')       { api.print('Use /vote <poll id> <option #> or /newpoll <question> | <opt1> | <opt2> ...', 'dim'); return; }
 
