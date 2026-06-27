@@ -197,6 +197,8 @@ CREATE TABLE IF NOT EXISTS users (
   ensurePixelArtSchema(db);
   ensureEmailColumn(db);
   ensurePasswordResetTokensSchema(db);
+  ensureFingerprintColumns(db);
+  ensureBanSchema(db);
 
   const getSetting = db.prepare('SELECT value FROM settings WHERE key=?');
   const setSetting = db.prepare(`
@@ -565,6 +567,48 @@ CREATE TABLE IF NOT EXISTS users (
      WHERE token = ? AND used_at IS NULL
   `);
 
+  const updateUserFingerprint = db.prepare(`
+    UPDATE users
+       SET registration_ip  = COALESCE(registration_ip, ?),
+           last_login_ip    = ?,
+           user_agent       = ?,
+           accept_language  = ?,
+           fingerprint_hash = ?
+     WHERE id = ?
+  `);
+  const updateUserFingerprintOnRegister = db.prepare(`
+    UPDATE users
+       SET registration_ip  = ?,
+           last_login_ip    = ?,
+           user_agent       = ?,
+           accept_language  = ?,
+           fingerprint_hash = ?
+     WHERE id = ?
+  `);
+
+  const insertBan = db.prepare(`
+    INSERT INTO ban_list (created_at, banned_by, username, ip, fingerprint_hash, notes)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  const listBans = db.prepare(`
+    SELECT id, created_at, banned_by, username, ip, fingerprint_hash, notes
+      FROM ban_list
+     ORDER BY created_at DESC
+  `);
+  const getBanById = db.prepare(`SELECT * FROM ban_list WHERE id = ?`);
+  const deleteBanById = db.prepare(`DELETE FROM ban_list WHERE id = ?`);
+  const updateBanNote = db.prepare(`UPDATE ban_list SET notes = ? WHERE id = ?`);
+
+  const checkBanByUsername = db.prepare(`
+    SELECT id FROM ban_list WHERE LOWER(username) = LOWER(?) LIMIT 1
+  `);
+  const checkBanByIp = db.prepare(`
+    SELECT id FROM ban_list WHERE ip IS NOT NULL AND ip = ? LIMIT 1
+  `);
+  const checkBanByFingerprint = db.prepare(`
+    SELECT id FROM ban_list WHERE fingerprint_hash IS NOT NULL AND fingerprint_hash = ? LIMIT 1
+  `);
+
   const insertPixelArt    = db.prepare(`INSERT INTO pixel_art (name, creator_username, pixel_data, created_at) VALUES (?, ?, ?, ?)`);
   const listPixelArt      = db.prepare(`SELECT id, name, creator_username, created_at, pixel_data FROM pixel_art ORDER BY created_at DESC LIMIT 200`);
   const getPixelArtByName = db.prepare('SELECT * FROM pixel_art WHERE name = ?');
@@ -757,6 +801,16 @@ CREATE TABLE IF NOT EXISTS users (
     insertPasswordResetToken,
     getPasswordResetToken,
     markPasswordResetTokenUsed,
+    updateUserFingerprint,
+    updateUserFingerprintOnRegister,
+    insertBan,
+    listBans,
+    getBanById,
+    deleteBanById,
+    updateBanNote,
+    checkBanByUsername,
+    checkBanByIp,
+    checkBanByFingerprint,
     insertPixelArt,
     listPixelArt,
     getPixelArtByName,
@@ -877,6 +931,54 @@ function ensurePasswordResetTokensSchema(db){
     );
     CREATE INDEX IF NOT EXISTS idx_prt_token      ON password_reset_tokens(token);
     CREATE INDEX IF NOT EXISTS idx_prt_username   ON password_reset_tokens(username);
+  `);
+}
+
+function ensureFingerprintColumns(db){
+  try {
+    const cols = db.prepare('PRAGMA table_info(users)').all().map(c => c.name);
+    const needed = ['registration_ip','last_login_ip','user_agent','accept_language','screen_resolution','timezone','fingerprint_hash'];
+    for (const col of needed){
+      if (!cols.includes(col)){
+        db.exec(`ALTER TABLE users ADD COLUMN ${col} TEXT`);
+      }
+    }
+  } catch (e) {
+    console.error('ensureFingerprintColumns failed:', e && e.message ? e.message : e);
+  }
+}
+
+function ensureBanSchema(db){
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ban_list (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at       INTEGER NOT NULL,
+      banned_by        TEXT    NOT NULL,
+      username         TEXT,
+      ip               TEXT,
+      fingerprint_hash TEXT,
+      notes            TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_ban_username ON ban_list(username);
+    CREATE INDEX IF NOT EXISTS idx_ban_ip       ON ban_list(ip);
+    CREATE INDEX IF NOT EXISTS idx_ban_fp       ON ban_list(fingerprint_hash);
+
+    CREATE TABLE IF NOT EXISTS ban_log (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at       INTEGER NOT NULL,
+      banned_by        TEXT    NOT NULL,
+      username         TEXT    NOT NULL,
+      chat_msgs        INTEGER NOT NULL DEFAULT 0,
+      board_topics     INTEGER NOT NULL DEFAULT 0,
+      board_comments   INTEGER NOT NULL DEFAULT 0,
+      link_posts       INTEGER NOT NULL DEFAULT 0,
+      link_comments    INTEGER NOT NULL DEFAULT 0,
+      poll_votes       INTEGER NOT NULL DEFAULT 0,
+      polls_created    INTEGER NOT NULL DEFAULT 0,
+      status_posts     INTEGER NOT NULL DEFAULT 0,
+      dm_sent          INTEGER NOT NULL DEFAULT 0,
+      pixel_art        INTEGER NOT NULL DEFAULT 0
+    );
   `);
 }
 

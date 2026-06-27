@@ -273,6 +273,16 @@ const {
   insertPasswordResetToken,
   getPasswordResetToken,
   markPasswordResetTokenUsed,
+  updateUserFingerprint,
+  updateUserFingerprintOnRegister,
+  insertBan,
+  listBans,
+  getBanById,
+  deleteBanById,
+  updateBanNote,
+  checkBanByUsername,
+  checkBanByIp,
+  checkBanByFingerprint,
 } = statements;
 
 const {
@@ -282,6 +292,40 @@ const {
   createUser,
   verifyLogin,
 } = helpers;
+
+const PRIVATE_IP_RE = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|::1$|fc00:|fd)/i;
+
+function extractClientIp(req) {
+  const xff = req.headers['x-forwarded-for'];
+  if (xff) {
+    for (const part of xff.split(',')) {
+      const ip = part.trim();
+      if (ip && !PRIVATE_IP_RE.test(ip)) return ip;
+    }
+  }
+  return req.ip || req.socket?.remoteAddress || null;
+}
+
+function buildFingerprintHash(fields) {
+  const str = [
+    fields.ip || '',
+    fields.userAgent || '',
+    fields.acceptLanguage || '',
+    fields.screenResolution || '',
+    fields.timezone || '',
+  ].join('|');
+  return crypto.createHash('sha256').update(str).digest('hex');
+}
+
+function collectFingerprintFromReq(req, body) {
+  const ip             = extractClientIp(req);
+  const userAgent      = (req.headers['user-agent'] || '').slice(0, 512);
+  const acceptLanguage = (req.headers['accept-language'] || '').slice(0, 128);
+  const screenRes      = typeof body.screenResolution === 'string' ? body.screenResolution.slice(0, 32)  : null;
+  const timezone       = typeof body.timezone         === 'string' ? body.timezone.slice(0, 64)          : null;
+  const fpHash         = buildFingerprintHash({ ip, userAgent, acceptLanguage, screenResolution: screenRes, timezone });
+  return { ip, userAgent, acceptLanguage, screenResolution: screenRes, timezone, fpHash };
+}
 
 function pixelArtEmojiLookup(name){
   try { return getPixelArtEmoji.get(name) || null; } catch { return null; }
@@ -624,7 +668,11 @@ function cmdHelp(api, state){
     api.print('  /adminchat   Admin live room (private)', 'cyan');
     api.print('  /announce <text>             Post a new announcement', 'cyan');
     api.print('  /removeannounce <id>         Remove an announcement', 'cyan');
-
+    api.print('  /ban <username>              Ban user (deletes content, blocks IP + fingerprint)', 'cyan');
+    api.print('  /banlist                     Show all ban list entries', 'cyan');
+    api.print('  /unban <id>                  Remove a ban list entry by id', 'cyan');
+    api.print('  /bannote <id> <text>         Add/update a note on a ban entry', 'cyan');
+    api.print('  /checkuser <username>        Show fingerprint info + ban list matches for a user', 'cyan');
   }
   api.hr();
   api.print('DIS-Markdown: **bold**, _italics_, __underline__, [dim]…[/dim], and color tags like [cyan]…[/cyan].', 'dim');
@@ -2362,6 +2410,153 @@ function cmdPasswd(api, state, args){
 
 
 
+/* ======================= Admin ban commands ======================= */
+function cmdBan(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
+
+  const targetName = (args[0] || '').trim();
+  if (!targetName) { api.print('Usage: /ban <username>', 'yellow'); return; }
+  if (targetName.toLowerCase() === state.username.toLowerCase()) {
+    api.print('You cannot ban yourself.', 'red'); return;
+  }
+
+  const target = getUserByName.get(targetName);
+  if (!target) { api.print(`User not found: ${targetName}`, 'red'); return; }
+  if (target.is_admin) { api.print('Cannot ban an admin account.', 'red'); return; }
+
+  const userId = target.id;
+  const now = nowEpoch();
+
+  // Count and delete content in one transaction
+  const summary = db.transaction(() => {
+    const chatMsgs      = db.prepare('SELECT COUNT(1) AS n FROM messages      WHERE user_id = ?').get(userId).n;
+    const boardTopics   = db.prepare('SELECT COUNT(1) AS n FROM board_topics  WHERE creator_id = ?').get(userId).n;
+    const boardComments = db.prepare('SELECT COUNT(1) AS n FROM board_comments WHERE user_id = ?').get(userId).n;
+    const linkPosts     = db.prepare('SELECT COUNT(1) AS n FROM news_posts    WHERE user_id = ?').get(userId).n;
+    const linkComments  = db.prepare('SELECT COUNT(1) AS n FROM news_comments  WHERE user_id = ?').get(userId).n;
+    const pollVotes     = db.prepare('SELECT COUNT(1) AS n FROM poll_votes    WHERE user_id = ?').get(userId).n;
+    const pollsCreated  = db.prepare('SELECT COUNT(1) AS n FROM polls         WHERE creator_id = ?').get(userId).n;
+    const statusPosts   = db.prepare('SELECT COUNT(1) AS n FROM status_posts  WHERE user_id = ?').get(userId).n;
+    const dmSent        = db.prepare('SELECT COUNT(1) AS n FROM dm_messages   WHERE sender_id = ?').get(userId).n;
+    const pxArt         = db.prepare('SELECT COUNT(1) AS n FROM pixel_art     WHERE creator_username = ?').get(target.username).n;
+
+    db.prepare('DELETE FROM messages       WHERE user_id = ?').run(userId);
+    db.prepare('DELETE FROM board_comments WHERE user_id = ?').run(userId);
+    db.prepare('DELETE FROM board_topics   WHERE creator_id = ?').run(userId);
+    db.prepare('DELETE FROM news_comments  WHERE user_id = ?').run(userId);
+    db.prepare('DELETE FROM news_posts     WHERE user_id = ?').run(userId);
+    db.prepare('DELETE FROM poll_votes     WHERE user_id = ?').run(userId);
+    db.prepare('DELETE FROM polls          WHERE creator_id = ?').run(userId);
+    db.prepare('DELETE FROM status_posts   WHERE user_id = ?').run(userId);
+    db.prepare('DELETE FROM dm_messages    WHERE sender_id = ?').run(userId);
+    db.prepare('DELETE FROM pixel_art      WHERE creator_username = ?').run(target.username);
+    db.prepare('DELETE FROM notifications  WHERE to_user_id = ? OR from_user_id = ?').run(userId, userId);
+
+    insertBan.run(now, state.username, target.username, target.registration_ip || null, target.fingerprint_hash || null, null);
+
+    db.prepare('INSERT INTO ban_log (created_at, banned_by, username, chat_msgs, board_topics, board_comments, link_posts, link_comments, poll_votes, polls_created, status_posts, dm_sent, pixel_art) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
+      now, state.username, target.username,
+      chatMsgs, boardTopics, boardComments, linkPosts, linkComments,
+      pollVotes, pollsCreated, statusPosts, dmSent, pxArt
+    );
+
+    db.prepare('DELETE FROM users WHERE id = ?').run(userId);
+
+    return { chatMsgs, boardTopics, boardComments, linkPosts, linkComments, pollVotes, pollsCreated, statusPosts, dmSent, pxArt };
+  })();
+
+  // Force-close any live sockets for the banned user
+  const sockets = HUB.socketsByUser.get(target.username);
+  if (sockets) {
+    for (const ws of sockets) {
+      try { ws.close(4003, 'banned'); } catch {}
+    }
+    HUB.socketsByUser.delete(target.username);
+  }
+  HUB.online.delete(target.username);
+
+  api.print(`Banned: ${target.username}`, 'red');
+  api.print(`  IP: ${target.registration_ip || '(none on record)'}`, 'dim');
+  api.print(`  Fingerprint: ${target.fingerprint_hash ? target.fingerprint_hash.slice(0, 16) + '…' : '(none on record)'}`, 'dim');
+  api.print(`  Deleted: ${summary.chatMsgs} chat msgs, ${summary.boardTopics} topics, ${summary.boardComments} board replies, ${summary.linkPosts} links, ${summary.linkComments} link comments, ${summary.pollVotes} votes, ${summary.pollsCreated} polls, ${summary.statusPosts} status posts, ${summary.dmSent} DMs sent, ${summary.pxArt} pixel art`, 'dim');
+  broadcastSystem(`${target.username} has been removed.`);
+}
+
+function cmdBanList(api, state) {
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
+  const rows = listBans.all();
+  if (!rows.length) { api.print('Ban list is empty.', 'dim'); return; }
+  api.print('== Ban List ==', 'magenta');
+  api.hr();
+  for (const r of rows) {
+    const date = new Date(r.created_at * 1000).toISOString().slice(0, 10);
+    const fp   = r.fingerprint_hash ? r.fingerprint_hash.slice(0, 12) + '…' : '—';
+    const ip   = r.ip || '—';
+    const note = r.notes ? `  note: ${r.notes}` : '';
+    api.print(`[${r.id}] ${r.username || '—'}  ip:${ip}  fp:${fp}  ${date}  by:${r.banned_by}${note}`, 'cyan');
+  }
+  api.hr();
+}
+
+function cmdUnban(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
+  const id = parseInt(args[0], 10);
+  if (!id) { api.print('Usage: /unban <id>', 'yellow'); return; }
+  const row = getBanById.get(id);
+  if (!row) { api.print(`No ban entry with id ${id}.`, 'red'); return; }
+  deleteBanById.run(id);
+  api.print(`Removed ban entry ${id} (was: ${row.username || '—'} / ${row.ip || '—'}).`, 'green');
+}
+
+function cmdBanNote(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
+  const id   = parseInt(args[0], 10);
+  const note = args.slice(1).join(' ').trim();
+  if (!id || !note) { api.print('Usage: /bannote <id> <note text>', 'yellow'); return; }
+  const row = getBanById.get(id);
+  if (!row) { api.print(`No ban entry with id ${id}.`, 'red'); return; }
+  updateBanNote.run(note, id);
+  api.print(`Note updated on ban entry ${id}.`, 'green');
+}
+
+function cmdCheckUser(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
+  const targetName = (args[0] || '').trim();
+  if (!targetName) { api.print('Usage: /checkuser <username>', 'yellow'); return; }
+  const user = getUserByName.get(targetName);
+  if (!user) { api.print(`User not found: ${targetName}`, 'red'); return; }
+
+  api.print(`== ${user.username} ==`, 'magenta');
+  api.print(`  registration_ip:  ${user.registration_ip  || '(none)'}`, 'cyan');
+  api.print(`  last_login_ip:    ${user.last_login_ip    || '(none)'}`, 'cyan');
+  api.print(`  user_agent:       ${user.user_agent       || '(none)'}`, 'cyan');
+  api.print(`  accept_language:  ${user.accept_language  || '(none)'}`, 'cyan');
+  api.print(`  fingerprint_hash: ${user.fingerprint_hash || '(none)'}`, 'cyan');
+
+  const hitUsername = user.username         ? checkBanByUsername.get(user.username)         : null;
+  const hitRegIp    = user.registration_ip  ? checkBanByIp.get(user.registration_ip)        : null;
+  const hitLoginIp  = user.last_login_ip    ? checkBanByIp.get(user.last_login_ip)          : null;
+  const hitFp       = user.fingerprint_hash ? checkBanByFingerprint.get(user.fingerprint_hash) : null;
+
+  const hits = [
+    hitUsername ? `username (ban id ${hitUsername.id})`  : null,
+    hitRegIp    ? `reg IP (ban id ${hitRegIp.id})`       : null,
+    hitLoginIp  ? `login IP (ban id ${hitLoginIp.id})`   : null,
+    hitFp       ? `fingerprint (ban id ${hitFp.id})`     : null,
+  ].filter(Boolean);
+
+  if (hits.length) {
+    api.print(`  BAN MATCHES: ${hits.join(', ')}`, 'red');
+  } else {
+    api.print('  No ban list matches.', 'dim');
+  }
+}
+
 /* ======================= Logout ======================= */
 function doLogout(api, state){
   if (!state || !state.authenticated){
@@ -2473,6 +2668,13 @@ function handleGlobalCommand(cmd, api, state, args){
       if (state.isAdmin) renderAdminChat(api, state);
       else api.print('Unknown command.', 'red');
       return true;
+
+    /* Admin ban / blacklist */
+    case 'ban':         cmdBan(api, state, args); return true;
+    case 'banlist':     cmdBanList(api, state); return true;
+    case 'unban':       cmdUnban(api, state, args); return true;
+    case 'bannote':     cmdBanNote(api, state, args); return true;
+    case 'checkuser':   cmdCheckUser(api, state, args); return true;
 
     default:
       return false;
@@ -2839,6 +3041,14 @@ app.post('/api/login', (req, res) => {
   if (!user) {
     return res.status(401).json({ ok: false, error: 'Invalid username or password.' });
   }
+
+  const fp = collectFingerprintFromReq(req, req.body || {});
+  try {
+    updateUserFingerprint.run(fp.ip, fp.ip, fp.userAgent, fp.acceptLanguage, fp.fpHash, user.id);
+  } catch (e) {
+    console.error('[login] fingerprint update failed:', e && e.message);
+  }
+
   const authToken = makeAuthToken();
   AUTH_TOKENS.set(authToken, {
     userId: user.id,
@@ -2850,10 +3060,11 @@ app.post('/api/login', (req, res) => {
 });
 
 app.post('/api/register', (req, res) => {
-  const username = req.body && typeof req.body.username === 'string' ? req.body.username.trim() : '';
-  const password = req.body && typeof req.body.password === 'string' ? req.body.password : '';
-  const email    = req.body && typeof req.body.email === 'string' ? req.body.email.trim() : '';
+  const username     = req.body && typeof req.body.username     === 'string' ? req.body.username.trim()     : '';
+  const password     = req.body && typeof req.body.password     === 'string' ? req.body.password            : '';
+  const email        = req.body && typeof req.body.email        === 'string' ? req.body.email.trim()        : '';
   const signupReason = req.body && typeof req.body.signupReason === 'string' ? req.body.signupReason.trim() : '';
+
   if (!username || !password) {
     return res.status(400).json({ ok: false, error: 'Username and password are required.' });
   }
@@ -2863,6 +3074,20 @@ app.post('/api/register', (req, res) => {
   if (!signupReason) {
     return res.status(400).json({ ok: false, error: 'Please tell us what brought you to DIS.' });
   }
+
+  const fp = collectFingerprintFromReq(req, req.body || {});
+
+  // Ban checks — username first (specific), then IP/fingerprint (generic)
+  if (checkBanByUsername.get(username)) {
+    return res.status(403).json({ ok: false, error: 'That username is not available.' });
+  }
+  if (fp.ip && checkBanByIp.get(fp.ip)) {
+    return res.status(403).json({ ok: false, error: 'Registration is not available.' });
+  }
+  if (fp.fpHash && checkBanByFingerprint.get(fp.fpHash)) {
+    return res.status(403).json({ ok: false, error: 'Registration is not available.' });
+  }
+
   const result = createUser(username, password);
   if (!result.ok) {
     if (result.reason === 'exists') {
@@ -2870,10 +3095,17 @@ app.post('/api/register', (req, res) => {
     }
     return res.status(500).json({ ok: false, error: 'Registration failed.' });
   }
+
   try { setUserSignupReason.run(signupReason, result.id); } catch {}
   if (email) {
     try { db.prepare('UPDATE users SET email = ? WHERE id = ?').run(email, result.id); } catch {}
   }
+  try {
+    updateUserFingerprintOnRegister.run(fp.ip, fp.ip, fp.userAgent, fp.acceptLanguage, fp.fpHash, result.id);
+  } catch (e) {
+    console.error('[register] fingerprint store failed:', e && e.message);
+  }
+
   const user = getUserByName.get(username);
   const authToken = makeAuthToken();
   AUTH_TOKENS.set(authToken, {

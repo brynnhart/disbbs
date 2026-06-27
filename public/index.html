@@ -999,6 +999,16 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
       }).catch(function(){}).then(function(){ dismissOverlay(token); });
     }
 
+    function getBrowserFingerprint() {
+      return {
+        screenResolution: screen.width + 'x' + screen.height,
+        timezone: (typeof Intl !== 'undefined' && Intl.DateTimeFormat)
+          ? (Intl.DateTimeFormat().resolvedOptions().timeZone || '')
+          : '',
+        platform: navigator.platform || '',
+      };
+    }
+
     if (loginForm) {
       loginForm.addEventListener('submit', function(e) {
         e.preventDefault();
@@ -1010,10 +1020,11 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
         if (!username || !password) { showAuthError('Username and password are required.'); return; }
         clearAuthError();
         if (submitEl) submitEl.disabled = true;
+        var fp = getBrowserFingerprint();
         fetch('/api/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: username, password: password })
+          body: JSON.stringify({ username: username, password: password, screenResolution: fp.screenResolution, timezone: fp.timezone, platform: fp.platform })
         })
         .then(function(r){ return r.json(); })
         .then(function(data){
@@ -1041,10 +1052,11 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
         if (!reason)                { showAuthError('Please tell us what brought you to DIS.'); return; }
         clearAuthError();
         if (submitEl) submitEl.disabled = true;
+        var fp = getBrowserFingerprint();
         fetch('/api/register', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: username, password: password, email: email, signupReason: reason })
+          body: JSON.stringify({ username: username, password: password, email: email, signupReason: reason, screenResolution: fp.screenResolution, timezone: fp.timezone, platform: fp.platform })
         })
         .then(function(r){ return r.json(); })
         .then(function(data){
