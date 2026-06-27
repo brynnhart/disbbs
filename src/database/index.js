@@ -199,6 +199,7 @@ CREATE TABLE IF NOT EXISTS users (
   ensurePasswordResetTokensSchema(db);
   ensureFingerprintColumns(db);
   ensureBanSchema(db);
+  ensureLastSeenColumn(db);
 
   const getSetting = db.prepare('SELECT value FROM settings WHERE key=?');
   const setSetting = db.prepare(`
@@ -609,6 +610,44 @@ CREATE TABLE IF NOT EXISTS users (
     SELECT id FROM ban_list WHERE fingerprint_hash IS NOT NULL AND fingerprint_hash = ? LIMIT 1
   `);
 
+  const getLastSeenAt = db.prepare(`SELECT last_seen_at FROM users WHERE id = ?`);
+  const setLastSeenAt = db.prepare(`UPDATE users SET last_seen_at = ? WHERE id = ?`);
+
+  const countNewBoardTopics = db.prepare(`
+    SELECT COUNT(1) AS n FROM board_topics
+     WHERE created_at > ? AND creator_id != ?
+       AND (expires_at IS NULL OR expires_at > strftime('%s','now'))
+  `);
+  const countNewBoardComments = db.prepare(`
+    SELECT COUNT(1) AS n FROM board_comments bc
+      JOIN board_topics bt ON bt.id = bc.topic_id
+     WHERE bc.created_at > ? AND bc.user_id != ?
+       AND (bt.expires_at IS NULL OR bt.expires_at > strftime('%s','now'))
+  `);
+  const countNewLinkPosts = db.prepare(`
+    SELECT COUNT(1) AS n FROM news_posts
+     WHERE created_at > ? AND user_id != ?
+       AND (expires_at IS NULL OR expires_at > strftime('%s','now'))
+  `);
+  const countNewPolls = db.prepare(`
+    SELECT COUNT(1) AS n FROM polls
+     WHERE created_at > ? AND creator_id != ?
+  `);
+  const countNewVotesOnUserPolls = db.prepare(`
+    SELECT COUNT(1) AS n FROM poll_votes pv
+      JOIN polls p ON p.id = pv.poll_id
+     WHERE pv.created_at > ? AND p.creator_id = ? AND pv.user_id != ?
+  `);
+  const countNewStatusPosts = db.prepare(`
+    SELECT COUNT(1) AS n FROM status_posts
+     WHERE created_at > ? AND user_id != ?
+       AND (expires_at IS NULL OR expires_at > strftime('%s','now'))
+  `);
+  const countNewPixelArt = db.prepare(`
+    SELECT COUNT(1) AS n FROM pixel_art
+     WHERE created_at > ? AND creator_username != ?
+  `);
+
   const listRecentUsers = db.prepare(`
     SELECT id, username, created_at, registration_ip, user_agent, email, fingerprint_hash, last_login_ip
       FROM users
@@ -818,6 +857,15 @@ CREATE TABLE IF NOT EXISTS users (
     checkBanByUsername,
     checkBanByIp,
     checkBanByFingerprint,
+    getLastSeenAt,
+    setLastSeenAt,
+    countNewBoardTopics,
+    countNewBoardComments,
+    countNewLinkPosts,
+    countNewPolls,
+    countNewVotesOnUserPolls,
+    countNewStatusPosts,
+    countNewPixelArt,
     listRecentUsers,
     insertPixelArt,
     listPixelArt,
@@ -940,6 +988,15 @@ function ensurePasswordResetTokensSchema(db){
     CREATE INDEX IF NOT EXISTS idx_prt_token      ON password_reset_tokens(token);
     CREATE INDEX IF NOT EXISTS idx_prt_username   ON password_reset_tokens(username);
   `);
+}
+
+function ensureLastSeenColumn(db){
+  try {
+    const has = db.prepare('PRAGMA table_info(users)').all().some(c => c.name === 'last_seen_at');
+    if (!has) db.exec('ALTER TABLE users ADD COLUMN last_seen_at INTEGER');
+  } catch (e) {
+    console.error('ensureLastSeenColumn failed:', e && e.message ? e.message : e);
+  }
 }
 
 function ensureFingerprintColumns(db){

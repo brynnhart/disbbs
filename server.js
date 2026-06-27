@@ -283,6 +283,15 @@ const {
   checkBanByUsername,
   checkBanByIp,
   checkBanByFingerprint,
+  getLastSeenAt,
+  setLastSeenAt,
+  countNewBoardTopics,
+  countNewBoardComments,
+  countNewLinkPosts,
+  countNewPolls,
+  countNewVotesOnUserPolls,
+  countNewStatusPosts,
+  countNewPixelArt,
   listRecentUsers,
 } = statements;
 
@@ -849,7 +858,39 @@ function handleUpdatePixelArt(msg, api, state){
 /* ======================= Menu ======================= */
 function renderMenu(api, state){
   if (!requireAuth(api, state)) return;
-  const unreadCount = countUnreadDMs.get(state.userId)?.count || 0;
+
+  const now = nowEpoch();
+  const uid = state.userId;
+  const uname = state.username;
+
+  // Read previous last_seen_at, then immediately stamp now so it's set even if something throws below.
+  const seenRow  = getLastSeenAt.get(uid);
+  const prevSeen = seenRow ? (seenRow.last_seen_at || null) : null;
+  setLastSeenAt.run(now, uid);
+
+  // Compute "what's new" only when there's a previous timestamp (null = first visit).
+  let newItems = null;
+  if (prevSeen) {
+    try {
+      const boardTopics   = countNewBoardTopics.get(prevSeen, uid).n;
+      const boardComments = countNewBoardComments.get(prevSeen, uid).n;
+      const boardTotal    = boardTopics + boardComments;
+      const newLinks      = countNewLinkPosts.get(prevSeen, uid).n;
+      const newPolls      = countNewPolls.get(prevSeen, uid).n;
+      const newVotes      = countNewVotesOnUserPolls.get(prevSeen, uid, uid).n;
+      const newStatus     = countNewStatusPosts.get(prevSeen, uid).n;
+      const newArt        = countNewPixelArt.get(prevSeen, uname).n;
+      const unreadDMs     = countUnreadDMs.get(uid)?.count || 0;
+      if (boardTotal || newLinks || newPolls || newVotes || newStatus || newArt || unreadDMs) {
+        newItems = { boardTotal, newLinks, newPolls, newVotes, newStatus, newArt, unreadDMs };
+      }
+    } catch (e) {
+      console.error('[renderMenu] whats-new query failed:', e && e.message);
+    }
+  }
+
+  const unreadCount = newItems ? newItems.unreadDMs : (countUnreadDMs.get(uid)?.count || 0);
+
   api.batch(b=>{
     b.clear();
     b.setInputLimit(null);
@@ -858,6 +899,17 @@ function renderMenu(api, state){
     if (unreadCount > 0) {
       const label = unreadCount === 1 ? 'message' : 'messages';
       b.printHTML(`<span style="color:#ff6b6b;font-weight:bold;">📬 NEW DIRECT MESSAGES: ${unreadCount} unread ${label}.</span>`);
+    }
+    if (newItems) {
+      b.print('── since your last visit ──', 'dim');
+      const pl = (n, word) => `${n} ${word}${n !== 1 ? 's' : ''}`;
+      if (newItems.boardTotal) b.print(`  ${pl(newItems.boardTotal, 'new board post')}`, 'cyan');
+      if (newItems.newLinks)   b.print(`  ${pl(newItems.newLinks,   'new link')}`, 'cyan');
+      if (newItems.newPolls)   b.print(`  ${pl(newItems.newPolls,   'new poll')}`, 'cyan');
+      if (newItems.newVotes)   b.print(`  ${pl(newItems.newVotes,   'new vote')} on your polls`, 'cyan');
+      if (newItems.newStatus)  b.print(`  ${pl(newItems.newStatus,  'new status post')}`, 'cyan');
+      if (newItems.newArt)     b.print(`  ${pl(newItems.newArt,     'new pixel art')}`, 'cyan');
+      if (newItems.unreadDMs)  b.print(`  ${pl(newItems.unreadDMs,  'unread direct message')}`, 'yellow');
     }
     b.print('  /chat            Enter the Commons Chat', 'cyan');
     //b.print('  /ai <question>   Ask the AI for info', 'cyan');
