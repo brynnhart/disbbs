@@ -19,6 +19,28 @@ const SSO_SECRET = process.env.SSO_SECRET || null;
 const AUTH_TOKEN_TTL_MS = 60 * 1000;
 const AUTH_TOKENS = new Map();
 
+const SMTP_HOST = process.env.SMTP_HOST || null;
+const SMTP_PORT = parseInt(process.env.SMTP_PORT || '587', 10);
+const SMTP_USER = process.env.SMTP_USER || null;
+const SMTP_PASS = process.env.SMTP_PASS || null;
+const SMTP_FROM = process.env.SMTP_FROM || (SMTP_USER ? `DIS BBS <${SMTP_USER}>` : null);
+
+let mailer = null;
+try {
+  const nodemailer = require('nodemailer');
+  if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
+    mailer = nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: SMTP_PORT,
+      secure: SMTP_PORT === 465,
+      auth: { user: SMTP_USER, pass: SMTP_PASS },
+    });
+    console.log(`[mailer] SMTP configured: ${SMTP_HOST}:${SMTP_PORT}`);
+  }
+} catch (e) {
+  console.warn('[mailer] nodemailer not available:', e.message);
+}
+
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -248,6 +270,9 @@ const {
   getPixelArtEmoji,
   updatePixelArt,
   deletePixelArt,
+  insertPasswordResetToken,
+  getPasswordResetToken,
+  markPasswordResetTokenUsed,
 } = statements;
 
 const {
@@ -2459,6 +2484,23 @@ function handleGlobalCommand(cmd, api, state, args){
 const HEARTBEAT_MS = 30_000;
 function markAlive() { this.isAlive = true; }
 
+function authenticateWsFromUserRow(ws, api, state, userRow) {
+  state.authenticated = true;
+  state.userId = userRow.id;
+  state.username = userRow.username;
+  state.isAdmin = !!userRow.is_admin;
+  const rc = getUserColor.get(state.userId);
+  state.userColor = rc ? rc.preferred_color : null;
+  const dnRow = getUserDisplay.get(state.userId);
+  state.displayName = dnRow && dnRow.display_name ? dnRow.display_name : state.username;
+  refreshUserNormsByRow({ id: state.userId, username: state.username, display_name: state.displayName });
+  HUB.online.add(state.username);
+  if (!HUB.socketsByUser.has(state.username)) HUB.socketsByUser.set(state.username, new Set());
+  HUB.socketsByUser.get(state.username).add(ws);
+  broadcastSystem(`${state.username} joined`);
+  setLastLogin.run(nowEpoch(), state.userId);
+}
+
 const heartbeatTimer = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (ws.isAlive === false) {
@@ -2475,7 +2517,7 @@ wss.on('close', () => {
 });
 
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
   ws.isAlive = true;
   ws.on('pong', markAlive);
 
@@ -2497,7 +2539,42 @@ wss.on('connection', (ws) => {
     if (!msg || typeof msg !== 'object') return;
 
     // Handshake
-    if (msg.type === 'init') { routeGo(api, state, 'splash'); return; }
+    if (msg.type === 'init') {
+      // Path 1: web-login token sent in the init message
+      if (typeof msg.token === 'string' && msg.token) {
+        const record = AUTH_TOKENS.get(msg.token);
+        if (record && record.expMs > Date.now()) {
+          AUTH_TOKENS.delete(msg.token);
+          const userRow = getUserByName.get(record.username);
+          if (userRow) {
+            authenticateWsFromUserRow(ws, api, state, userRow);
+            routeGo(api, state, 'menu');
+            cmdAnnouncements(api, state);
+            return;
+          }
+        }
+      }
+      // Path 2: SSO cookie (set by /api/auth/complete after web login)
+      if (SSO_SECRET) {
+        const cookieValue = getCookie(req, 'disbbs_auth');
+        if (cookieValue) {
+          let payload = null;
+          try { payload = verifyAuthCookie(cookieValue); } catch {}
+          if (payload) {
+            const userRow = getUserByName.get(payload.u);
+            if (userRow) {
+              authenticateWsFromUserRow(ws, api, state, userRow);
+              routeGo(api, state, 'menu');
+              cmdAnnouncements(api, state);
+              return;
+            }
+          }
+        }
+      }
+      // Path 3: fallback to terminal login
+      routeGo(api, state, 'splash');
+      return;
+    }
 
     if (msg.type === 'save_pixel_art')   { handleSavePixelArt(msg, api, state); return; }
     if (msg.type === 'update_pixel_art') { handleUpdatePixelArt(msg, api, state); return; }
@@ -2750,6 +2827,282 @@ app.get('/healthz', (req, res) => {
 
 
 
+
+/* ======================= REST Auth endpoints ======================= */
+app.post('/api/login', (req, res) => {
+  const username = req.body && typeof req.body.username === 'string' ? req.body.username.trim() : '';
+  const password = req.body && typeof req.body.password === 'string' ? req.body.password : '';
+  if (!username || !password) {
+    return res.status(400).json({ ok: false, error: 'Username and password are required.' });
+  }
+  const user = verifyLogin(username, password);
+  if (!user) {
+    return res.status(401).json({ ok: false, error: 'Invalid username or password.' });
+  }
+  const authToken = makeAuthToken();
+  AUTH_TOKENS.set(authToken, {
+    userId: user.id,
+    username: user.username,
+    isAdmin: !!user.is_admin,
+    expMs: Date.now() + AUTH_TOKEN_TTL_MS,
+  });
+  res.json({ ok: true, token: authToken, username: user.username });
+});
+
+app.post('/api/register', (req, res) => {
+  const username = req.body && typeof req.body.username === 'string' ? req.body.username.trim() : '';
+  const password = req.body && typeof req.body.password === 'string' ? req.body.password : '';
+  const email    = req.body && typeof req.body.email === 'string' ? req.body.email.trim() : '';
+  const signupReason = req.body && typeof req.body.signupReason === 'string' ? req.body.signupReason.trim() : '';
+  if (!username || !password) {
+    return res.status(400).json({ ok: false, error: 'Username and password are required.' });
+  }
+  if (password.length < 6) {
+    return res.status(400).json({ ok: false, error: 'Password must be at least 6 characters.' });
+  }
+  if (!signupReason) {
+    return res.status(400).json({ ok: false, error: 'Please tell us what brought you to DIS.' });
+  }
+  const result = createUser(username, password);
+  if (!result.ok) {
+    if (result.reason === 'exists') {
+      return res.status(409).json({ ok: false, error: 'That username is already taken.' });
+    }
+    return res.status(500).json({ ok: false, error: 'Registration failed.' });
+  }
+  try { setUserSignupReason.run(signupReason, result.id); } catch {}
+  if (email) {
+    try { db.prepare('UPDATE users SET email = ? WHERE id = ?').run(email, result.id); } catch {}
+  }
+  const user = getUserByName.get(username);
+  const authToken = makeAuthToken();
+  AUTH_TOKENS.set(authToken, {
+    userId: user.id,
+    username: user.username,
+    isAdmin: !!user.is_admin,
+    expMs: Date.now() + AUTH_TOKEN_TTL_MS,
+  });
+  res.json({ ok: true, token: authToken, username: user.username });
+});
+
+/* ======================= Password recovery ======================= */
+function resetPasswordPageHtml({ invalid, token }) {
+  const errorBlock = invalid
+    ? `<div class="msg err">${escapeHTML(invalid)}</div>`
+    : '';
+  const formBlock = invalid ? '' : `
+    <div class="field">
+      <label for="new-pw">New password <span class="hint">min 6 characters</span></label>
+      <input id="new-pw" type="password" autocomplete="new-password">
+    </div>
+    <div class="field">
+      <label for="confirm-pw">Confirm new password</label>
+      <input id="confirm-pw" type="password" autocomplete="new-password">
+    </div>
+    <button id="reset-btn" type="button">Set New Password</button>
+    <div id="reset-err" class="msg err" hidden></div>`;
+  const tokenJs = invalid ? '' : `var TOKEN=${JSON.stringify(token)};`;
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Password Reset — Dead Internet Society</title>
+<style>
+  :root{--bg:#000;--fg:#e6e6e6;--cyan:#19c3c3;--mag:#cc66ff;--red:#ff4545}
+  html,body{height:100%;background:var(--bg);color:var(--fg);
+    font:14px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+    margin:0;display:flex;align-items:center;justify-content:center;
+    padding:24px;box-sizing:border-box}
+  .card{width:100%;max-width:360px;border:1px solid #1a1a1a;border-radius:8px;
+    background:#050505;padding:28px 24px}
+  h1{font-size:13px;color:var(--mag);letter-spacing:2px;margin:0 0 3px;text-transform:uppercase}
+  .sub{font-size:11px;color:#555;margin-bottom:22px}
+  .field{display:flex;flex-direction:column;gap:5px;margin-bottom:14px}
+  .field label{font-size:10px;color:#777;letter-spacing:.8px;text-transform:uppercase}
+  .hint{font-size:10px;color:#444;text-transform:none;letter-spacing:0}
+  .field input{background:#0c0c0c;color:var(--fg);border:1px solid #1a1a1a;
+    outline:0;padding:9px 11px;border-radius:5px;font:inherit;caret-color:var(--cyan)}
+  .field input:focus{border-color:#2e2e2e}
+  button{appearance:none;border:1px solid var(--cyan);background:rgba(25,195,195,.07);
+    color:var(--cyan);font:inherit;font-size:13px;padding:10px;border-radius:5px;
+    cursor:pointer;width:100%;letter-spacing:.4px;transition:background .12s}
+  button:hover{background:rgba(25,195,195,.14)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  .msg{font-size:12px;padding:8px 11px;border-radius:4px;margin-bottom:14px;line-height:1.45}
+  .msg.err{background:rgba(255,69,69,.08);border:1px solid rgba(255,69,69,.35);color:var(--red)}
+  .back{font-size:12px;color:#555;margin-top:14px;text-align:center}
+  .back a{color:var(--cyan);text-decoration:none}
+  .back a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Dead Internet Society</h1>
+  <div class="sub">password reset</div>
+  ${errorBlock}
+  ${formBlock}
+  <div class="back"><a href="/">Back to login</a></div>
+</div>
+<script>
+${tokenJs}
+(function(){
+  var btn=document.getElementById('reset-btn');
+  var errEl=document.getElementById('reset-err');
+  function showErr(m){if(errEl){errEl.textContent=m;errEl.hidden=false;}}
+  if(!btn)return;
+  function submit(){
+    var pw=(document.getElementById('new-pw')||{}).value||'';
+    var cp=(document.getElementById('confirm-pw')||{}).value||'';
+    if(pw.length<6){showErr('Password must be at least 6 characters.');return;}
+    if(pw!==cp){showErr('Passwords do not match.');return;}
+    btn.disabled=true;
+    fetch('/api/reset-password',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({token:TOKEN,password:pw})
+    }).then(function(r){return r.json();}).then(function(d){
+      if(d.ok){window.location.href='/?reset=success';}
+      else{showErr(d.error||'Reset failed.');btn.disabled=false;}
+    }).catch(function(){showErr('Connection error. Try again.');btn.disabled=false;});
+  }
+  btn.addEventListener('click',submit);
+  ['new-pw','confirm-pw'].forEach(function(id){
+    var el=document.getElementById(id);
+    if(el)el.addEventListener('keydown',function(e){if(e.key==='Enter')submit();});
+  });
+})();
+</script>
+</body>
+</html>`;
+}
+
+app.post('/api/forgot-password', async (req, res) => {
+  const raw = req.body && typeof req.body.usernameOrEmail === 'string'
+    ? req.body.usernameOrEmail.trim() : '';
+  if (!raw) {
+    return res.status(400).json({ ok: false, error: 'Please enter your username or email address.' });
+  }
+
+  // Look up by username first, then by email
+  let user = getUserByName.get(raw);
+  if (!user) {
+    user = db.prepare(
+      'SELECT * FROM users WHERE email IS NOT NULL AND LOWER(email) = LOWER(?)'
+    ).get(raw);
+  }
+
+  if (!user) {
+    // Return a vague but honest response — the account just isn't found
+    return res.json({ ok: true, message: 'If that account exists, a recovery email has been sent.' });
+  }
+
+  if (!user.email) {
+    return res.json({
+      ok: false,
+      error: 'No email address is on file for this account. Contact the admin for help.',
+    });
+  }
+
+  if (!mailer) {
+    return res.status(503).json({ ok: false, error: 'Email is not configured on this server.' });
+  }
+
+  const token = crypto.randomBytes(32).toString('hex');
+  const createdAt = nowEpoch();
+
+  try {
+    insertPasswordResetToken.run(user.username, token, createdAt);
+  } catch (e) {
+    console.error('[forgot-password] DB insert failed:', e && e.message);
+    return res.status(500).json({ ok: false, error: 'Could not create reset token.' });
+  }
+
+  const baseUrl = process.env.SITE_URL || `${req.protocol}://${req.get('host')}`;
+  const resetUrl = `${baseUrl}/api/reset-password?token=${token}`;
+
+  try {
+    await mailer.sendMail({
+      from: SMTP_FROM,
+      to: user.email,
+      subject: 'Dead Internet Society — password recovery',
+      text: [
+        `Hi ${user.username},`,
+        '',
+        'Someone requested a password reset for your Dead Internet Society account.',
+        '',
+        `Reset link (valid for 1 hour):\n${resetUrl}`,
+        '',
+        'If you did not request this, ignore this email — your password has not changed.',
+        '',
+        '— DIS sysop',
+      ].join('\n'),
+      html: `<pre style="font-family:monospace;font-size:14px;line-height:1.5">`
+        + `Hi ${escapeHTML(user.username)},\n\n`
+        + `Someone requested a password reset for your Dead Internet Society account.\n\n`
+        + `Reset link (valid for 1 hour):\n`
+        + `<a href="${escapeHTML(resetUrl)}">${escapeHTML(resetUrl)}</a>\n\n`
+        + `If you did not request this, ignore this email.\n\n`
+        + `— DIS sysop</pre>`,
+    });
+  } catch (e) {
+    console.error('[forgot-password] sendMail failed:', e && e.message);
+    return res.status(500).json({ ok: false, error: 'Failed to send email. Try again later.' });
+  }
+
+  res.json({ ok: true, message: 'Recovery email sent. Check your inbox (and spam folder).' });
+});
+
+app.get('/api/reset-password', (req, res) => {
+  const token = typeof req.query.token === 'string' ? req.query.token.trim() : '';
+  if (!token) {
+    return res.send(resetPasswordPageHtml({ invalid: 'Missing reset token.' }));
+  }
+  const row = getPasswordResetToken.get(token);
+  if (!row) {
+    return res.send(resetPasswordPageHtml({ invalid: 'Invalid or expired reset link.' }));
+  }
+  if (row.used_at) {
+    return res.send(resetPasswordPageHtml({ invalid: 'This reset link has already been used.' }));
+  }
+  if (nowEpoch() - row.created_at > 3600) {
+    return res.send(resetPasswordPageHtml({ invalid: 'This reset link has expired (valid for 1 hour).' }));
+  }
+  res.send(resetPasswordPageHtml({ token }));
+});
+
+app.post('/api/reset-password', (req, res) => {
+  const token    = req.body && typeof req.body.token    === 'string' ? req.body.token.trim()    : '';
+  const password = req.body && typeof req.body.password === 'string' ? req.body.password        : '';
+
+  if (!token || !password) {
+    return res.status(400).json({ ok: false, error: 'Token and new password are required.' });
+  }
+  if (password.length < 6) {
+    return res.status(400).json({ ok: false, error: 'Password must be at least 6 characters.' });
+  }
+
+  const row = getPasswordResetToken.get(token);
+  if (!row || row.used_at || (nowEpoch() - row.created_at > 3600)) {
+    return res.status(410).json({ ok: false, error: 'Invalid or expired reset link.' });
+  }
+
+  const user = getUserByName.get(row.username);
+  if (!user) {
+    return res.status(404).json({ ok: false, error: 'Account not found.' });
+  }
+
+  const hash = bcrypt.hashSync(password, 10);
+  try {
+    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash, user.id);
+    markPasswordResetTokenUsed.run(nowEpoch(), token);
+  } catch (e) {
+    console.error('[reset-password] DB update failed:', e && e.message);
+    return res.status(500).json({ ok: false, error: 'Password update failed.' });
+  }
+
+  res.json({ ok: true });
+});
 
 /* ======================= Start ======================= */
 server.listen(PORT, ()=> {

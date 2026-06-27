@@ -195,6 +195,8 @@ CREATE TABLE IF NOT EXISTS users (
   ensureNormalizationColumns(db);
   ensureSignupReasonColumn(db);
   ensurePixelArtSchema(db);
+  ensureEmailColumn(db);
+  ensurePasswordResetTokensSchema(db);
 
   const getSetting = db.prepare('SELECT value FROM settings WHERE key=?');
   const setSetting = db.prepare(`
@@ -548,6 +550,21 @@ CREATE TABLE IF NOT EXISTS users (
      WHERE to_user_id = ? AND seen_at IS NULL
   `);
 
+  const insertPasswordResetToken = db.prepare(`
+    INSERT INTO password_reset_tokens (username, token, created_at)
+    VALUES (?, ?, ?)
+  `);
+  const getPasswordResetToken = db.prepare(`
+    SELECT id, username, token, created_at, used_at
+      FROM password_reset_tokens
+     WHERE token = ?
+  `);
+  const markPasswordResetTokenUsed = db.prepare(`
+    UPDATE password_reset_tokens
+       SET used_at = ?
+     WHERE token = ? AND used_at IS NULL
+  `);
+
   const insertPixelArt    = db.prepare(`INSERT INTO pixel_art (name, creator_username, pixel_data, created_at) VALUES (?, ?, ?, ?)`);
   const listPixelArt      = db.prepare(`SELECT id, name, creator_username, created_at, pixel_data FROM pixel_art ORDER BY created_at DESC LIMIT 200`);
   const getPixelArtByName = db.prepare('SELECT * FROM pixel_art WHERE name = ?');
@@ -737,6 +754,9 @@ CREATE TABLE IF NOT EXISTS users (
     insertNotification,
     listNotificationsForUser,
     markAllNotificationsSeen,
+    insertPasswordResetToken,
+    getPasswordResetToken,
+    markPasswordResetTokenUsed,
     insertPixelArt,
     listPixelArt,
     getPixelArtByName,
@@ -832,6 +852,31 @@ function ensurePixelArtSchema(db){
     );
     CREATE INDEX IF NOT EXISTS idx_pixel_art_name       ON pixel_art(name);
     CREATE INDEX IF NOT EXISTS idx_pixel_art_created_at ON pixel_art(created_at DESC);
+  `);
+}
+
+function ensureEmailColumn(db){
+  try {
+    const has = db.prepare('PRAGMA table_info(users)').all().some(c => c.name === 'email');
+    if (!has) {
+      db.exec('ALTER TABLE users ADD COLUMN email TEXT');
+    }
+  } catch (e) {
+    console.error('Failed to add users.email column:', e && e.message ? e.message : e);
+  }
+}
+
+function ensurePasswordResetTokensSchema(db){
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      username   TEXT    NOT NULL,
+      token      TEXT    NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL,
+      used_at    INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_prt_token      ON password_reset_tokens(token);
+    CREATE INDEX IF NOT EXISTS idx_prt_username   ON password_reset_tokens(username);
   `);
 }
 

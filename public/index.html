@@ -85,9 +85,90 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
 .pxa-action-btn.primary{border-color:var(--cyan);color:var(--cyan)}
 .pxa-action-btn:hover{border-color:#555}
 .pxa-action-btn.primary:hover{background:rgba(25,195,195,.1)}
+
+/* ===== Auth overlay ===== */
+#auth-overlay{position:fixed;inset:0;z-index:2000;background:#000;display:flex;flex-direction:column;align-items:center;overflow-y:auto;padding:0 0 48px;box-sizing:border-box}
+#auth-splash{width:100%;align-self:stretch;flex-shrink:0}
+.dis-header{text-align:center;padding:clamp(20px,4.5vh,44px) 24px clamp(16px,3vh,28px);position:relative;border-bottom:1px solid #111}
+.dis-header::after{content:'';position:absolute;bottom:-1px;left:8%;right:8%;height:1px;background:linear-gradient(90deg,transparent,#19c3c3 35%,#cc66ff 65%,transparent)}
+.dis-title{font-size:clamp(20px,4.5vw,44px);font-weight:700;color:#ff00ff;letter-spacing:.06em;line-height:1.1;margin-bottom:clamp(7px,1.4vh,12px);text-shadow:0 0 8px #ff00ff,0 0 22px #cc66ff,0 0 50px #cc66ff}
+.dis-tagline{font-size:clamp(11px,1.3vw,14px);color:#e6e6e6;opacity:.8;letter-spacing:.03em}
+#auth-card{width:100%;max-width:390px;border:1px solid #1a1a1a;border-radius:8px;background:#050505;padding:24px 24px 20px;box-sizing:border-box;margin:clamp(16px,3vh,28px) 12px 0}
+#auth-tabs{display:flex;gap:0;margin-bottom:20px;border-bottom:1px solid #111}
+.auth-tab{appearance:none;background:none;border:none;border-bottom:2px solid transparent;margin-bottom:-1px;color:#555;font:inherit;font-size:13px;letter-spacing:.2px;padding:8px 18px;cursor:pointer;transition:color .1s}
+.auth-tab.active{color:var(--cyan);border-bottom-color:var(--cyan)}
+.auth-tab:hover:not(.active){color:var(--fg)}
+.auth-field{display:flex;flex-direction:column;gap:5px;margin-bottom:13px}
+.auth-field label{font-size:10px;color:#777;letter-spacing:.8px;text-transform:uppercase}
+.auth-field input{background:#0c0c0c;color:var(--fg);border:1px solid #1a1a1a;outline:0;padding:9px 11px;border-radius:5px;font:inherit;caret-color:var(--cyan)}
+.auth-field input:focus{border-color:#2e2e2e}
+.auth-optional{font-size:10px;color:#444;text-transform:none;letter-spacing:0;font-weight:400}
+.auth-required{color:var(--red)}
+.auth-submit{appearance:none;border:1px solid var(--cyan);background:rgba(25,195,195,.07);color:var(--cyan);font:inherit;font-size:13px;padding:10px;border-radius:5px;cursor:pointer;width:100%;margin-top:4px;letter-spacing:.4px;transition:background .12s}
+.auth-submit:hover{background:rgba(25,195,195,.14)}
+.auth-submit:disabled{opacity:.4;cursor:not-allowed}
+#auth-error{background:rgba(255,69,69,.08);border:1px solid rgba(255,69,69,.35);border-radius:4px;color:var(--red);padding:8px 11px;font-size:12px;margin-bottom:13px;line-height:1.45}
+.auth-forgot{color:var(--cyan);font-size:12px;cursor:pointer;margin-top:12px;text-align:center;opacity:.65}
+.auth-forgot:hover{opacity:1}
+.auth-forgot-msg{color:#555;font-size:11px;margin-top:8px;text-align:center;line-height:1.45}
 </style>
 </head>
 <body>
+  <div id="auth-overlay">
+    <div id="auth-splash">
+      <div class="dis-header">
+        <div class="dis-title">DEAD INTERNET SOCIETY</div>
+        <div class="dis-tagline">no feeds &bull; no infinite scroll &bull; just people</div>
+      </div>
+    </div>
+    <div id="auth-card">
+      <div id="auth-tabs">
+        <button type="button" class="auth-tab active" id="tab-login">Log In</button>
+        <button type="button" class="auth-tab" id="tab-join">Join</button>
+      </div>
+      <div id="auth-error" hidden></div>
+      <form id="login-form" autocomplete="off" novalidate>
+        <div class="auth-field">
+          <label for="l-user">Username</label>
+          <input id="l-user" type="text" autocomplete="username" spellcheck="false" autofocus>
+        </div>
+        <div class="auth-field">
+          <label for="l-pass">Password</label>
+          <input id="l-pass" type="password" autocomplete="current-password">
+        </div>
+        <button type="submit" class="auth-submit">Log In</button>
+        <div class="auth-forgot" id="forgot-link">Forgot password?</div>
+        <div id="forgot-panel" hidden>
+          <div class="auth-field" style="margin-top:12px">
+            <label for="forgot-input">Username or email address</label>
+            <input id="forgot-input" type="text" spellcheck="false" autocomplete="username email">
+          </div>
+          <button type="button" class="auth-submit" id="forgot-submit" style="margin-top:0">Send Recovery Email</button>
+          <div id="forgot-result" class="auth-forgot-msg" hidden></div>
+        </div>
+      </form>
+      <form id="join-form" autocomplete="off" novalidate hidden>
+        <div class="auth-field">
+          <label for="j-user">Username</label>
+          <input id="j-user" type="text" autocomplete="username" spellcheck="false">
+        </div>
+        <div class="auth-field">
+          <label for="j-pass">Password <span class="auth-optional">min 6 characters</span></label>
+          <input id="j-pass" type="password" autocomplete="new-password">
+        </div>
+        <div class="auth-field">
+          <label for="j-email">Email <span class="auth-optional">optional &mdash; for password recovery</span></label>
+          <input id="j-email" type="email" autocomplete="email">
+        </div>
+        <div class="auth-field">
+          <label for="j-reason">What brought you to DIS? <span class="auth-required">*</span></label>
+          <input id="j-reason" type="text" spellcheck="false">
+        </div>
+        <button type="submit" class="auth-submit">Join</button>
+      </form>
+    </div>
+  </div>
+
   <div class="app">
     <div id="terminal" aria-live="polite" aria-atomic="false">
       <div class="line dim">connecting…</div>
@@ -126,6 +207,7 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
   var inputLimit = null;
   var isExpandedInput = false;
   var pendingPlayWindow = null;
+  var pendingAuthToken = null;
 
   if (singleInput && textareaInput){
     textareaInput.value = singleInput.value || '';
@@ -468,7 +550,11 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
       reconnectAttempts = 0;
       clearReconnectTimer();
       if (wasReconnecting) op_print('Reconnected to server.', 'green');
-      try { socket.send(JSON.stringify({ type: 'init' })); } catch (err) {
+      try {
+        var initPayload = { type: 'init' };
+        if (pendingAuthToken) { initPayload.token = pendingAuthToken; pendingAuthToken = null; }
+        socket.send(JSON.stringify(initPayload));
+      } catch (err) {
         console.error('WebSocket init send failed', err);
       }
     });
@@ -514,7 +600,6 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
     });
   }
 
-  connectWebSocket();
   window.addEventListener('online', function(){
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       scheduleReconnect(true);
@@ -814,6 +899,180 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
     pxaData = null; pxaEditId = null; pxaPainting = false;
     focusInputEnd(input);
   }
+
+  // ===== Auth overlay logic =====
+  (function(){
+    var authOverlay = document.getElementById('auth-overlay');
+    if (!authOverlay) { connectWebSocket(); return; }
+
+    var loginForm  = document.getElementById('login-form');
+    var joinForm   = document.getElementById('join-form');
+    var tabLoginBtn = document.getElementById('tab-login');
+    var tabJoinBtn  = document.getElementById('tab-join');
+    var authErrorEl = document.getElementById('auth-error');
+    var forgotLinkEl   = document.getElementById('forgot-link');
+    var forgotPanel    = document.getElementById('forgot-panel');
+    var forgotInput    = document.getElementById('forgot-input');
+    var forgotSubmit   = document.getElementById('forgot-submit');
+    var forgotResult   = document.getElementById('forgot-result');
+
+    function showAuthError(msg) {
+      if (!authErrorEl) return;
+      authErrorEl.textContent = msg;
+      authErrorEl.hidden = false;
+    }
+    function clearAuthError() {
+      if (!authErrorEl) return;
+      authErrorEl.textContent = '';
+      authErrorEl.hidden = true;
+    }
+    function switchTab(tab) {
+      clearAuthError();
+      var toLogin = tab === 'login';
+      if (loginForm)   loginForm.hidden  = !toLogin;
+      if (joinForm)    joinForm.hidden   = toLogin;
+      if (tabLoginBtn) tabLoginBtn.classList.toggle('active', toLogin);
+      if (tabJoinBtn)  tabJoinBtn.classList.toggle('active', !toLogin);
+      // collapse forgot panel when switching tabs
+      if (forgotPanel) forgotPanel.hidden = true;
+      if (forgotResult) forgotResult.hidden = true;
+    }
+    if (tabLoginBtn) tabLoginBtn.addEventListener('click', function(){ switchTab('login'); });
+    if (tabJoinBtn)  tabJoinBtn.addEventListener('click', function(){ switchTab('join'); });
+
+    if (forgotLinkEl) forgotLinkEl.addEventListener('click', function(){
+      if (!forgotPanel) return;
+      forgotPanel.hidden = !forgotPanel.hidden;
+      if (!forgotPanel.hidden && forgotInput) forgotInput.focus();
+    });
+
+    if (forgotSubmit) forgotSubmit.addEventListener('click', function(){
+      var val = forgotInput ? forgotInput.value.trim() : '';
+      if (!val) {
+        if (forgotResult) { forgotResult.textContent = 'Please enter your username or email.'; forgotResult.style.color = '#ff4545'; forgotResult.hidden = false; }
+        return;
+      }
+      forgotSubmit.disabled = true;
+      if (forgotResult) forgotResult.hidden = true;
+      fetch('/api/forgot-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ usernameOrEmail: val })
+      })
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        if (forgotResult) {
+          forgotResult.textContent = data.message || data.error || (data.ok ? 'Check your email for a recovery link.' : 'Something went wrong.');
+          forgotResult.style.color = data.ok ? '#19c3c3' : '#ff4545';
+          forgotResult.hidden = false;
+        }
+        forgotSubmit.disabled = false;
+      })
+      .catch(function(){
+        if (forgotResult) { forgotResult.textContent = 'Connection error. Try again.'; forgotResult.style.color = '#ff4545'; forgotResult.hidden = false; }
+        forgotSubmit.disabled = false;
+      });
+    });
+
+    if (forgotInput) forgotInput.addEventListener('keydown', function(e){
+      if (e.key === 'Enter' && forgotSubmit) forgotSubmit.click();
+    });
+
+    function dismissOverlay(token) {
+      pendingAuthToken = token || null;
+      if (authOverlay) authOverlay.remove();
+      connectWebSocket();
+      setTimeout(function(){
+        var ci = document.getElementById('cmdInput');
+        if (ci) ci.focus();
+      }, 0);
+    }
+
+    // After login/register, try to set SSO cookie (graceful no-op if SSO_SECRET not set),
+    // then always connect WS with the token as a fallback auth mechanism.
+    function completeAuth(token) {
+      fetch('/api/auth/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ token: token })
+      }).catch(function(){}).then(function(){ dismissOverlay(token); });
+    }
+
+    if (loginForm) {
+      loginForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        var userEl   = document.getElementById('l-user');
+        var passEl   = document.getElementById('l-pass');
+        var submitEl = loginForm.querySelector('.auth-submit');
+        var username = userEl ? userEl.value.trim() : '';
+        var password = passEl ? passEl.value : '';
+        if (!username || !password) { showAuthError('Username and password are required.'); return; }
+        clearAuthError();
+        if (submitEl) submitEl.disabled = true;
+        fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: username, password: password })
+        })
+        .then(function(r){ return r.json(); })
+        .then(function(data){
+          if (!data.ok) { showAuthError(data.error || 'Login failed.'); if (submitEl) submitEl.disabled = false; return; }
+          completeAuth(data.token);
+        })
+        .catch(function(){ showAuthError('Connection error. Please try again.'); if (submitEl) submitEl.disabled = false; });
+      });
+    }
+
+    if (joinForm) {
+      joinForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        var userEl   = document.getElementById('j-user');
+        var passEl   = document.getElementById('j-pass');
+        var emailEl  = document.getElementById('j-email');
+        var reasonEl = document.getElementById('j-reason');
+        var submitEl = joinForm.querySelector('.auth-submit');
+        var username = userEl   ? userEl.value.trim()   : '';
+        var password = passEl   ? passEl.value          : '';
+        var email    = emailEl  ? emailEl.value.trim()  : '';
+        var reason   = reasonEl ? reasonEl.value.trim() : '';
+        if (!username || !password) { showAuthError('Username and password are required.'); return; }
+        if (password.length < 6)    { showAuthError('Password must be at least 6 characters.'); return; }
+        if (!reason)                { showAuthError('Please tell us what brought you to DIS.'); return; }
+        clearAuthError();
+        if (submitEl) submitEl.disabled = true;
+        fetch('/api/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: username, password: password, email: email, signupReason: reason })
+        })
+        .then(function(r){ return r.json(); })
+        .then(function(data){
+          if (!data.ok) { showAuthError(data.error || 'Registration failed.'); if (submitEl) submitEl.disabled = false; return; }
+          completeAuth(data.token);
+        })
+        .catch(function(){ showAuthError('Connection error. Please try again.'); if (submitEl) submitEl.disabled = false; });
+      });
+    }
+
+    // Show success banner if redirected here after a password reset
+    if (location.search.indexOf('reset=success') !== -1) {
+      history.replaceState({}, '', '/');
+      var banner = document.createElement('div');
+      banner.className = 'auth-forgot-msg';
+      banner.style.cssText = 'color:#19c3c3;margin-bottom:14px;text-align:left;border:1px solid rgba(25,195,195,.3);padding:8px 11px;border-radius:4px';
+      banner.textContent = 'Password updated. Log in with your new password.';
+      var authCard = document.getElementById('auth-card');
+      var authTabsEl = document.getElementById('auth-tabs');
+      if (authCard && authTabsEl) authCard.insertBefore(banner, authTabsEl);
+    }
+
+    // If a valid SSO cookie exists (e.g., page refresh while logged in), skip the overlay.
+    fetch('/api/me', { credentials: 'include' })
+      .then(function(r){ return r.json(); })
+      .then(function(data){ if (data && data.user) dismissOverlay(null); })
+      .catch(function(){});
+  })();
 })();
 </script>
 
