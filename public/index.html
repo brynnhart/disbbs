@@ -114,6 +114,7 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
 #wordle-result{display:none;flex-direction:column;gap:8px;align-items:center;text-align:center}
 #wordle-result.show{display:flex}
 #wordle-result-msg{font-size:13px;font-weight:bold}
+#wordle-chrome{font-size:11px;color:var(--yellow)}
 #wordle-share-text{background:#111;border:1px solid #222;border-radius:4px;padding:10px;font-size:13px;white-space:pre;line-height:1.6;cursor:pointer;color:var(--fg);width:100%;box-sizing:border-box;text-align:left;font-family:inherit}
 #wordle-share-text:hover{border-color:#333}
 .wl-copy-hint{font-size:10px;color:#555}
@@ -124,6 +125,22 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
 #wordle-stats-panel.show{display:flex}
 #wordle-stats-panel h3{margin:0;font-size:12px;color:var(--yellow);font-weight:bold;letter-spacing:.5px}
 .wl-stat-row{font-size:12px;color:var(--cyan)}
+
+/* ===== Slots modal ===== */
+#slots-overlay{position:fixed;inset:0;background:rgba(0,0,0,.92);display:flex;align-items:center;justify-content:center;z-index:1000;padding:12px;box-sizing:border-box}
+#slots-modal{background:#0a0a0a;border:1px solid #222;border-radius:6px;display:flex;flex-direction:column;gap:10px;padding:16px 14px;width:min(340px,98vw);box-sizing:border-box}
+#slots-title{color:var(--cyan);font-weight:bold;font-size:13px;letter-spacing:1px;text-align:center}
+#slots-jackpot{text-align:center;font-size:14px;font-weight:bold;color:var(--yellow)}
+#slots-balance{text-align:center;font-size:12px;color:#888}
+#slots-reels{display:flex;justify-content:center;gap:6px;font-size:36px;line-height:1.2;padding:6px 0}
+.sl-reel{width:48px;text-align:center}
+#slots-msg{text-align:center;font-size:13px;font-weight:bold;min-height:18px}
+#slots-spin-btn{appearance:none;border:1px solid var(--cyan);background:rgba(25,195,195,.1);color:var(--cyan);font:inherit;font-size:14px;font-weight:bold;padding:10px;border-radius:5px;cursor:pointer;width:100%;letter-spacing:.4px}
+#slots-spin-btn:hover:not(:disabled){background:rgba(25,195,195,.18)}
+#slots-spin-btn:disabled{opacity:.35;cursor:not-allowed}
+#slots-history{font-size:11px;color:#555;display:flex;flex-direction:column;gap:3px;min-height:16px}
+#slots-close-btn{appearance:none;border:1px solid #333;background:none;color:#888;font:inherit;font-size:12px;padding:7px;border-radius:4px;cursor:pointer;width:100%}
+#slots-close-btn:hover{border-color:#555;color:var(--fg)}
 
 /* ===== Auth overlay ===== */
 #auth-overlay{position:fixed;inset:0;z-index:2000;background:#000;display:flex;flex-direction:column;align-items:center;overflow-y:auto;padding:0 0 48px;box-sizing:border-box}
@@ -619,6 +636,9 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
           else if (op.op === 'openWordle') openWordle(op.state || {});
           else if (op.op === 'wordleGuessResult') wordleHandleGuessResult(op);
           else if (op.op === 'wordleError') wordleShowError(op.message || 'Error.');
+          else if (op.op === 'openSlots') openSlots();
+          else if (op.op === 'slots_result') slotsHandleResult(op);
+          else if (op.op === 'slots_state') slotsHandleState(op);
         });
       }
     });
@@ -953,6 +973,14 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
   var wlGuessInput = null;
   var wlMsgEl = null;
 
+  // ===== Slots =====
+  var slSpinning      = false;
+  var slAnimating     = false;
+  var slPendingResult = null;
+  var slHistory       = [];
+
+  function fmtCr(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+
   function openWordle(data) {
     if (document.getElementById('wordle-overlay')) return;
     data = data || {};
@@ -1071,13 +1099,14 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
     modal.appendChild(kbEl);
 
     // Result panel (initially hidden unless game already over)
-    var resultEl = document.createElement('div'); resultEl.id = 'wordle-result';
+    var resultEl  = document.createElement('div'); resultEl.id  = 'wordle-result';
     if (wlGameOver) resultEl.className = 'show';
     var resultMsg = document.createElement('div'); resultMsg.id = 'wordle-result-msg';
+    var chromeEl  = document.createElement('div'); chromeEl.id  = 'wordle-chrome';
     var shareText = document.createElement('div'); shareText.id = 'wordle-share-text';
     var copyHint  = document.createElement('div'); copyHint.className = 'wl-copy-hint';
     copyHint.textContent = 'click to copy'; resultEl.appendChild(resultMsg);
-    resultEl.appendChild(shareText); resultEl.appendChild(copyHint);
+    resultEl.appendChild(chromeEl); resultEl.appendChild(shareText); resultEl.appendChild(copyHint);
     modal.appendChild(resultEl);
 
     if (wlGameOver) {
@@ -1243,6 +1272,10 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
           resultMsg.style.color = 'var(--red)';
         }
       }
+      var chromeEl = document.getElementById('wordle-chrome');
+      if (chromeEl && op.chromeEarned > 0) {
+        chromeEl.textContent = 'you earned ' + op.chromeEarned + ' ₢  •  balance: ' + op.newChromeBalance + ' ₢';
+      }
       if (shareText && op.emojiGrid) {
         shareText.textContent = op.emojiGrid;
         shareText.addEventListener('click', function() {
@@ -1291,6 +1324,138 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
     wlTiles = []; wlKeys = {}; wlCurrentRow = 0; wlSubmitting = false;
     wlGameOver = false; wlTerminal = false; wlFromScreen = null; wlGuessInput = null; wlMsgEl = null;
     focusInputEnd(input);
+  }
+
+  // ===== Slots modal =====
+  function slotsApplyResult(op) {
+    if (!document.getElementById('slots-overlay')) { slSpinning = false; return; }
+    var msgEl   = document.getElementById('slots-msg');
+    var spinBtn = document.getElementById('slots-spin-btn');
+    var jpEl    = document.getElementById('slots-jackpot');
+    var balEl   = document.getElementById('slots-balance');
+    var histEl  = document.getElementById('slots-history');
+
+    if (op.error) {
+      if (msgEl) { msgEl.textContent = op.error; msgEl.style.color = 'var(--red)'; }
+      slSpinning = false;
+      if (spinBtn) spinBtn.disabled = false;
+      return;
+    }
+
+    var reelEls = document.querySelectorAll('.sl-reel');
+    if (Array.isArray(op.reels)) {
+      op.reels.forEach(function(sym, i) { if (reelEls[i]) reelEls[i].textContent = sym; });
+    }
+    if (balEl) balEl.textContent = 'balance: ' + fmtCr(op.newBalance) + ' ₢';
+    if (jpEl)  jpEl.textContent  = 'jackpot: ' + fmtCr(op.jackpot)   + ' ₢ 💀';
+    if (msgEl) {
+      msgEl.textContent = op.message || '';
+      msgEl.style.color = op.jackpotWon ? 'var(--yellow)' : (op.payout > 0 ? 'var(--green)' : 'var(--red)');
+    }
+    if (Array.isArray(op.reels)) {
+      slHistory.unshift(op.reels.join('') + '  ' + (op.message || ''));
+      if (slHistory.length > 5) slHistory.pop();
+    }
+    if (histEl) {
+      histEl.innerHTML = '';
+      slHistory.forEach(function(h) {
+        var d = document.createElement('div'); d.className = 'sl-history-item'; d.textContent = h;
+        histEl.appendChild(d);
+      });
+    }
+    slSpinning = false;
+    if (spinBtn) spinBtn.disabled = false;
+  }
+
+  function slotsHandleResult(op) {
+    if (slAnimating) { slPendingResult = op; return; }
+    slotsApplyResult(op);
+  }
+
+  function slotsHandleState(op) {
+    var jpEl  = document.getElementById('slots-jackpot');
+    var balEl = document.getElementById('slots-balance');
+    if (jpEl)  jpEl.textContent  = 'jackpot: ' + fmtCr(op.jackpot)  + ' ₢ 💀';
+    if (balEl) balEl.textContent = 'balance: ' + fmtCr(op.balance) + ' ₢';
+  }
+
+  function closeSlots() {
+    var overlay = document.getElementById('slots-overlay');
+    if (overlay) overlay.remove();
+    slSpinning = false; slAnimating = false; slPendingResult = null;
+    focusInputEnd(input);
+  }
+
+  function openSlots() {
+    if (document.getElementById('slots-overlay')) return;
+    slSpinning = false; slAnimating = false; slPendingResult = null; slHistory = [];
+
+    var overlay = document.createElement('div'); overlay.id = 'slots-overlay';
+    var modal   = document.createElement('div'); modal.id   = 'slots-modal';
+
+    var titleEl = document.createElement('div'); titleEl.id = 'slots-title';
+    titleEl.textContent = 'SLOTS'; modal.appendChild(titleEl);
+
+    var jpEl = document.createElement('div'); jpEl.id = 'slots-jackpot';
+    jpEl.textContent = 'jackpot: … ₢ 💀'; modal.appendChild(jpEl);
+
+    var balEl = document.createElement('div'); balEl.id = 'slots-balance';
+    balEl.textContent = 'balance: … ₢'; modal.appendChild(balEl);
+
+    var reelsEl = document.createElement('div'); reelsEl.id = 'slots-reels';
+    var reelDivs = [];
+    for (var ri = 0; ri < 5; ri++) {
+      var rd = document.createElement('div'); rd.className = 'sl-reel'; rd.textContent = '🎰';
+      reelDivs.push(rd); reelsEl.appendChild(rd);
+    }
+    modal.appendChild(reelsEl);
+
+    var msgEl = document.createElement('div'); msgEl.id = 'slots-msg';
+    modal.appendChild(msgEl);
+
+    var spinBtn = document.createElement('button'); spinBtn.id = 'slots-spin-btn';
+    spinBtn.type = 'button'; spinBtn.textContent = 'SPIN  (5 ₢)';
+    spinBtn.addEventListener('click', doSpin);
+    modal.appendChild(spinBtn);
+
+    var histEl = document.createElement('div'); histEl.id = 'slots-history';
+    modal.appendChild(histEl);
+
+    var closeBtn = document.createElement('button'); closeBtn.id = 'slots-close-btn';
+    closeBtn.type = 'button'; closeBtn.textContent = 'Close';
+    closeBtn.addEventListener('click', closeSlots);
+    modal.appendChild(closeBtn);
+
+    function doSpin() {
+      if (slSpinning) return;
+      slSpinning = true; slAnimating = true; slPendingResult = null;
+      spinBtn.disabled = true;
+      msgEl.textContent = ''; msgEl.style.color = '';
+      var SYMS = ['🍒', '🔔', '⭐', '💎', '💀'];
+      var animInterval = setInterval(function() {
+        reelDivs.forEach(function(r) { r.textContent = SYMS[Math.floor(Math.random() * SYMS.length)]; });
+      }, 80);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'slots_spin' }));
+      }
+      setTimeout(function() {
+        clearInterval(animInterval);
+        slAnimating = false;
+        if (slPendingResult) { slotsApplyResult(slPendingResult); slPendingResult = null; }
+      }, 600);
+    }
+
+    function slEsc(e) {
+      if (e.key === 'Escape') { closeSlots(); document.removeEventListener('keydown', slEsc); }
+    }
+    document.addEventListener('keydown', slEsc);
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'slots_getstate' }));
+    }
   }
 
   // ===== Auth overlay logic =====

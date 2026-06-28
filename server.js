@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const { createDatabase } = require('./src/database');
 const { createHub } = require('./src/hub');
 const { createNotificationService } = require('./src/services/notifications');
+const { createChromeService } = require('./src/services/chrome');
 const formatting = require('./src/utils/formatting');
 const timeUtils = require('./src/utils/time');
 
@@ -59,6 +60,11 @@ const notifications = createNotificationService({
   hub: hubApi,
   timeUtils,
 });
+const chrome = createChromeService({ db, nowEpoch: timeUtils.nowEpoch, ymdFromEpoch: timeUtils.ymdFromEpoch });
+
+function fmtCr(n) {
+  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
 
 
 const {
@@ -601,6 +607,8 @@ function cmdHelp(api, state){
   api.print('  /games        Games menu', 'cyan');
   api.print('  /wordle       Daily word puzzle — same word for everyone, resets at midnight UTC', 'cyan');
   api.print('  /wordle stats Leaderboard and today\'s results', 'cyan');
+  api.print('  /slots        Nickel slots — 5 ₢ per spin', 'cyan');
+  api.print('  /slots stats  Your slots statistics', 'cyan');
 
   if (state && state.isAdmin){
     api.hr(); api.print('Admin:', 'yellow');
@@ -800,6 +808,21 @@ function renderMenu(api, state){
 
   const unreadCount = newItems ? newItems.unreadDMs : (countUnreadDMs.get(uid)?.count || 0);
 
+  let chromeDailyMsg = null;
+  let chromeStiMsg = null;
+  try {
+    const daily = chrome.getDailyBonus(uname);
+    if (daily.awarded) {
+      chromeDailyMsg = `daily bonus: +${daily.amount} ₢  •  balance: ${fmtCr(daily.newBalance)} ₢`;
+    }
+    const stipend = chrome.checkStipend(uname);
+    if (stipend.awarded) {
+      chromeStiMsg = `daily stipend: +${stipend.amount} ₢  •  balance: ${fmtCr(stipend.newBalance)} ₢`;
+    }
+  } catch (e) {
+    console.error('[renderMenu] chrome daily check failed:', e && e.message);
+  }
+
   api.batch(b=>{
     b.clear();
     b.setInputLimit(null);
@@ -809,6 +832,8 @@ function renderMenu(api, state){
       const label = unreadCount === 1 ? 'message' : 'messages';
       b.printHTML(`<span style="color:#ff6b6b;font-weight:bold;">📬 NEW DIRECT MESSAGES: ${unreadCount} unread ${label}.</span>`);
     }
+    if (chromeDailyMsg) b.print(chromeDailyMsg, 'yellow');
+    if (chromeStiMsg)   b.print(chromeStiMsg, 'yellow');
     if (newItems) {
       b.print('── since your last visit ──', 'dim');
       const pl = (n, word) => `${n} ${word}${n !== 1 ? 's' : ''}`;
@@ -1773,6 +1798,11 @@ function renderGames(api, state){
   const streak     = streakRow ? streakRow.current_streak : 0;
   const playedToday = !!resultRow;
 
+  let jackpot = 500;
+  let leaders = [];
+  try { jackpot = chrome.getJackpot(); } catch {}
+  try { leaders = chrome.getLeaderboard(5); } catch {}
+
   api.batch(b=>{
     b.clear();
     b.setInputLimit(null);
@@ -1783,16 +1813,24 @@ function renderGames(api, state){
       : `your streak: ${streak} day${streak !== 1 ? 's' : ''}  •  /wordle stats for leaderboard`;
     b.print('  /wordle    daily word puzzle — new word every day, same for everyone', 'cyan');
     b.print(`             ${wordleStatus}`, playedToday ? 'green' : 'dim');
+    b.print('  /slots     nickel slots — 5 ₢ per spin', 'cyan');
+    b.printHTML(`             <span class="yellow">jackpot: ${escapeHTML(fmtCr(jackpot))} ₢ 💀</span>`);
     b.hr();
     if (feedRows.length) {
       b.print('── recent activity ──', 'dim');
       for (const f of feedRows) {
-        const ago = new Date(f.created_at * 1000).toISOString().replace('T',' ').slice(0,16)+' UTC';
         b.print(`  ${f.message}`, 'cyan');
       }
       b.hr();
     }
-    b.print('more games coming soon.', 'dim');
+    if (leaders.length) {
+      b.print('── chrome leaderboard ──', 'dim');
+      leaders.forEach((r, i) => {
+        const rank = String(i + 1) + '.';
+        b.printHTML(`  ${escapeHTML(rank)} ${escapeHTML(r.username.padEnd(16))} ${escapeHTML(fmtCr(r.balance))} ₢`);
+      });
+      b.hr();
+    }
     b.print('/leave to return to the main menu', 'dim');
   });
   state.currentScreen = 'games';
@@ -1907,10 +1945,18 @@ function handleWordleGuess(msg, api, state) {
 
     const allRows = wordleGetGuesses.all(state.username, today);
     const emojiGrid = buildWordleEmojiGrid(allRows);
-    const msg = solved
-      ? `${state.username} solved today's Wordle in ${guessNum} guess${guessNum !== 1 ? 'es' : ''}! 🟩`
+
+    const WORDLE_CHROME_PAYOUTS = [0, 50, 40, 30, 20, 15, 10];
+    const chromeEarned = solved ? (WORDLE_CHROME_PAYOUTS[guessNum] || 0) : 0;
+    let newChromeBalance = 0;
+    if (chromeEarned > 0) {
+      try { newChromeBalance = chrome.award(state.username, chromeEarned, `wordle solve in ${guessNum}`); } catch {}
+    }
+
+    const feedMsg = solved
+      ? `${state.username} solved today's Wordle in ${guessNum} guess${guessNum !== 1 ? 'es' : ''} and earned ${chromeEarned} ₢! 🟩`
       : `${state.username} was defeated by today's Wordle 💀`;
-    try { gameFeedInsert.run(state.username, solved ? 'wordle_solved' : 'wordle_failed', msg, nowEpoch()); } catch {}
+    try { gameFeedInsert.run(state.username, solved ? 'wordle_solved' : 'wordle_failed', feedMsg, nowEpoch()); } catch {}
 
     sendOps(api.ws, [{
       op:        'wordleGuessResult',
@@ -1922,10 +1968,147 @@ function handleWordleGuess(msg, api, state) {
       streak:    cur,
       bestStreak: best,
       emojiGrid: `DIS Wordle ${today}\n${guessNum}/6\n${emojiGrid}`,
+      chromeEarned,
+      newChromeBalance,
     }]);
   } else {
     sendOps(api.ws, [{ op: 'wordleGuessResult', result, guessNum, solved: false, failed: false }]);
   }
+}
+
+/* ======================= Slots machine ======================= */
+const SLOTS_SYMBOLS = ['🍒', '🔔', '⭐', '💎', '💀'];
+const SLOTS_WEIGHTS = [30, 25, 20, 15, 10];
+const SLOTS_COST    = 5;
+
+function pickSlotSymbol() {
+  let r = Math.floor(Math.random() * 100);
+  for (let i = 0; i < SLOTS_WEIGHTS.length; i++) {
+    r -= SLOTS_WEIGHTS[i];
+    if (r < 0) return SLOTS_SYMBOLS[i];
+  }
+  return SLOTS_SYMBOLS[0];
+}
+
+function evalSlots(reels) {
+  const counts = {};
+  let skulls = 0;
+  for (const s of reels) {
+    counts[s] = (counts[s] || 0) + 1;
+    if (s === '💀') skulls++;
+  }
+  const maxCount = Math.max(...Object.values(counts));
+  if (skulls === 5)   return { type: 'jackpot',   payout: 0 };
+  if (maxCount === 5) return { type: 'five',       payout: 150 };
+  if (maxCount >= 4)  return { type: 'four',       payout: 50 };
+  if (maxCount >= 3)  return { type: 'three',      payout: 15 };
+  if (skulls >= 2)    return { type: 'two_skull',  payout: 10 };
+  if (skulls === 1)   return { type: 'skull',      payout: 5 };
+  return                     { type: 'loss',       payout: 0 };
+}
+
+function handleSlotsGetState(api, state) {
+  if (!requireAuth(api, state)) return;
+  sendOps(api.ws, [{
+    op:      'slots_state',
+    jackpot: chrome.getJackpot(),
+    balance: chrome.getBalance(state.username),
+  }]);
+}
+
+function handleSlotsSpin(msg, api, state) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+
+  const spendResult = chrome.spend(username, SLOTS_COST, 'slots spin');
+  if (!spendResult.success) {
+    sendOps(api.ws, [{ op: 'slots_result', error: 'not enough chrome to spin. come back tomorrow for your daily stipend.' }]);
+    return;
+  }
+
+  const reels = Array.from({ length: 5 }, pickSlotSymbol);
+  const outcome = evalSlots(reels);
+  let payout = 0;
+  let jackpotWon = false;
+  let jackpotAmount = 0;
+  let newBalance = spendResult.newBalance;
+  let message = '';
+
+  if (outcome.type === 'jackpot') {
+    const claimed = chrome.claimJackpot(username);
+    jackpotWon    = true;
+    jackpotAmount = claimed.amount;
+    newBalance    = claimed.newBalance;
+    message       = `JACKPOT! you won ${fmtCr(jackpotAmount)} ₢! 💀`;
+    const feedMsg = `🎰 ${username} hit the jackpot and won ${fmtCr(jackpotAmount)} ₢! 💀`;
+    broadcastSystem(feedMsg);
+    try { gameFeedInsert.run(username, 'slots_jackpot', feedMsg, nowEpoch()); } catch {}
+  } else if (outcome.payout > 0) {
+    newBalance = chrome.award(username, outcome.payout, 'slots win');
+    payout     = outcome.payout;
+    if (outcome.type === 'five') {
+      message = `five of a kind! you won ${fmtCr(payout)} ₢! ⭐`;
+      try { gameFeedInsert.run(username, 'slots_five', `${username} hit five of a kind on slots and won 150 ₢! ⭐`, nowEpoch()); } catch {}
+    } else if (outcome.type === 'four') {
+      message = `four of a kind! you won ${fmtCr(payout)} ₢!`;
+    } else if (outcome.type === 'three') {
+      message = `three of a kind! you won ${fmtCr(payout)} ₢!`;
+    } else if (outcome.type === 'two_skull') {
+      message = `two skulls! you won ${fmtCr(payout)} ₢! 💀`;
+    } else {
+      message = `one skull — break even. ${fmtCr(payout)} ₢ back.`;
+    }
+  } else {
+    chrome.addToJackpot(2);
+    message = 'no match. 2 ₢ added to jackpot.';
+  }
+
+  sendOps(api.ws, [{
+    op:           'slots_result',
+    reels,
+    payout,
+    newBalance,
+    jackpotWon,
+    jackpotAmount,
+    message,
+    jackpot:      chrome.getJackpot(),
+  }]);
+}
+
+function cmdSlots(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  const sub = ((args && args[0]) || '').trim().toLowerCase();
+
+  if (sub === 'stats') {
+    const username = state.username;
+    const spins   = db.prepare(`SELECT COUNT(1) AS n FROM chrome_transactions WHERE username = ? AND reason = 'slots spin'`).get(username);
+    const earned  = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM chrome_transactions WHERE username = ? AND reason IN ('slots win', 'slots jackpot')`).get(username);
+    const biggest = db.prepare(`SELECT COALESCE(MAX(amount), 0) AS top FROM chrome_transactions WHERE username = ? AND reason IN ('slots win', 'slots jackpot')`).get(username);
+    const totalSpins  = spins   ? spins.n     : 0;
+    const totalEarned = earned  ? earned.total : 0;
+    const totalSpent  = totalSpins * SLOTS_COST;
+    const net         = totalEarned - totalSpent;
+    const biggestWin  = biggest ? biggest.top  : 0;
+    api.batch(b => {
+      b.hr();
+      b.print('== slots stats ==', 'magenta');
+      b.print(`  total spins:   ${fmtCr(totalSpins)}`, 'cyan');
+      b.print(`  total spent:   ${fmtCr(totalSpent)} ₢`, 'cyan');
+      b.print(`  total earned:  ${fmtCr(totalEarned)} ₢`, 'cyan');
+      b.print(`  net:           ${net >= 0 ? '+' : ''}${fmtCr(net)} ₢`, net >= 0 ? 'green' : 'red');
+      b.print(`  biggest win:   ${fmtCr(biggestWin)} ₢`, 'cyan');
+      b.hr();
+    });
+    return;
+  }
+
+  if (sub !== '') {
+    api.print('usage: /slots — play nickel slots', 'dim');
+    api.print('       /slots stats — your slots statistics', 'dim');
+    return;
+  }
+
+  sendOps(api.ws, [{ op: 'openSlots' }]);
 }
 
 /* ======================= Profiles (/aboutme, /profile) ======================= */
@@ -1979,6 +2162,10 @@ function cmdProfile(api, state, args){
   api.printHTML(`Joined: <span class="dim">${escapeHTML(created)}</span>`);
   api.printHTML(`Last seen: <span class="dim">${escapeHTML(last)}</span>`);
   if (color) api.printHTML(`Chat color: <span style="color:${color}">${escapeHTML(color)}</span>`);
+  try {
+    const chromeBal = chrome.getBalance(row.username);
+    api.printHTML(`chrome: <span class="yellow">${escapeHTML(fmtCr(chromeBal))} ₢</span>`);
+  } catch {}
   api.hr();
   if (aboutRaw && String(aboutRaw).trim()) {
     const safe = sanitizeAndFormatDIS(String(aboutRaw));
@@ -2390,10 +2577,18 @@ function handleRegisterAnswer(answer, api, state){
     console.error('Failed to save signup reason:', e && e.message ? e.message : e);
   }
 
+  try {
+    chrome.award(username, 100, 'welcome bonus');
+  } catch (e) {
+    console.error('[register] chrome welcome award failed:', e && e.message);
+  }
+
   if (state && state.authenticated) {
     api.print(`Account created: ${username}. You remain logged in as ${state.username}.`, 'green');
+    api.print("You've been awarded 100 chrome (₢) to get started.", 'yellow');
   } else {
     api.print('Account created. Please log in with your new credentials.', 'green');
+    api.print("You've been awarded 100 chrome (₢) to get started.", 'yellow');
     state.login.step = 'username';
     api.print('Enter username:', 'cyan');
     api.setInputType('text', 'Username');
@@ -2685,6 +2880,7 @@ function handleGlobalCommand(cmd, api, state, args){
     /* Games */
     case 'games':    renderGames(api, state); return true;
     case 'wordle':   cmdWordle(api, state, args[0]); return true;
+    case 'slots':    cmdSlots(api, state, args); return true;
 
     /* DMs / Suggestions */
     case 'post':         cmdPost(api, state, args); return true;
@@ -2850,6 +3046,8 @@ wss.on('connection', (ws, req) => {
     if (msg.type === 'save_pixel_art')   { handleSavePixelArt(msg, api, state); return; }
     if (msg.type === 'update_pixel_art') { handleUpdatePixelArt(msg, api, state); return; }
     if (msg.type === 'wordle_guess')     { handleWordleGuess(msg, api, state); return; }
+    if (msg.type === 'slots_spin')       { handleSlotsSpin(msg, api, state); return; }
+    if (msg.type === 'slots_getstate')   { handleSlotsGetState(api, state); return; }
     if (msg.type !== 'input') return;
 
     const raw = String(msg.raw || '').trim();
@@ -3188,6 +3386,11 @@ app.post('/api/register', (req, res) => {
     updateUserFingerprintOnRegister.run(fp.ip, fp.ip, fp.userAgent, fp.acceptLanguage, fp.fpHash, result.id);
   } catch (e) {
     console.error('[register] fingerprint store failed:', e && e.message);
+  }
+  try {
+    chrome.award(username, 100, 'welcome bonus');
+  } catch (e) {
+    console.error('[api/register] chrome welcome award failed:', e && e.message);
   }
 
   const user = getUserByName.get(username);

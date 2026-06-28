@@ -203,6 +203,7 @@ CREATE TABLE IF NOT EXISTS users (
   ensureRegistrationRejectionsSchema(db);
   ensureWordleSchema(db);
   seedWordleWords(db);
+  ensureChromeSchema(db);
 
   const getSetting = db.prepare('SELECT value FROM settings WHERE key=?');
   const setSetting = db.prepare(`
@@ -1286,6 +1287,37 @@ const WORDLE_WORD_LIST = [
   'yacht','yearn','yeast','yield','young','youth',
   'zebra','zesty',
 ];
+
+function ensureChromeSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS chrome_balances (
+      username        TEXT    PRIMARY KEY,
+      balance         INTEGER NOT NULL DEFAULT 0,
+      last_daily_at   TEXT,
+      last_stipend_at TEXT,
+      created_at      INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_chrome_balances_balance ON chrome_balances(balance DESC);
+
+    CREATE TABLE IF NOT EXISTS chrome_transactions (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      username   TEXT    NOT NULL,
+      amount     INTEGER NOT NULL,
+      reason     TEXT    NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_chrome_tx_username ON chrome_transactions(username, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS slots_jackpot (
+      id     INTEGER PRIMARY KEY,
+      amount INTEGER NOT NULL
+    );
+  `);
+  const jpRow = db.prepare('SELECT id FROM slots_jackpot WHERE id = 1').get();
+  if (!jpRow) {
+    db.prepare('INSERT INTO slots_jackpot (id, amount) VALUES (1, 500)').run();
+  }
+}
 
 function seedWordleWords(db) {
   const count = db.prepare('SELECT COUNT(1) AS n FROM wordle_words').get().n;
