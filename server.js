@@ -25,6 +25,10 @@ const SMTP_USER = process.env.SMTP_USER || null;
 const SMTP_PASS = process.env.SMTP_PASS || null;
 const SMTP_FROM = process.env.SMTP_FROM || (SMTP_USER ? `DIS BBS <${SMTP_USER}>` : null);
 
+const KOFI_VERIFICATION_TOKEN = process.env.KOFI_VERIFICATION_TOKEN || null;
+const KOFI_MONTHLY_GOAL = parseFloat(process.env.KOFI_MONTHLY_GOAL || '20');
+const KOFI_URL = process.env.KOFI_URL || '';
+
 let mailer = null;
 try {
   const nodemailer = require('nodemailer');
@@ -43,6 +47,7 @@ try {
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 app.use(express.static(path.join(__dirname, 'public')));
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/ws' });
@@ -223,6 +228,17 @@ const {
   wordleGetTodaySolvers,
   gameFeedInsert,
   gameFeedList,
+  insertDonation,
+  getDonationByTxId,
+  listRecentDonations,
+  updateDonationAwarded,
+  getUnlinkedDonationsByKofi,
+  insertDonationLink,
+  getDonationLinkByKofi,
+  deleteDonationLink,
+  getMonthDonations,
+  getMonthTopDonors,
+  checkUserIsDonor,
 } = statements;
 
 const {
@@ -611,6 +627,7 @@ function cmdHelp(api, state){
   api.print('  /slots stats  Your slots statistics', 'cyan');
   api.print('  /blackjack    Simplified blackjack — bet ₢ against the house', 'cyan');
   api.print('  /blackjack stats  Your blackjack statistics', 'cyan');
+  api.print('  /donate       Support DIS — progress, top donors, how to donate', 'cyan');
 
   if (state && state.isAdmin){
     api.hr(); api.print('Admin:', 'yellow');
@@ -626,6 +643,9 @@ function cmdHelp(api, state){
     api.print('  /unban <id>                  Remove a ban list entry by id', 'cyan');
     api.print('  /bannote <id> <text>         Add/update a note on a ban entry', 'cyan');
     api.print('  /checkuser <username>        Show fingerprint info + ban list matches for a user', 'cyan');
+    api.print('  /donations                   Recent donations with chrome awarded', 'cyan');
+    api.print('  /linkdonor <kofi> <dis>      Link a Ko-fi name to a DIS account (retroactive award)', 'cyan');
+    api.print('  /unlinkdonor <kofi>          Remove a Ko-fi name link', 'cyan');
   }
   api.hr();
   api.print('DIS-Markdown: **bold**, _italics_, __underline__, [dim]…[/dim], and color tags like [cyan]…[/cyan].', 'dim');
@@ -858,11 +878,13 @@ function renderMenu(api, state){
     b.print('  /messages        View your direct messages', 'cyan');
     b.print('  /announcements   View site announcements', 'cyan');
     b.print('  /about           About DIS', 'cyan');
+    b.print('  /donate          Support DIS (thank you!)', 'cyan');
     b.print('  /profile         View your profile (or /profile <user>)', 'cyan');
     b.print('  /logout          Sign out', 'cyan');
     b.hr();
     b.print('Tip: You can type these anywhere. /main returns here.', 'dim');
     b.print('For a full list of commands use /help command.', 'dim');
+    b.print('DIS runs on community support  •  /donate for info', 'white');
   });
 }
 function menuHandleRaw(text, api){ api.print('Use slash commands here. Try /chat, /board, /links or /help.', 'dim'); return true; }
@@ -2344,6 +2366,125 @@ function cmdBlackjack(api, state, args) {
   sendOps(api.ws, [{ op: 'openBlackjack', balance }]);
 }
 
+/* ======================= Donations (/donate, /donations, /linkdonor) ======================= */
+function cmdDonate(api, state) {
+  if (!requireAuth(api, state)) return;
+  const totals = getMonthDonations.get();
+  const totalAmount = totals ? totals.total_amount : 0;
+  const topDonors = getMonthTopDonors.all();
+
+  const pct = KOFI_MONTHLY_GOAL > 0 ? (totalAmount / KOFI_MONTHLY_GOAL) * 100 : 0;
+  const filled = Math.min(20, Math.round((Math.min(100, pct) / 100) * 20));
+  const empty = 20 - filled;
+  const barContent = `<span class="cyan">${'█'.repeat(filled)}</span><span class="dim">${'░'.repeat(empty)}</span>`;
+
+  let goalNote = '';
+  if (pct >= 100) goalNote = pct > 100 ? `  +${Math.round(pct - 100)}% over goal ♥` : '  goal reached! ♥';
+
+  api.batch(b => {
+    b.hr();
+    b.print('  ── support DIS ──', 'cyan');
+    b.hr();
+    b.print('  DIS is a handmade space. no ads, no investors,', 'white');
+    b.print('  no algorithm — just people.', 'white');
+    b.print(' ', 'dim');
+    b.printHTML(`  this month: [${barContent}]  ${escapeHTML(Math.round(pct).toString())}%${escapeHTML(goalNote)}`);
+    b.printHTML(`  <span class="dim">$${escapeHTML(totalAmount.toFixed(2))} raised of $${escapeHTML(KOFI_MONTHLY_GOAL.toFixed(0))} goal</span>`);
+    if (topDonors.length > 0) {
+      b.print(' ', 'dim');
+      b.print('  ── top supporters this month ──', 'dim');
+      for (let i = 0; i < topDonors.length; i++) {
+        const d = topDonors[i];
+        b.printHTML(`  ${i + 1}. <span class="cyan">${escapeHTML(d.dis_username)}</span>  <span class="dim">$${escapeHTML(d.total.toFixed(2))}</span>`);
+      }
+    }
+    b.print(' ', 'dim');
+    b.print('  ── how to donate ──', 'dim');
+    if (KOFI_URL) {
+      b.print(`  ${KOFI_URL}`, 'cyan');
+    } else {
+      b.print('  visit our Ko-fi page', 'cyan');
+    }
+    b.print('  include your DIS username in the message field', 'yellow');
+    b.print('  to earn 100 ₢ per dollar donated.', 'cyan');
+    b.print(' ', 'dim');
+    b.print('  no pressure. ever. ♥', 'dim');
+    b.hr();
+  });
+}
+
+function cmdDonations(api, state) {
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
+  const rows = listRecentDonations.all(20);
+  api.batch(b => {
+    b.hr();
+    b.print('== recent donations (last 20) ==', 'magenta');
+    b.hr();
+    if (!rows.length) {
+      b.print('No donations yet.', 'dim');
+    } else {
+      for (const r of rows) {
+        const date = new Date(r.created_at * 1000).toISOString().slice(0, 10);
+        const who = r.dis_username || '(unlinked)';
+        const cr = r.chrome_awarded > 0 ? `+${fmtCr(r.chrome_awarded)} ₢` : '—';
+        b.printHTML(`<span class="dim">${escapeHTML(date)}</span>  <span class="yellow">${escapeHTML(r.kofi_name)}</span> → <span class="cyan">${escapeHTML(who)}</span>  $${escapeHTML(r.amount.toFixed(2))}  ${escapeHTML(cr)}`);
+        if (r.message) {
+          b.printHTML(`  <span class="dim">"${escapeHTML(r.message.slice(0, 80))}"</span>`);
+        }
+      }
+    }
+    b.hr();
+  });
+}
+
+function cmdLinkDonor(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
+  const kofiName = ((args && args[0]) || '').trim();
+  const disName  = ((args && args[1]) || '').trim();
+  if (!kofiName || !disName) {
+    api.print('Usage: /linkdonor <kofi_name> <dis_username>', 'yellow');
+    return;
+  }
+  const user = getUserByName.get(disName);
+  if (!user) { api.print(`No DIS user found: ${disName}`, 'red'); return; }
+
+  insertDonationLink.run(kofiName, user.username, nowEpoch());
+  api.print(`Linked ko-fi "${kofiName}" → ${user.username}`, 'green');
+
+  const unlinked = getUnlinkedDonationsByKofi.all(kofiName);
+  if (unlinked.length > 0) {
+    let totalAwarded = 0;
+    for (const d of unlinked) {
+      const cr = Math.floor(d.amount * 100);
+      if (cr > 0) { chrome.award(user.username, cr, 'donation bonus'); totalAwarded += cr; }
+      updateDonationAwarded.run(user.username, cr, d.id);
+    }
+    if (totalAwarded > 0) {
+      api.print(`Retroactively awarded ${fmtCr(totalAwarded)} ₢ for ${unlinked.length} prior donation(s).`, 'yellow');
+      const sockets = HUB.socketsByUser.get(user.username);
+      if (sockets) {
+        const ops = [{ op: 'print', text: `💙 thank you for your donation! you've been awarded ${fmtCr(totalAwarded)} ₢`, cls: 'cyan' }];
+        for (const ws of sockets) { try { sendOps(ws, ops); } catch {} }
+      }
+    }
+  }
+}
+
+function cmdUnlinkDonor(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
+  const kofiName = ((args && args[0]) || '').trim();
+  if (!kofiName) { api.print('Usage: /unlinkdonor <kofi_name>', 'yellow'); return; }
+  const info = deleteDonationLink.run(kofiName);
+  if (info.changes) {
+    api.print(`Removed link for ko-fi name "${kofiName}".`, 'green');
+  } else {
+    api.print(`No link found for ko-fi name "${kofiName}".`, 'red');
+  }
+}
+
 /* ======================= Profiles (/aboutme, /profile) ======================= */
 function cmdAboutMe(api, state, args){
   if (!requireAuth(api, state)) return;
@@ -2398,6 +2539,9 @@ function cmdProfile(api, state, args){
   try {
     const chromeBal = chrome.getBalance(row.username);
     api.printHTML(`chrome: <span class="yellow">${escapeHTML(fmtCr(chromeBal))} ₢</span>`);
+  } catch {}
+  try {
+    if (checkUserIsDonor.get(row.username)) api.print('supporter ♥', 'cyan');
   } catch {}
   api.hr();
   if (aboutRaw && String(aboutRaw).trim()) {
@@ -3116,6 +3260,12 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'slots':     cmdSlots(api, state, args); return true;
     case 'blackjack': cmdBlackjack(api, state, args); return true;
 
+    /* Donations */
+    case 'donate':       cmdDonate(api, state); return true;
+    case 'donations':    cmdDonations(api, state); return true;
+    case 'linkdonor':    cmdLinkDonor(api, state, args); return true;
+    case 'unlinkdonor':  cmdUnlinkDonor(api, state, args); return true;
+
     /* DMs / Suggestions */
     case 'post':         cmdPost(api, state, args); return true;
     case 'feed':         cmdFeed(api, state, args); return true;
@@ -3394,7 +3544,7 @@ function renderAdminChat(api, state){
 
     const rows = recentAdminMessages.all().reverse();
     if (!rows.length){
-      b.print('No messages yet. Type to chat. /leave returns to menu.', 'dim');
+      b.print('No messages yet. Type to chat. /main returns to menu.', 'dim');
     } else {
       let lastYmd = null;
       rows.forEach(r=>{
@@ -3870,6 +4020,74 @@ app.post('/api/reset-password', (req, res) => {
   }
 
   res.json({ ok: true });
+});
+
+/* ======================= Ko-fi Webhook ======================= */
+app.post('/api/kofi/webhook', (req, res) => {
+  const raw = req.body && req.body.data;
+  if (!raw) {
+    console.warn('[kofi] webhook received with no data field');
+    return res.status(200).json({ ok: true });
+  }
+
+  let payload;
+  try { payload = JSON.parse(raw); }
+  catch (e) {
+    console.warn('[kofi] webhook JSON parse failed:', e.message);
+    return res.status(200).json({ ok: true });
+  }
+
+  if (!KOFI_VERIFICATION_TOKEN || payload.verification_token !== KOFI_VERIFICATION_TOKEN) {
+    console.warn('[kofi] webhook verification failed');
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+
+  const txId     = String(payload.kofi_transaction_id || '').trim();
+  const kofiName = String(payload.from_name || '').trim();
+  const amount   = parseFloat(payload.amount) || 0;
+  const message  = String(payload.message || '').trim();
+
+  if (!txId || !kofiName) return res.status(200).json({ ok: true });
+
+  if (getDonationByTxId.get(txId)) return res.status(200).json({ ok: true, duplicate: true });
+
+  // Username match: scan message words, then fall back to donation_links table
+  let disUsername = null;
+  if (message) {
+    const words = message.split(/\s+/);
+    for (const word of words) {
+      const cleaned = word.replace(/[^a-zA-Z0-9_-]/g, '');
+      if (!cleaned) continue;
+      const user = getUserByName.get(cleaned);
+      if (user) { disUsername = user.username; break; }
+    }
+  }
+  if (!disUsername) {
+    const link = getDonationLinkByKofi.get(kofiName);
+    if (link) disUsername = link.dis_username;
+  }
+
+  const chromeAmount = Math.floor(amount * 100);
+  const now = nowEpoch();
+
+  insertDonation.run(txId, kofiName, disUsername || null, amount, message, disUsername ? chromeAmount : 0, now);
+
+  if (disUsername && chromeAmount > 0) {
+    try { chrome.award(disUsername, chromeAmount, 'donation bonus'); } catch (e) {
+      console.error('[kofi] chrome award failed:', e && e.message);
+    }
+
+    const sockets = HUB.socketsByUser.get(disUsername);
+    if (sockets) {
+      const ops = [{ op: 'print', text: `💙 thank you for your donation! you've been awarded ${fmtCr(chromeAmount)} ₢`, cls: 'cyan' }];
+      for (const ws of sockets) { try { sendOps(ws, ops); } catch {} }
+    }
+
+    try { gameFeedInsert.run(disUsername, 'donation', `💙 ${disUsername} supported DIS and earned ${fmtCr(chromeAmount)} ₢!`, now); } catch {}
+  }
+
+  console.log(`[kofi] donation: ${kofiName} $${amount}${disUsername ? ` → ${disUsername} +${chromeAmount}₢` : ' (unlinked)'}`);
+  return res.status(200).json({ ok: true });
 });
 
 /* ======================= Start ======================= */

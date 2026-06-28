@@ -204,6 +204,7 @@ CREATE TABLE IF NOT EXISTS users (
   ensureWordleSchema(db);
   seedWordleWords(db);
   ensureChromeSchema(db);
+  ensureDonationsSchema(db);
 
   const getSetting = db.prepare('SELECT value FROM settings WHERE key=?');
   const setSetting = db.prepare(`
@@ -718,6 +719,45 @@ CREATE TABLE IF NOT EXISTS users (
      ORDER BY created_at DESC LIMIT ?
   `);
 
+  /* Donations */
+  const insertDonation             = db.prepare(`
+    INSERT INTO donations (kofi_transaction_id, kofi_name, dis_username, amount, message, chrome_awarded, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+  const getDonationByTxId          = db.prepare('SELECT id FROM donations WHERE kofi_transaction_id = ?');
+  const listRecentDonations        = db.prepare(`
+    SELECT id, kofi_transaction_id, kofi_name, dis_username, amount, message, chrome_awarded, created_at
+      FROM donations ORDER BY created_at DESC LIMIT ?
+  `);
+  const updateDonationAwarded      = db.prepare(`
+    UPDATE donations SET dis_username = ?, chrome_awarded = ? WHERE id = ?
+  `);
+  const getUnlinkedDonationsByKofi = db.prepare(`
+    SELECT id, amount FROM donations WHERE LOWER(kofi_name) = LOWER(?) AND dis_username IS NULL
+  `);
+  const insertDonationLink         = db.prepare(`
+    INSERT INTO donation_links (kofi_name, dis_username, created_at) VALUES (?, ?, ?)
+    ON CONFLICT(kofi_name) DO UPDATE SET dis_username = excluded.dis_username, created_at = excluded.created_at
+  `);
+  const getDonationLinkByKofi      = db.prepare('SELECT dis_username FROM donation_links WHERE LOWER(kofi_name) = LOWER(?)');
+  const deleteDonationLink         = db.prepare('DELETE FROM donation_links WHERE LOWER(kofi_name) = LOWER(?)');
+  const getMonthDonations          = db.prepare(`
+    SELECT COALESCE(SUM(amount), 0) AS total_amount,
+           COUNT(DISTINCT kofi_transaction_id) AS total_count
+      FROM donations
+     WHERE strftime('%Y-%m', datetime(created_at, 'unixepoch')) = strftime('%Y-%m', 'now')
+  `);
+  const getMonthTopDonors          = db.prepare(`
+    SELECT dis_username, SUM(amount) AS total
+      FROM donations
+     WHERE dis_username IS NOT NULL
+       AND strftime('%Y-%m', datetime(created_at, 'unixepoch')) = strftime('%Y-%m', 'now')
+     GROUP BY dis_username
+     ORDER BY total DESC
+     LIMIT 5
+  `);
+  const checkUserIsDonor           = db.prepare('SELECT 1 AS found FROM donations WHERE LOWER(dis_username) = LOWER(?) LIMIT 1');
+
   const insertPixelArt    = db.prepare(`INSERT INTO pixel_art (name, creator_username, pixel_data, created_at) VALUES (?, ?, ?, ?)`);
   const listPixelArt      = db.prepare(`SELECT id, name, creator_username, created_at, pixel_data FROM pixel_art ORDER BY created_at DESC LIMIT 200`);
   const getPixelArtByName = db.prepare('SELECT * FROM pixel_art WHERE name = ?');
@@ -948,6 +988,17 @@ CREATE TABLE IF NOT EXISTS users (
     wordleGetTodaySolvers,
     gameFeedInsert,
     gameFeedList,
+    insertDonation,
+    getDonationByTxId,
+    listRecentDonations,
+    updateDonationAwarded,
+    getUnlinkedDonationsByKofi,
+    insertDonationLink,
+    getDonationLinkByKofi,
+    deleteDonationLink,
+    getMonthDonations,
+    getMonthTopDonors,
+    checkUserIsDonor,
     insertPixelArt,
     listPixelArt,
     getPixelArtByName,
@@ -1317,6 +1368,31 @@ function ensureChromeSchema(db) {
   if (!jpRow) {
     db.prepare('INSERT INTO slots_jackpot (id, amount) VALUES (1, 500)').run();
   }
+}
+
+function ensureDonationsSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS donations (
+      id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+      kofi_transaction_id TEXT    NOT NULL UNIQUE,
+      kofi_name           TEXT    NOT NULL,
+      dis_username        TEXT,
+      amount              REAL    NOT NULL,
+      message             TEXT    NOT NULL DEFAULT '',
+      chrome_awarded      INTEGER NOT NULL DEFAULT 0,
+      created_at          INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_donations_kofi_name    ON donations(kofi_name);
+    CREATE INDEX IF NOT EXISTS idx_donations_dis_username ON donations(dis_username);
+    CREATE INDEX IF NOT EXISTS idx_donations_created_at   ON donations(created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS donation_links (
+      kofi_name    TEXT    PRIMARY KEY,
+      dis_username TEXT    NOT NULL,
+      created_at   INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_donation_links_dis ON donation_links(dis_username);
+  `);
 }
 
 function seedWordleWords(db) {
