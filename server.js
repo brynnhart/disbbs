@@ -1860,6 +1860,7 @@ function cmdWordle(api, state, args){
       dailyWord:  resultRow ? dailyWord : null,
       streak:     streakRow ? streakRow.current_streak : 0,
       bestStreak: streakRow ? streakRow.best_streak : 0,
+      fromScreen: state.currentScreen,
     },
   }]);
 }

@@ -948,6 +948,8 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
   var wlCurrentRow = 0;
   var wlSubmitting = false;
   var wlGameOver = false;
+  var wlTerminal = false;   // true once game reaches solved/failed state (db written)
+  var wlFromScreen = null;  // screen the user was on before opening the modal
   var wlGuessInput = null;
   var wlMsgEl = null;
 
@@ -958,6 +960,8 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
     wlCurrentRow  = prevGuesses.length;
     wlSubmitting  = false;
     wlGameOver    = !!data.gameOver;
+    wlTerminal    = !!data.gameOver;
+    wlFromScreen  = data.fromScreen || null;
     wlTiles       = [];
     wlKeys        = {};
 
@@ -1099,7 +1103,9 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
     var statsBtn = document.createElement('button');
     statsBtn.type = 'button'; statsBtn.className = 'wl-footer-btn'; statsBtn.textContent = 'Stats';
     var closeBtn = document.createElement('button');
-    closeBtn.type = 'button'; closeBtn.className = 'wl-footer-btn'; closeBtn.textContent = 'Close';
+    closeBtn.id = 'wordle-close-btn';
+    closeBtn.type = 'button'; closeBtn.className = 'wl-footer-btn';
+    closeBtn.textContent = wlGameOver ? 'Done' : 'Close';
     footerEl.appendChild(statsBtn); footerEl.appendChild(closeBtn);
     modal.appendChild(footerEl);
 
@@ -1215,6 +1221,9 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
     wlUpdateCurrentRowPreview('');
     if (op.solved || op.failed) {
       wlGameOver = true;
+      wlTerminal = true;
+      var closeBtnEl = document.getElementById('wordle-close-btn');
+      if (closeBtnEl) closeBtnEl.textContent = 'Done';
       var inputRow = document.getElementById('wordle-input-row');
       if (inputRow) inputRow.style.display = 'none';
       var resultEl = document.getElementById('wordle-result');
@@ -1258,10 +1267,29 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
   }
 
   function closeWordle() {
+    if (wlTerminal) {
+      closeWordleComplete();
+    } else {
+      closeWordleIncomplete();
+    }
+  }
+
+  function closeWordleComplete() {
     var overlay = document.getElementById('wordle-overlay');
     if (overlay) overlay.remove();
     wlTiles = []; wlKeys = {}; wlCurrentRow = 0; wlSubmitting = false;
-    wlGameOver = false; wlGuessInput = null; wlMsgEl = null;
+    wlGameOver = false; wlTerminal = false; wlFromScreen = null; wlGuessInput = null; wlMsgEl = null;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'input', text: '/games' }));
+    }
+    focusInputEnd(input);
+  }
+
+  function closeWordleIncomplete() {
+    var overlay = document.getElementById('wordle-overlay');
+    if (overlay) overlay.remove();
+    wlTiles = []; wlKeys = {}; wlCurrentRow = 0; wlSubmitting = false;
+    wlGameOver = false; wlTerminal = false; wlFromScreen = null; wlGuessInput = null; wlMsgEl = null;
     focusInputEnd(input);
   }
 
