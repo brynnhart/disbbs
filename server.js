@@ -609,6 +609,8 @@ function cmdHelp(api, state){
   api.print('  /wordle stats Leaderboard and today\'s results', 'cyan');
   api.print('  /slots        Nickel slots — 5 ₢ per spin', 'cyan');
   api.print('  /slots stats  Your slots statistics', 'cyan');
+  api.print('  /blackjack    Simplified blackjack — bet ₢ against the house', 'cyan');
+  api.print('  /blackjack stats  Your blackjack statistics', 'cyan');
 
   if (state && state.isAdmin){
     api.hr(); api.print('Admin:', 'yellow');
@@ -1811,10 +1813,13 @@ function renderGames(api, state){
     const wordleStatus = playedToday
       ? (resultRow.solved ? `✓ played today (solved in ${resultRow.guesses})` : '✓ played today')
       : `your streak: ${streak} day${streak !== 1 ? 's' : ''}  •  /wordle stats for leaderboard`;
-    b.print('  /wordle    daily word puzzle — new word every day, same for everyone', 'cyan');
+    b.print('  /wordle      daily word puzzle — new word every day, same for everyone', 'cyan');
     b.print(`             ${wordleStatus}`, playedToday ? 'green' : 'dim');
-    b.print('  /slots     nickel slots — 5 ₢ per spin', 'cyan');
+    b.print('  /slots      nickel slots — 5 ₢ per spin', 'cyan');
     b.printHTML(`             <span class="yellow">jackpot: ${escapeHTML(fmtCr(jackpot))} ₢ 💀</span>`);
+    const playerBalance = chrome.getBalance(state.username);
+    b.print('  /blackjack     simplified blackjack', 'cyan');
+    b.printHTML(`             <span class="yellow">your balance: ${escapeHTML(fmtCr(playerBalance))} ₢</span>`);
     b.hr();
     if (feedRows.length) {
       b.print('── recent activity ──', 'dim');
@@ -2109,6 +2114,234 @@ function cmdSlots(api, state, args) {
   }
 
   sendOps(api.ws, [{ op: 'openSlots' }]);
+}
+
+/* ======================= Blackjack ======================= */
+const blackjackHands = new Map();
+
+const BJ_SUITS = ['♠', '♥', '♦', '♣'];
+const BJ_RANKS = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
+
+function bjBuildDeck() {
+  const deck = [];
+  for (const suit of BJ_SUITS) {
+    for (const rank of BJ_RANKS) deck.push({ rank, suit });
+  }
+  return deck;
+}
+
+function bjShuffle(deck) {
+  for (let i = deck.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [deck[i], deck[j]] = [deck[j], deck[i]];
+  }
+  return deck;
+}
+
+function bjHandValue(hand) {
+  let value = 0, aces = 0;
+  for (const card of hand) {
+    if (card.rank === 'A') { value += 11; aces++; }
+    else if (card.rank === 'J' || card.rank === 'Q' || card.rank === 'K') value += 10;
+    else value += parseInt(card.rank, 10);
+  }
+  while (value > 21 && aces > 0) { value -= 10; aces--; }
+  return value;
+}
+
+function bjIsNatural(hand) {
+  if (hand.length !== 2) return false;
+  const hasAce = hand.some(c => c.rank === 'A');
+  const hasTen = hand.some(c => c.rank === '10' || c.rank === 'J' || c.rank === 'Q' || c.rank === 'K');
+  return hasAce && hasTen;
+}
+
+function handleBlackjackGetState(api, state) {
+  if (!requireAuth(api, state)) return;
+  const hand = blackjackHands.get(state.username);
+  const balance = chrome.getBalance(state.username);
+  if (!hand) {
+    sendOps(api.ws, [{ op: 'blackjack_state', status: 'betting', balance }]);
+    return;
+  }
+  sendOps(api.ws, [{
+    op: 'blackjack_state',
+    playerHand: hand.playerHand,
+    dealerVisible: [hand.dealerHand[0]],
+    playerValue: bjHandValue(hand.playerHand),
+    status: 'playing',
+    bet: hand.bet,
+    balance,
+  }]);
+}
+
+function handleBlackjackDeal(msg, api, state) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  const balance = chrome.getBalance(username);
+
+  if (balance <= 0) {
+    sendOps(api.ws, [{ op: 'blackjack_state', status: 'betting', balance, error: 'not enough chrome to play. come back tomorrow for your daily stipend.' }]);
+    return;
+  }
+
+  const bet = parseInt(msg.bet, 10);
+  if (!bet || bet < 1 || bet > balance) {
+    sendOps(api.ws, [{ op: 'blackjack_state', status: 'betting', balance, error: `invalid bet. minimum 1 ₢, maximum ${fmtCr(balance)} ₢.` }]);
+    return;
+  }
+
+  const deck = bjShuffle(bjBuildDeck());
+  const playerHand = [deck.pop(), deck.pop()];
+  const dealerHand = [deck.pop(), deck.pop()];
+
+  if (bjIsNatural(playerHand)) {
+    const payout = Math.floor(bet * 1.5);
+    const newBalance = chrome.award(username, payout, 'blackjack natural');
+    const feedMsg = `${username} hit blackjack and won ${fmtCr(payout)} ₢! 🃏`;
+    try { gameFeedInsert.run(username, 'blackjack_natural', feedMsg, nowEpoch()); } catch {}
+    sendOps(api.ws, [{
+      op: 'blackjack_result',
+      playerHand,
+      dealerHand,
+      playerValue: bjHandValue(playerHand),
+      dealerValue: bjHandValue(dealerHand),
+      result: 'blackjack',
+      payout,
+      newBalance,
+    }]);
+    return;
+  }
+
+  blackjackHands.set(username, { deck, playerHand, dealerHand, bet, status: 'playing' });
+  sendOps(api.ws, [{
+    op: 'blackjack_state',
+    playerHand,
+    dealerVisible: [dealerHand[0]],
+    playerValue: bjHandValue(playerHand),
+    status: 'playing',
+    bet,
+    balance,
+  }]);
+}
+
+function handleBlackjackHit(msg, api, state) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  const hand = blackjackHands.get(username);
+  if (!hand || hand.status !== 'playing') {
+    sendOps(api.ws, [{ op: 'blackjack_state', status: 'betting', balance: chrome.getBalance(username) }]);
+    return;
+  }
+  hand.playerHand.push(hand.deck.pop());
+  const playerValue = bjHandValue(hand.playerHand);
+  if (playerValue > 21) {
+    const spendResult = chrome.spend(username, hand.bet, 'blackjack loss');
+    blackjackHands.delete(username);
+    sendOps(api.ws, [{
+      op: 'blackjack_result',
+      playerHand: hand.playerHand,
+      dealerHand: hand.dealerHand,
+      playerValue,
+      dealerValue: bjHandValue(hand.dealerHand),
+      result: 'bust',
+      payout: 0,
+      newBalance: spendResult.success ? spendResult.newBalance : chrome.getBalance(username),
+    }]);
+    return;
+  }
+  sendOps(api.ws, [{
+    op: 'blackjack_state',
+    playerHand: hand.playerHand,
+    dealerVisible: [hand.dealerHand[0]],
+    playerValue,
+    status: 'playing',
+    bet: hand.bet,
+    balance: chrome.getBalance(username),
+  }]);
+}
+
+function handleBlackjackStand(msg, api, state) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  const hand = blackjackHands.get(username);
+  if (!hand || hand.status !== 'playing') {
+    sendOps(api.ws, [{ op: 'blackjack_state', status: 'betting', balance: chrome.getBalance(username) }]);
+    return;
+  }
+
+  while (bjHandValue(hand.dealerHand) <= 16) hand.dealerHand.push(hand.deck.pop());
+
+  const playerValue = bjHandValue(hand.playerHand);
+  const dealerValue = bjHandValue(hand.dealerHand);
+  blackjackHands.delete(username);
+
+  let result, payout, newBalance;
+  if (dealerValue > 21 || playerValue > dealerValue) {
+    payout = hand.bet;
+    newBalance = chrome.award(username, payout, 'blackjack win');
+    result = 'win';
+    if (hand.bet > 100) {
+      const feedMsg = `${username} won ${fmtCr(payout)} ₢ at blackjack! 🃏`;
+      try { gameFeedInsert.run(username, 'blackjack_win', feedMsg, nowEpoch()); } catch {}
+    }
+  } else {
+    payout = 0;
+    const spendResult = chrome.spend(username, hand.bet, 'blackjack loss');
+    newBalance = spendResult.success ? spendResult.newBalance : chrome.getBalance(username);
+    result = playerValue === dealerValue ? 'tie' : 'lose';
+  }
+
+  sendOps(api.ws, [{
+    op: 'blackjack_result',
+    playerHand: hand.playerHand,
+    dealerHand: hand.dealerHand,
+    playerValue,
+    dealerValue,
+    result,
+    payout,
+    newBalance,
+  }]);
+}
+
+function cmdBlackjack(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  const sub = ((args && args[0]) || '').trim().toLowerCase();
+
+  if (sub === 'stats') {
+    const username = state.username;
+    const wins    = db.prepare(`SELECT COUNT(1) AS n FROM chrome_transactions WHERE username = ? AND reason IN ('blackjack win', 'blackjack natural')`).get(username);
+    const losses  = db.prepare(`SELECT COUNT(1) AS n FROM chrome_transactions WHERE username = ? AND reason = 'blackjack loss'`).get(username);
+    const net     = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM chrome_transactions WHERE username = ? AND reason IN ('blackjack win', 'blackjack natural', 'blackjack loss')`).get(username);
+    const biggest = db.prepare(`SELECT COALESCE(MAX(amount), 0) AS top FROM chrome_transactions WHERE username = ? AND reason IN ('blackjack win', 'blackjack natural')`).get(username);
+    const totalWins   = wins.n   || 0;
+    const totalLosses = losses.n || 0;
+    const totalHands  = totalWins + totalLosses;
+    const winRate     = totalHands > 0 ? Math.round((totalWins / totalHands) * 100) : 0;
+    const netChrome   = net.total || 0;
+    const biggestWin  = biggest.top || 0;
+    api.batch(b => {
+      b.hr();
+      b.print('== blackjack stats ==', 'magenta');
+      b.print(`  total hands:   ${fmtCr(totalHands)}`, 'cyan');
+      b.print(`  wins:          ${fmtCr(totalWins)}`, 'cyan');
+      b.print(`  losses:        ${fmtCr(totalLosses)}`, 'cyan');
+      b.print(`  win rate:      ${winRate}%`, 'cyan');
+      b.print(`  net chrome:    ${netChrome >= 0 ? '+' : ''}${fmtCr(netChrome)} ₢`, netChrome >= 0 ? 'green' : 'red');
+      b.print(`  biggest win:   ${fmtCr(biggestWin)} ₢`, 'cyan');
+      b.hr();
+    });
+    return;
+  }
+
+  if (sub !== '') {
+    api.print('usage: /blackjack — play simplified blackjack', 'dim');
+    api.print('       /blackjack stats — your statistics', 'dim');
+    return;
+  }
+
+  const balance = chrome.getBalance(state.username);
+  sendOps(api.ws, [{ op: 'openBlackjack', balance }]);
 }
 
 /* ======================= Profiles (/aboutme, /profile) ======================= */
@@ -2880,7 +3113,8 @@ function handleGlobalCommand(cmd, api, state, args){
     /* Games */
     case 'games':    renderGames(api, state); return true;
     case 'wordle':   cmdWordle(api, state, args[0]); return true;
-    case 'slots':    cmdSlots(api, state, args); return true;
+    case 'slots':     cmdSlots(api, state, args); return true;
+    case 'blackjack': cmdBlackjack(api, state, args); return true;
 
     /* DMs / Suggestions */
     case 'post':         cmdPost(api, state, args); return true;
@@ -3048,6 +3282,10 @@ wss.on('connection', (ws, req) => {
     if (msg.type === 'wordle_guess')     { handleWordleGuess(msg, api, state); return; }
     if (msg.type === 'slots_spin')       { handleSlotsSpin(msg, api, state); return; }
     if (msg.type === 'slots_getstate')   { handleSlotsGetState(api, state); return; }
+    if (msg.type === 'blackjack_deal')     { handleBlackjackDeal(msg, api, state); return; }
+    if (msg.type === 'blackjack_hit')      { handleBlackjackHit(msg, api, state); return; }
+    if (msg.type === 'blackjack_stand')    { handleBlackjackStand(msg, api, state); return; }
+    if (msg.type === 'blackjack_getstate') { handleBlackjackGetState(api, state); return; }
     if (msg.type !== 'input') return;
 
     const raw = String(msg.raw || '').trim();

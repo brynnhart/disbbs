@@ -142,6 +142,34 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
 #slots-close-btn{appearance:none;border:1px solid #333;background:none;color:#888;font:inherit;font-size:12px;padding:7px;border-radius:4px;cursor:pointer;width:100%}
 #slots-close-btn:hover{border-color:#555;color:var(--fg)}
 
+/* ===== Blackjack modal ===== */
+#bj-overlay{position:fixed;inset:0;background:rgba(0,0,0,.92);display:flex;align-items:center;justify-content:center;z-index:1000;padding:12px;box-sizing:border-box}
+#bj-modal{background:#0a0a0a;border:1px solid #222;border-radius:6px;display:flex;flex-direction:column;gap:10px;padding:16px 14px;width:min(360px,98vw);box-sizing:border-box}
+#bj-title{color:var(--cyan);font-weight:bold;font-size:13px;letter-spacing:1px;text-align:center}
+#bj-subtitle{text-align:center;font-size:10px;color:#555;margin-top:-4px}
+#bj-balance{text-align:center;font-size:12px;color:#888}
+#bj-dealer-area,#bj-player-area{background:#111;border:1px solid #1a1a1a;border-radius:4px;padding:10px 12px;display:flex;flex-direction:column;gap:4px}
+.bj-area-label{font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.6px}
+.bj-cards{font-size:17px;letter-spacing:1px;color:var(--fg);min-height:1.4em;word-break:break-all}
+.bj-val{font-size:11px;color:#888;min-height:1em}
+#bj-msg{text-align:center;font-size:12px;font-weight:bold;min-height:16px}
+#bj-bet-row{display:flex;gap:6px;align-items:center}
+#bj-bet-input{background:#0c0c0c;color:var(--fg);border:1px solid #2a2a2a;border-radius:4px;padding:8px 10px;font:inherit;font-size:13px;flex:1;outline:none;caret-color:var(--cyan);min-width:0}
+#bj-bet-input:focus{border-color:#444}
+#bj-deal-btn{appearance:none;border:1px solid var(--cyan);background:rgba(25,195,195,.1);color:var(--cyan);font:inherit;font-size:13px;font-weight:bold;padding:8px 14px;border-radius:4px;cursor:pointer;white-space:nowrap}
+#bj-deal-btn:hover:not(:disabled){background:rgba(25,195,195,.18)}
+#bj-deal-btn:disabled{opacity:.35;cursor:not-allowed}
+#bj-action-row{display:flex;gap:8px}
+.bj-action-btn{appearance:none;border:1px solid #333;background:#111;color:var(--fg);font:inherit;font-size:13px;font-weight:bold;padding:9px;border-radius:4px;cursor:pointer;flex:1}
+.bj-action-btn:hover:not(:disabled){border-color:#555}
+.bj-action-btn:disabled{opacity:.35;cursor:not-allowed}
+.bj-action-btn.primary{border-color:var(--cyan);color:var(--cyan);background:rgba(25,195,195,.08)}
+.bj-action-btn.primary:hover:not(:disabled){background:rgba(25,195,195,.16)}
+#bj-result-msg{text-align:center;font-size:14px;font-weight:bold}
+#bj-payout{text-align:center;font-size:11px;color:var(--yellow)}
+#bj-close-btn{appearance:none;border:1px solid #333;background:none;color:#888;font:inherit;font-size:12px;padding:7px;border-radius:4px;cursor:pointer;width:100%}
+#bj-close-btn:hover{border-color:#555;color:var(--fg)}
+
 /* ===== Auth overlay ===== */
 #auth-overlay{position:fixed;inset:0;z-index:2000;background:#000;display:flex;flex-direction:column;align-items:center;overflow-y:auto;padding:0 0 48px;box-sizing:border-box}
 #auth-splash{width:100%;align-self:stretch;flex-shrink:0}
@@ -639,6 +667,9 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
           else if (op.op === 'openSlots') openSlots();
           else if (op.op === 'slots_result') slotsHandleResult(op);
           else if (op.op === 'slots_state') slotsHandleState(op);
+          else if (op.op === 'openBlackjack') openBlackjack(op);
+          else if (op.op === 'blackjack_state') blackjackHandleState(op);
+          else if (op.op === 'blackjack_result') blackjackHandleResult(op);
         });
       }
     });
@@ -787,7 +818,7 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
 
   // ESC quickly refocuses prompt
   document.addEventListener('keydown', function(ev){
-    if (ev.key === 'Escape' && !document.getElementById('pxa-overlay') && !document.getElementById('wordle-overlay')) focusInputEnd(input);
+    if (ev.key === 'Escape' && !document.getElementById('pxa-overlay') && !document.getElementById('wordle-overlay') && !document.getElementById('bj-overlay')) focusInputEnd(input);
   });
 
   // ===== Pixel Art Editor =====
@@ -978,6 +1009,9 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
   var slAnimating     = false;
   var slPendingResult = null;
   var slHistory       = [];
+
+  // ===== Blackjack =====
+  var bjBalance = 0;
 
   function fmtCr(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
 
@@ -1456,6 +1490,252 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'slots_getstate' }));
     }
+  }
+
+  // ===== Blackjack modal =====
+  function bjCardVal(c) {
+    if (!c) return 0;
+    if (c.rank === 'A') return 11;
+    if (c.rank === 'J' || c.rank === 'Q' || c.rank === 'K') return 10;
+    return parseInt(c.rank, 10);
+  }
+
+  function openBlackjack(data) {
+    if (document.getElementById('bj-overlay')) return;
+    data = data || {};
+    bjBalance = data.balance != null ? data.balance : 0;
+
+    var overlay = document.createElement('div'); overlay.id = 'bj-overlay';
+    var modal = document.createElement('div'); modal.id = 'bj-modal';
+
+    var titleEl = document.createElement('div'); titleEl.id = 'bj-title';
+    titleEl.textContent = 'BLACKJACK'; modal.appendChild(titleEl);
+
+    var subtitleEl = document.createElement('div'); subtitleEl.id = 'bj-subtitle';
+    subtitleEl.textContent = 'simplified rules — not vegas blackjack'; modal.appendChild(subtitleEl);
+
+    var balanceEl = document.createElement('div'); balanceEl.id = 'bj-balance';
+    balanceEl.textContent = 'balance: ' + fmtCr(bjBalance) + ' ₢'; modal.appendChild(balanceEl);
+
+    var dealerArea = document.createElement('div'); dealerArea.id = 'bj-dealer-area';
+    var dealerLabel = document.createElement('div'); dealerLabel.className = 'bj-area-label'; dealerLabel.textContent = 'dealer';
+    var dealerCards = document.createElement('div'); dealerCards.id = 'bj-dealer-cards'; dealerCards.className = 'bj-cards'; dealerCards.textContent = '—';
+    var dealerValEl = document.createElement('div'); dealerValEl.id = 'bj-dealer-val'; dealerValEl.className = 'bj-val';
+    dealerArea.appendChild(dealerLabel); dealerArea.appendChild(dealerCards); dealerArea.appendChild(dealerValEl);
+    modal.appendChild(dealerArea);
+
+    var playerArea = document.createElement('div'); playerArea.id = 'bj-player-area';
+    var playerLabel = document.createElement('div'); playerLabel.className = 'bj-area-label'; playerLabel.textContent = 'you';
+    var playerCards = document.createElement('div'); playerCards.id = 'bj-player-cards'; playerCards.className = 'bj-cards'; playerCards.textContent = '—';
+    var playerValEl = document.createElement('div'); playerValEl.id = 'bj-player-val'; playerValEl.className = 'bj-val';
+    playerArea.appendChild(playerLabel); playerArea.appendChild(playerCards); playerArea.appendChild(playerValEl);
+    modal.appendChild(playerArea);
+
+    var msgEl = document.createElement('div'); msgEl.id = 'bj-msg'; modal.appendChild(msgEl);
+
+    var betRow = document.createElement('div'); betRow.id = 'bj-bet-row';
+    var betInput = document.createElement('input'); betInput.id = 'bj-bet-input'; betInput.type = 'number';
+    betInput.min = 1; betInput.max = bjBalance; betInput.placeholder = 'bet amount (₢)';
+    var dealBtn = document.createElement('button'); dealBtn.id = 'bj-deal-btn'; dealBtn.type = 'button'; dealBtn.textContent = 'DEAL';
+    dealBtn.addEventListener('click', bjDeal);
+    betInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); bjDeal(); } });
+    betRow.appendChild(betInput); betRow.appendChild(dealBtn);
+    modal.appendChild(betRow);
+
+    var actionRow = document.createElement('div'); actionRow.id = 'bj-action-row'; actionRow.style.display = 'none';
+    var hitBtn = document.createElement('button'); hitBtn.id = 'bj-hit-btn'; hitBtn.type = 'button'; hitBtn.className = 'bj-action-btn'; hitBtn.textContent = 'HIT';
+    hitBtn.addEventListener('click', function() { bjAction('hit'); });
+    var standBtn = document.createElement('button'); standBtn.id = 'bj-stand-btn'; standBtn.type = 'button'; standBtn.className = 'bj-action-btn primary'; standBtn.textContent = 'STAND';
+    standBtn.addEventListener('click', function() { bjAction('stand'); });
+    actionRow.appendChild(hitBtn); actionRow.appendChild(standBtn);
+    modal.appendChild(actionRow);
+
+    var resultArea = document.createElement('div'); resultArea.id = 'bj-result-area'; resultArea.style.display = 'none';
+    var resultMsg = document.createElement('div'); resultMsg.id = 'bj-result-msg';
+    var payoutEl = document.createElement('div'); payoutEl.id = 'bj-payout';
+    var againBtn = document.createElement('button'); againBtn.id = 'bj-again-btn'; againBtn.type = 'button'; againBtn.className = 'bj-action-btn primary'; againBtn.textContent = 'PLAY AGAIN';
+    againBtn.addEventListener('click', bjPlayAgain);
+    resultArea.appendChild(resultMsg); resultArea.appendChild(payoutEl); resultArea.appendChild(againBtn);
+    modal.appendChild(resultArea);
+
+    var closeBtn = document.createElement('button'); closeBtn.id = 'bj-close-btn'; closeBtn.type = 'button'; closeBtn.textContent = 'Close';
+    closeBtn.addEventListener('click', closeBlackjack);
+    modal.appendChild(closeBtn);
+
+    function bjShowMsg(msg, color) {
+      var el = document.getElementById('bj-msg');
+      if (!el) return;
+      el.textContent = msg || '';
+      el.style.color = color || '';
+    }
+
+    function bjDeal() {
+      var bi = document.getElementById('bj-bet-input');
+      if (!bi) return;
+      var bet = parseInt(bi.value, 10);
+      if (!bet || bet < 1) { bjShowMsg('enter a bet amount.', 'var(--red)'); return; }
+      if (bet > bjBalance) { bjShowMsg('bet exceeds your balance.', 'var(--red)'); return; }
+      var db2 = document.getElementById('bj-deal-btn'); if (db2) db2.disabled = true;
+      bi.disabled = true;
+      bjShowMsg('');
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'blackjack_deal', bet: bet }));
+      }
+    }
+
+    function bjAction(action) {
+      var h = document.getElementById('bj-hit-btn'); if (h) h.disabled = true;
+      var s = document.getElementById('bj-stand-btn'); if (s) s.disabled = true;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'blackjack_' + action }));
+      }
+    }
+
+    function bjPlayAgain() {
+      var ra = document.getElementById('bj-result-area'); if (ra) ra.style.display = 'none';
+      var ar = document.getElementById('bj-action-row'); if (ar) ar.style.display = 'none';
+      var dc = document.getElementById('bj-dealer-cards'); if (dc) dc.textContent = '—';
+      var dv = document.getElementById('bj-dealer-val'); if (dv) dv.textContent = '';
+      var pc = document.getElementById('bj-player-cards'); if (pc) pc.textContent = '—';
+      var pv = document.getElementById('bj-player-val'); if (pv) pv.textContent = '';
+      var br = document.getElementById('bj-bet-row');
+      if (br) {
+        br.style.display = 'flex';
+        var bi2 = document.getElementById('bj-bet-input'); if (bi2) { bi2.disabled = false; bi2.value = ''; bi2.max = bjBalance; }
+        var db3 = document.getElementById('bj-deal-btn'); if (db3) db3.disabled = bjBalance <= 0;
+      }
+      if (bjBalance <= 0) {
+        bjShowMsg('not enough chrome to play. come back tomorrow for your daily stipend.', 'var(--red)');
+      } else {
+        bjShowMsg('');
+        var bi3 = document.getElementById('bj-bet-input'); if (bi3) setTimeout(function() { bi3.focus(); }, 50);
+      }
+    }
+
+    function bjEsc(e) {
+      if (e.key === 'Escape') { closeBlackjack(); document.removeEventListener('keydown', bjEsc); }
+    }
+    document.addEventListener('keydown', bjEsc);
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    if (bjBalance <= 0) {
+      msgEl.textContent = 'not enough chrome to play. come back tomorrow for your daily stipend.';
+      msgEl.style.color = 'var(--red)';
+      dealBtn.disabled = true;
+      betInput.disabled = true;
+    }
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'blackjack_getstate' }));
+    }
+
+    if (bjBalance > 0) setTimeout(function() { betInput.focus(); }, 50);
+  }
+
+  function blackjackHandleState(op) {
+    if (!document.getElementById('bj-overlay')) return;
+    var betRow    = document.getElementById('bj-bet-row');
+    var actionRow = document.getElementById('bj-action-row');
+    var resultArea = document.getElementById('bj-result-area');
+    var balanceEl = document.getElementById('bj-balance');
+    var msgEl     = document.getElementById('bj-msg');
+
+    if (op.balance != null) {
+      bjBalance = op.balance;
+      if (balanceEl) balanceEl.textContent = 'balance: ' + fmtCr(bjBalance) + ' ₢';
+    }
+
+    if (op.error) {
+      if (msgEl) { msgEl.textContent = op.error; msgEl.style.color = 'var(--red)'; }
+      var db4 = document.getElementById('bj-deal-btn'); if (db4) db4.disabled = bjBalance <= 0;
+      var bi4 = document.getElementById('bj-bet-input'); if (bi4) bi4.disabled = false;
+      return;
+    }
+
+    if (op.status === 'betting') {
+      if (betRow) betRow.style.display = 'flex';
+      if (actionRow) actionRow.style.display = 'none';
+      if (resultArea) resultArea.style.display = 'none';
+      return;
+    }
+
+    if (op.status === 'playing') {
+      if (betRow) betRow.style.display = 'none';
+      if (resultArea) resultArea.style.display = 'none';
+      if (actionRow) actionRow.style.display = 'flex';
+      var h2 = document.getElementById('bj-hit-btn'); if (h2) h2.disabled = false;
+      var s2 = document.getElementById('bj-stand-btn'); if (s2) s2.disabled = false;
+
+      var dc2 = document.getElementById('bj-dealer-cards');
+      var dv2 = document.getElementById('bj-dealer-val');
+      var pc2 = document.getElementById('bj-player-cards');
+      var pv2 = document.getElementById('bj-player-val');
+
+      if (dc2 && Array.isArray(op.dealerVisible)) {
+        dc2.textContent = op.dealerVisible.map(function(c) { return c.rank + c.suit; }).join(' ') + ' ??';
+      }
+      if (dv2 && op.dealerVisible && op.dealerVisible[0]) {
+        dv2.textContent = 'showing: ' + bjCardVal(op.dealerVisible[0]);
+      }
+      if (pc2 && Array.isArray(op.playerHand)) {
+        pc2.textContent = op.playerHand.map(function(c) { return c.rank + c.suit; }).join(' ');
+      }
+      if (pv2 && op.playerValue != null) {
+        pv2.textContent = 'value: ' + op.playerValue;
+      }
+    }
+  }
+
+  function blackjackHandleResult(op) {
+    if (!document.getElementById('bj-overlay')) return;
+    var betRow    = document.getElementById('bj-bet-row');
+    var actionRow = document.getElementById('bj-action-row');
+    var resultArea = document.getElementById('bj-result-area');
+    var resultMsg = document.getElementById('bj-result-msg');
+    var payoutEl  = document.getElementById('bj-payout');
+    var balanceEl = document.getElementById('bj-balance');
+    var dc3 = document.getElementById('bj-dealer-cards');
+    var dv3 = document.getElementById('bj-dealer-val');
+    var pc3 = document.getElementById('bj-player-cards');
+    var pv3 = document.getElementById('bj-player-val');
+
+    if (betRow) betRow.style.display = 'none';
+    if (actionRow) actionRow.style.display = 'none';
+    if (resultArea) { resultArea.style.display = 'flex'; resultArea.style.flexDirection = 'column'; resultArea.style.gap = '6px'; }
+
+    if (op.newBalance != null) {
+      bjBalance = op.newBalance;
+      if (balanceEl) balanceEl.textContent = 'balance: ' + fmtCr(bjBalance) + ' ₢';
+    }
+    if (dc3 && Array.isArray(op.dealerHand)) {
+      dc3.textContent = op.dealerHand.map(function(c) { return c.rank + c.suit; }).join(' ');
+    }
+    if (dv3 && op.dealerValue != null) { dv3.textContent = 'value: ' + op.dealerValue; }
+    if (pc3 && Array.isArray(op.playerHand)) {
+      pc3.textContent = op.playerHand.map(function(c) { return c.rank + c.suit; }).join(' ');
+    }
+    if (pv3 && op.playerValue != null) { pv3.textContent = 'value: ' + op.playerValue; }
+
+    var text = '', color = '';
+    if      (op.result === 'blackjack') { text = 'BLACKJACK! 🃏'; color = 'var(--yellow)'; }
+    else if (op.result === 'win')       { text = 'you win!';              color = 'var(--green)';  }
+    else if (op.result === 'bust')      { text = 'bust! 💀';    color = 'var(--red)';    }
+    else if (op.result === 'lose')      { text = 'dealer wins.';          color = 'var(--red)';    }
+    else if (op.result === 'tie')       { text = 'dealer wins on tie.';   color = 'var(--red)';    }
+
+    if (resultMsg) { resultMsg.textContent = text; resultMsg.style.color = color; }
+    if (payoutEl) {
+      payoutEl.textContent = (op.payout > 0 ? 'won ' + fmtCr(op.payout) + ' ₢  •  ' : '') + 'balance: ' + fmtCr(bjBalance) + ' ₢';
+    }
+  }
+
+  function closeBlackjack() {
+    var overlay = document.getElementById('bj-overlay');
+    if (overlay) overlay.remove();
+    bjBalance = 0;
+    focusInputEnd(input);
   }
 
   // ===== Auth overlay logic =====
