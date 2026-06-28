@@ -1053,10 +1053,16 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
         clearAuthError();
         if (submitEl) submitEl.disabled = true;
         var fp = getBrowserFingerprint();
+        var fpValidCount = [
+          fp.screenResolution && /^\d+x\d+$/.test(fp.screenResolution) && fp.screenResolution !== '0x0',
+          fp.timezone && fp.timezone.length > 0,
+          fp.platform && fp.platform.length > 0,
+        ].filter(Boolean).length;
+        var incompleteFp = fpValidCount < 2;
         fetch('/api/register', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: username, password: password, email: email, signupReason: reason, screenResolution: fp.screenResolution, timezone: fp.timezone, platform: fp.platform })
+          body: JSON.stringify({ username: username, password: password, email: email, signupReason: reason, screenResolution: fp.screenResolution, timezone: fp.timezone, platform: fp.platform, incompleteFp: incompleteFp })
         })
         .then(function(r){ return r.json(); })
         .then(function(data){

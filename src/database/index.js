@@ -200,6 +200,7 @@ CREATE TABLE IF NOT EXISTS users (
   ensureFingerprintColumns(db);
   ensureBanSchema(db);
   ensureLastSeenColumn(db);
+  ensureRegistrationRejectionsSchema(db);
 
   const getSetting = db.prepare('SELECT value FROM settings WHERE key=?');
   const setSetting = db.prepare(`
@@ -655,6 +656,16 @@ CREATE TABLE IF NOT EXISTS users (
      LIMIT ?
   `);
 
+  const insertRegistrationRejection = db.prepare(`
+    INSERT INTO registration_rejections (created_at, ip, user_agent, username) VALUES (?, ?, ?, ?)
+  `);
+  const listRegistrationRejections = db.prepare(`
+    SELECT id, created_at, ip, user_agent, username
+      FROM registration_rejections
+     ORDER BY created_at DESC
+     LIMIT ?
+  `);
+
   const insertPixelArt    = db.prepare(`INSERT INTO pixel_art (name, creator_username, pixel_data, created_at) VALUES (?, ?, ?, ?)`);
   const listPixelArt      = db.prepare(`SELECT id, name, creator_username, created_at, pixel_data FROM pixel_art ORDER BY created_at DESC LIMIT 200`);
   const getPixelArtByName = db.prepare('SELECT * FROM pixel_art WHERE name = ?');
@@ -867,6 +878,8 @@ CREATE TABLE IF NOT EXISTS users (
     countNewStatusPosts,
     countNewPixelArt,
     listRecentUsers,
+    insertRegistrationRejection,
+    listRegistrationRejections,
     insertPixelArt,
     listPixelArt,
     getPixelArtByName,
@@ -1044,6 +1057,19 @@ function ensureBanSchema(db){
       dm_sent          INTEGER NOT NULL DEFAULT 0,
       pixel_art        INTEGER NOT NULL DEFAULT 0
     );
+  `);
+}
+
+function ensureRegistrationRejectionsSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS registration_rejections (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at INTEGER NOT NULL,
+      ip         TEXT,
+      user_agent TEXT,
+      username   TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_reg_rejections_created ON registration_rejections(created_at DESC);
   `);
 }
 

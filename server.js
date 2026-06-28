@@ -200,6 +200,8 @@ const {
   countNewStatusPosts,
   countNewPixelArt,
   listRecentUsers,
+  insertRegistrationRejection,
+  listRegistrationRejections,
 } = statements;
 
 const {
@@ -211,6 +213,12 @@ const {
 } = helpers;
 
 const PRIVATE_IP_RE = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|::1$|fc00:|fd)/i;
+
+// Returns true when the IP gives us no useful identity signal (internal/loopback/unset).
+function isUnresolvableIp(ip) {
+  if (!ip) return true;
+  return /^(172\.|127\.|10\.|192\.168\.|::1$|::ffff:127\.|fc00:|fd)/i.test(ip);
+}
 
 function extractClientIp(req) {
   const xff = req.headers['x-forwarded-for'];
@@ -586,6 +594,7 @@ function cmdHelp(api, state){
     api.print('  /announce <text>             Post a new announcement', 'cyan');
     api.print('  /removeannounce <id>         Remove an announcement', 'cyan');
     api.print('  /newusers [n]                Most recent registrations with ban-list match check (default 20, max 50)', 'cyan');
+    api.print('  /rejections                  Last 20 blocked registration attempts (no valid IP + incomplete fingerprint)', 'cyan');
     api.print('  /ban <username>              Ban user (deletes content, blocks IP + fingerprint)', 'cyan');
     api.print('  /banlist                     Show all ban list entries', 'cyan');
     api.print('  /unban <id>                  Remove a ban list entry by id', 'cyan');
@@ -2253,6 +2262,29 @@ function cmdNewUsers(api, state, args) {
   api.hr();
 }
 
+/* ======================= Admin: registration rejections ======================= */
+function cmdRejections(api, state) {
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
+
+  const rows = listRegistrationRejections.all(20);
+  api.batch(b => {
+    b.hr();
+    b.print('== Last 20 registration rejections ==', 'magenta');
+    if (!rows.length) {
+      b.print('No rejections logged.', 'dim');
+    } else {
+      for (const r of rows) {
+        const stamp = new Date(r.created_at * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+        const ua    = (r.user_agent || '').slice(0, 80);
+        b.print(`${stamp}  ${r.username || '(none)'}`, 'cyan');
+        b.print(`  ip:${r.ip || '(none)'}  ua:${ua || '—'}`, 'dim');
+      }
+    }
+    b.hr();
+  });
+}
+
 /* ======================= Admin ban commands ======================= */
 function cmdBan(api, state, args) {
   if (!requireAuth(api, state)) return;
@@ -2507,6 +2539,7 @@ function handleGlobalCommand(cmd, api, state, args){
 
     /* Admin ban / blacklist */
     case 'newusers':    cmdNewUsers(api, state, args); return true;
+    case 'rejections':  cmdRejections(api, state); return true;
     case 'ban':         cmdBan(api, state, args); return true;
     case 'banlist':     cmdBanList(api, state); return true;
     case 'unban':       cmdUnban(api, state, args); return true;
@@ -2923,6 +2956,20 @@ app.post('/api/register', (req, res) => {
   }
   if (fp.fpHash && checkBanByFingerprint.get(fp.fpHash)) {
     return res.status(403).json({ ok: false, error: 'Registration is not available.' });
+  }
+
+  // Registration guard: block only when BOTH IP is internal/unresolvable AND client
+  // signals incomplete fingerprint. Either signal alone lets the request through.
+  const ipUnresolvable = isUnresolvableIp(fp.ip);
+  const clientIncompleteFp = req.body && req.body.incompleteFp === true;
+  if (ipUnresolvable && clientIncompleteFp) {
+    const rawIp = fp.ip || req.socket?.remoteAddress || req.ip || '';
+    try {
+      insertRegistrationRejection.run(nowEpoch(), rawIp, fp.userAgent || '', username);
+    } catch (e) {
+      console.error('[register] rejection log failed:', e && e.message);
+    }
+    return res.status(403).json({ ok: false, error: 'Registration is currently unavailable. Please try again with a standard browser and connection.' });
   }
 
   const result = createUser(username, password);
