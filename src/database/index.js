@@ -201,6 +201,8 @@ CREATE TABLE IF NOT EXISTS users (
   ensureBanSchema(db);
   ensureLastSeenColumn(db);
   ensureRegistrationRejectionsSchema(db);
+  ensureWordleSchema(db);
+  seedWordleWords(db);
 
   const getSetting = db.prepare('SELECT value FROM settings WHERE key=?');
   const setSetting = db.prepare(`
@@ -666,6 +668,55 @@ CREATE TABLE IF NOT EXISTS users (
      LIMIT ?
   `);
 
+  /* Wordle */
+  const wordleGetDaily        = db.prepare('SELECT word FROM wordle_daily WHERE date = ?');
+  const wordleSetDaily        = db.prepare('INSERT OR IGNORE INTO wordle_daily (date, word) VALUES (?, ?)');
+  const wordleGetRandomWord   = db.prepare(`
+    SELECT word FROM wordle_words
+     WHERE word NOT IN (SELECT word FROM wordle_daily WHERE date >= date('now', '-30 days'))
+     ORDER BY RANDOM() LIMIT 1
+  `);
+  const wordleCheckWord       = db.prepare('SELECT 1 AS found FROM wordle_words WHERE word = ?');
+  const wordleGetGuesses      = db.prepare(`
+    SELECT guess, result_json, guess_num FROM wordle_guesses
+     WHERE username = ? AND date = ? ORDER BY guess_num ASC
+  `);
+  const wordleCountGuesses    = db.prepare('SELECT COUNT(1) AS n FROM wordle_guesses WHERE username = ? AND date = ?');
+  const wordleInsertGuess     = db.prepare(`
+    INSERT OR IGNORE INTO wordle_guesses (username, date, guess_num, guess, result_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  const wordleGetResult       = db.prepare('SELECT solved, guesses FROM wordle_results WHERE username = ? AND date = ?');
+  const wordleUpsertResult    = db.prepare(`
+    INSERT INTO wordle_results (username, date, solved, guesses, created_at) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(username, date) DO UPDATE SET solved = excluded.solved, guesses = excluded.guesses
+  `);
+  const wordleGetStreak       = db.prepare('SELECT current_streak, best_streak, last_played_date FROM wordle_streaks WHERE username = ?');
+  const wordleUpsertStreak    = db.prepare(`
+    INSERT INTO wordle_streaks (username, current_streak, best_streak, last_played_date) VALUES (?, ?, ?, ?)
+    ON CONFLICT(username) DO UPDATE SET
+      current_streak   = excluded.current_streak,
+      best_streak      = excluded.best_streak,
+      last_played_date = excluded.last_played_date
+  `);
+  const wordleLeaderCurrent   = db.prepare(`
+    SELECT username, current_streak FROM wordle_streaks
+     WHERE current_streak > 0 ORDER BY current_streak DESC, username ASC LIMIT 10
+  `);
+  const wordleLeaderBest      = db.prepare(`
+    SELECT username, best_streak FROM wordle_streaks
+     WHERE best_streak > 0 ORDER BY best_streak DESC, username ASC LIMIT 10
+  `);
+  const wordleGetTodaySolvers = db.prepare(`
+    SELECT username, guesses FROM wordle_results
+     WHERE date = ? AND solved = 1 ORDER BY guesses ASC, created_at ASC LIMIT 20
+  `);
+  const gameFeedInsert        = db.prepare('INSERT INTO game_feed (username, event_type, message, created_at) VALUES (?, ?, ?, ?)');
+  const gameFeedList          = db.prepare(`
+    SELECT username, event_type, message, created_at FROM game_feed
+     ORDER BY created_at DESC LIMIT ?
+  `);
+
   const insertPixelArt    = db.prepare(`INSERT INTO pixel_art (name, creator_username, pixel_data, created_at) VALUES (?, ?, ?, ?)`);
   const listPixelArt      = db.prepare(`SELECT id, name, creator_username, created_at, pixel_data FROM pixel_art ORDER BY created_at DESC LIMIT 200`);
   const getPixelArtByName = db.prepare('SELECT * FROM pixel_art WHERE name = ?');
@@ -880,6 +931,22 @@ CREATE TABLE IF NOT EXISTS users (
     listRecentUsers,
     insertRegistrationRejection,
     listRegistrationRejections,
+    wordleGetDaily,
+    wordleSetDaily,
+    wordleGetRandomWord,
+    wordleCheckWord,
+    wordleGetGuesses,
+    wordleCountGuesses,
+    wordleInsertGuess,
+    wordleGetResult,
+    wordleUpsertResult,
+    wordleGetStreak,
+    wordleUpsertStreak,
+    wordleLeaderCurrent,
+    wordleLeaderBest,
+    wordleGetTodaySolvers,
+    gameFeedInsert,
+    gameFeedList,
     insertPixelArt,
     listPixelArt,
     getPixelArtByName,
@@ -1071,6 +1138,161 @@ function ensureRegistrationRejectionsSchema(db) {
     );
     CREATE INDEX IF NOT EXISTS idx_reg_rejections_created ON registration_rejections(created_at DESC);
   `);
+}
+
+function ensureWordleSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS wordle_words (
+      id   INTEGER PRIMARY KEY AUTOINCREMENT,
+      word TEXT NOT NULL UNIQUE
+    );
+
+    CREATE TABLE IF NOT EXISTS wordle_daily (
+      id   INTEGER PRIMARY KEY AUTOINCREMENT,
+      date TEXT NOT NULL UNIQUE,
+      word TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS wordle_guesses (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      username    TEXT    NOT NULL,
+      date        TEXT    NOT NULL,
+      guess_num   INTEGER NOT NULL,
+      guess       TEXT    NOT NULL,
+      result_json TEXT    NOT NULL,
+      created_at  INTEGER NOT NULL,
+      UNIQUE(username, date, guess_num)
+    );
+    CREATE INDEX IF NOT EXISTS idx_wordle_guesses_udate ON wordle_guesses(username, date);
+
+    CREATE TABLE IF NOT EXISTS wordle_results (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      username   TEXT    NOT NULL,
+      date       TEXT    NOT NULL,
+      solved     INTEGER NOT NULL DEFAULT 0,
+      guesses    INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      UNIQUE(username, date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_wordle_results_date ON wordle_results(date);
+
+    CREATE TABLE IF NOT EXISTS wordle_streaks (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      username         TEXT    NOT NULL UNIQUE,
+      current_streak   INTEGER NOT NULL DEFAULT 0,
+      best_streak      INTEGER NOT NULL DEFAULT 0,
+      last_played_date TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS game_feed (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      username   TEXT    NOT NULL,
+      event_type TEXT    NOT NULL,
+      message    TEXT    NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_game_feed_created ON game_feed(created_at DESC);
+  `);
+}
+
+const WORDLE_WORD_LIST = [
+  'about','abuse','acute','admit','adopt','adult','after','again','agent','agree',
+  'ahead','alarm','album','alert','alike','alien','align','alive','alley','allow',
+  'alone','along','altar','alter','angel','anger','angle','ankle','apart','apple',
+  'apply','arena','argue','arise','armor','aroma','arose','array','aside','asset',
+  'atlas','attic','audio','audit','awful',
+  'baker','basic','basis','batch','beach','beard','beast','bench','bible','birth',
+  'black','blade','blame','blank','blaze','bleed','blend','bless','blind','block',
+  'blood','bloom','blown','bluff','board','bonus','boost','booth','botch','bound',
+  'brain','brave','bread','break','breed','brick','bride','brief','bring','broad',
+  'broke','brook','brown','brush','brute','buddy','build','built','bulge','bunch',
+  'burnt','buyer',
+  'cabin','cable','camel','candy','carry','carve','catch','cause','chalk','champ',
+  'chain','chair','chaos','charm','chase','cheap','check','cheek','chess','chest',
+  'child','china','choir','chose','civic','civil','claim','clamp','clasp','clash',
+  'class','clean','clear','cleat','cliff','climb','cling','clock','clone','close',
+  'cloth','cloud','clump','coach','coast','cobra','comet','comic','coral','count',
+  'court','cover','crack','craft','cramp','crawl','crazy','cream','creek','crime',
+  'crimp','crisp','cross','crowd','crown','crush','crypt','curve','cycle',
+  'daily','dance','daisy','death','decay','delay','delta','depot','depth','dirty',
+  'dizzy','dodge','donor','dough','doubt','draft','drain','drama','drank','drawn',
+  'dream','dress','drink','drive','drove','drown','drums','dryer','dwarf','dwelt',
+  'eager','eagle','early','earth','eerie','eight','elect','elite','ember','empty',
+  'enjoy','enter','entry','equal','epoch','error','essay','event','evoke','exact',
+  'expel','extra',
+  'fable','faint','fairy','faith','false','fancy','fault','favor','feast','fence',
+  'ferry','fever','fiber','field','fifth','fifty','fight','final','fired','first',
+  'fixed','fjord','flare','flash','flame','fleet','flesh','flock','flood','floor',
+  'fluid','flute','focus','force','forge','found','freak','fraud','fresh','front',
+  'frost','frown','fruit','funny',
+  'ghost','giant','given','glare','glide','gloom','glory','gloss','glove','grace',
+  'grade','grain','grand','grasp','grass','grave','great','green','grief','grind',
+  'groan','group','grove','grown','gruff','guard','guess','guild','guile','guise',
+  'happy','harsh','haste','haunt','haven','heart','heavy','hedge','hence','herbs',
+  'hinge','hippo','hoist','holly','honey','honor','horse','hotel','house','human',
+  'humor','hunch','hurry',
+  'ideal','image','imply','inner','irate','ivory',
+  'jaunt','jewel','joker','joust','judge','juice','juicy',
+  'karma','knack','knave','kneel','knife','knock','known',
+  'label','lance','lapse','latch','laugh','layer','leapt','learn','leave','legal',
+  'lemon','level','light','limit','linen','liner','lingo','liver','local','lodge',
+  'logic','loose','loyal','lucky','lunar','lurch','lusty',
+  'magic','major','manor','march','match','mayor','maxim','merit','mercy','metal',
+  'might','mirth','model','money','month','moral','mount','mouse','muddy','mulch',
+  'music',
+  'naive','naval','nerve','night','noble','noise','north','notch','nudge','nurse',
+  'nymph',
+  'often','olive','onset','optic','orbit','order','other','outer','overt','owner',
+  'ozone',
+  'paint','panel','paper','parch','patch','pause','peace','pearl','penny','perch',
+  'petty','phase','phone','photo','piano','piece','pilot','pixel','pizza','pivot',
+  'place','plain','plane','plank','plant','plate','plaza','pluck','plumb','plume',
+  'point','poker','polar','pouch','power','prank','prawn','press','price','pride',
+  'prime','print','prism','prize','probe','proof','prove','pulse','pupil',
+  'qualm','quake','queen','quell','quest','quick','quiet','quirk','quote',
+  'radar','radio','raise','ranch','range','rapid','raven','reach','realm','rebel',
+  'reign','relay','relic','renew','repay','resin','reset','rhyme','rider','ridge',
+  'right','rigid','ripen','risky','rivet','river','roast','robot','rocky','rogue',
+  'rouge','rough','rouse','round','route','rover','royal','ruddy','ruler','rusty',
+  'salve','salvo','sandy','satin','sauce','savvy','scalp','scale','scare','scarf',
+  'scary','scene','scope','score','scoot','scorn','scout','scrub','sense','serum',
+  'serve','seven','shack','shady','shaft','shake','shame','shard','shape','share',
+  'sheep','sheen','sheer','shelf','shift','shirt','short','shout','shove','shoal',
+  'shrug','shunt','siege','sight','silky','siren','sixth','sixty','skill','slave',
+  'sleek','sleet','sleep','slice','slide','slosh','slope','slump','small','smart',
+  'smash','smear','smell','smelt','smile','smirk','smoke','smoky','snack','snail',
+  'sneer','sniff','snore','snort','snout','sober','solid','solar','solve','south',
+  'space','spare','spank','spark','spawn','speak','speck','speed','spend','spice',
+  'spicy','spine','spill','spire','split','spoke','spoon','sport','spray','squad',
+  'stage','stain','stalk','stall','stand','stark','stash','start','state','stead',
+  'steam','steak','steel','steed','steep','steer','stern','stick','stiff','still',
+  'stomp','stone','stool','stoop','store','storm','stout','story','stove','straw',
+  'stray','strip','strum','strut','stunt','stuff','style','suave','sugar','sunny',
+  'super','surge','sweet','swamp','swear','sweep','swell','swirl','swoop','sword',
+  'table','tacky','taint','talon','tango','tangy','tardy','tempo','terse','theft',
+  'theme','thick','thief','thing','think','third','thorn','those','threw','thump',
+  'tidal','tired','title','tithe','toast','token','touch','tough','toxin','track',
+  'trade','trail','train','trash','treat','trend','trial','tribe','trout','trove',
+  'truck','truce','trunk','trust','truth','tulip','tuner','tunic','turbo','tutor',
+  'tweak','tweed','twice','twirl','twist',
+  'under','unify','union','unite','unity','until','upper','upset','urban','utter',
+  'valet','valve','vapor','vaunt','vault','venom','verge','verse','video','vigor',
+  'viral','virus','visor','vital','vivid','vixen','vocal','vodka','vogue','voter',
+  'vouch',
+  'wacky','waltz','watch','water','weary','weird','weave','wedge','wheel','where',
+  'whiff','while','whirl','whisk','white','whole','wield','windy','witch','woman',
+  'wonky','world','worst','worth','wound','wrath','wreak','wreck','wring','wrist',
+  'write','wrong','wrote',
+  'yacht','yearn','yeast','yield','young','youth',
+  'zebra','zesty',
+];
+
+function seedWordleWords(db) {
+  const count = db.prepare('SELECT COUNT(1) AS n FROM wordle_words').get().n;
+  if (count > 0) return;
+  const insert = db.prepare('INSERT OR IGNORE INTO wordle_words (word) VALUES (?)');
+  const tx = db.transaction((words) => { for (const w of words) insert.run(w); });
+  tx(WORDLE_WORD_LIST);
 }
 
 module.exports = {

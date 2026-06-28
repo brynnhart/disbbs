@@ -202,6 +202,21 @@ const {
   listRecentUsers,
   insertRegistrationRejection,
   listRegistrationRejections,
+  wordleGetDaily,
+  wordleSetDaily,
+  wordleGetRandomWord,
+  wordleGetGuesses,
+  wordleCountGuesses,
+  wordleInsertGuess,
+  wordleGetResult,
+  wordleUpsertResult,
+  wordleGetStreak,
+  wordleUpsertStreak,
+  wordleLeaderCurrent,
+  wordleLeaderBest,
+  wordleGetTodaySolvers,
+  gameFeedInsert,
+  gameFeedList,
 } = statements;
 
 const {
@@ -583,8 +598,9 @@ function cmdHelp(api, state){
   api.print('  /art       Browse the pixel art library', 'cyan');
   api.print('  /editart <name or id>    Edit your own pixel art', 'cyan');
   api.print('  /deleteart <name or id>  Delete pixel art (yours; admins can delete any)', 'cyan');
-  api.print('  /games     Games menu', 'cyan');
-  api.print('  /wordle    Daily word puzzle', 'cyan');
+  api.print('  /games        Games menu', 'cyan');
+  api.print('  /wordle       Daily word puzzle — same word for everyone, resets at midnight UTC', 'cyan');
+  api.print('  /wordle stats Leaderboard and today\'s results', 'cyan');
 
   if (state && state.isAdmin){
     api.hr(); api.print('Admin:', 'yellow');
@@ -1703,15 +1719,79 @@ function cmdRemoveNews(api, state, args){
   }
 }
 
+/* ======================= Wordle helpers ======================= */
+function getWordleDate() {
+  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD UTC
+}
+
+function getYesterday() {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
+function getDailyWord() {
+  const today = getWordleDate();
+  const row = wordleGetDaily.get(today);
+  if (row) return row.word;
+  const picked = wordleGetRandomWord.get();
+  if (!picked) return null;
+  wordleSetDaily.run(today, picked.word);
+  return picked.word;
+}
+
+function scoreGuess(guess, answer) {
+  const result = new Array(5).fill('absent');
+  const answerChars = answer.split('');
+  const used = new Array(5).fill(false);
+  for (let i = 0; i < 5; i++) {
+    if (guess[i] === answerChars[i]) { result[i] = 'correct'; used[i] = true; }
+  }
+  for (let i = 0; i < 5; i++) {
+    if (result[i] === 'correct') continue;
+    for (let j = 0; j < 5; j++) {
+      if (!used[j] && guess[i] === answerChars[j]) { result[i] = 'present'; used[j] = true; break; }
+    }
+  }
+  return result.map((r, i) => ({ letter: guess[i], result: r }));
+}
+
+function buildWordleEmojiGrid(guessRows) {
+  return guessRows.map(g => {
+    const parsed = typeof g.result_json === 'string' ? JSON.parse(g.result_json) : g.result;
+    return parsed.map(r => r.result === 'correct' ? '🟩' : r.result === 'present' ? '🟨' : '⬛').join('');
+  }).join('\n');
+}
+
 /* ======================= Games ======================= */
 function renderGames(api, state){
   if (!requireAuth(api, state)) return;
+  const today = getWordleDate();
+  const streakRow  = wordleGetStreak.get(state.username);
+  const resultRow  = wordleGetResult.get(state.username, today);
+  const feedRows   = gameFeedList.all(10);
+  const streak     = streakRow ? streakRow.current_streak : 0;
+  const playedToday = !!resultRow;
+
   api.batch(b=>{
     b.clear();
     b.setInputLimit(null);
-    b.print('== Games ==', 'magenta'); b.hr();
-    b.print('  /wordle    daily word puzzle — new word every day, same for everyone', 'cyan');
+    b.print('── games ──', 'magenta');
     b.hr();
+    const wordleStatus = playedToday
+      ? (resultRow.solved ? `✓ played today (solved in ${resultRow.guesses})` : '✓ played today')
+      : `your streak: ${streak} day${streak !== 1 ? 's' : ''}  •  /wordle stats for leaderboard`;
+    b.print('  /wordle    daily word puzzle — new word every day, same for everyone', 'cyan');
+    b.print(`             ${wordleStatus}`, playedToday ? 'green' : 'dim');
+    b.hr();
+    if (feedRows.length) {
+      b.print('── recent activity ──', 'dim');
+      for (const f of feedRows) {
+        const ago = new Date(f.created_at * 1000).toISOString().replace('T',' ').slice(0,16)+' UTC';
+        b.print(`  ${f.message}`, 'cyan');
+      }
+      b.hr();
+    }
     b.print('more games coming soon.', 'dim');
     b.print('/leave to return to the main menu', 'dim');
   });
@@ -1724,9 +1804,127 @@ function gamesHandleCommand(cmd, api, state){
   return false;
 }
 
-function cmdWordle(api, state){
+function cmdWordle(api, state, args){
   if (!requireAuth(api, state)) return;
-  api.print('Wordle coming soon.', 'dim');
+  const sub = (args || '').trim().toLowerCase();
+
+  if (sub === 'stats') {
+    const today = getWordleDate();
+    api.batch(b => {
+      b.hr();
+      b.print('== Wordle Leaderboard ==', 'magenta');
+      b.print('Current streaks:', 'yellow');
+      const cur = wordleLeaderCurrent.all();
+      if (!cur.length) { b.print('  No streaks yet.', 'dim'); }
+      else { cur.forEach((r,i) => b.print(`  ${i+1}. ${r.username}  ${r.current_streak} day${r.current_streak !== 1 ? 's' : ''}`, 'cyan')); }
+      b.hr();
+      b.print('Best streaks ever:', 'yellow');
+      const best = wordleLeaderBest.all();
+      if (!best.length) { b.print('  No records yet.', 'dim'); }
+      else { best.forEach((r,i) => b.print(`  ${i+1}. ${r.username}  ${r.best_streak} day${r.best_streak !== 1 ? 's' : ''}`, 'cyan')); }
+      b.hr();
+      b.print(`Today's solvers (${today}):`, 'yellow');
+      const solvers = wordleGetTodaySolvers.all(today);
+      if (!solvers.length) { b.print('  Nobody has solved it yet. Be the first!', 'dim'); }
+      else { solvers.forEach((r,i) => b.print(`  ${i+1}. ${r.username}  in ${r.guesses} guess${r.guesses !== 1 ? 'es' : ''}`, 'cyan')); }
+      b.hr();
+    });
+    return;
+  }
+
+  if (sub !== '') {
+    api.print('usage: /wordle — play today\'s puzzle', 'dim');
+    api.print('       /wordle stats — leaderboard and today\'s results', 'dim');
+    return;
+  }
+
+  const today = getWordleDate();
+  const dailyWord = getDailyWord();
+  if (!dailyWord) { api.print('Wordle is unavailable right now.', 'red'); return; }
+
+  const guessRows = wordleGetGuesses.all(state.username, today);
+  const resultRow = wordleGetResult.get(state.username, today);
+  const streakRow = wordleGetStreak.get(state.username);
+
+  const guesses = guessRows.map(g => ({
+    guess: g.guess,
+    result: JSON.parse(g.result_json),
+  }));
+
+  sendOps(api.ws, [{
+    op: 'openWordle',
+    state: {
+      guesses,
+      gameOver:   !!resultRow,
+      solved:     resultRow ? !!resultRow.solved : false,
+      dailyWord:  resultRow ? dailyWord : null,
+      streak:     streakRow ? streakRow.current_streak : 0,
+      bestStreak: streakRow ? streakRow.best_streak : 0,
+    },
+  }]);
+}
+
+function handleWordleGuess(msg, api, state) {
+  if (!requireAuth(api, state)) return;
+  const guess = typeof msg.guess === 'string' ? msg.guess.trim().toLowerCase() : '';
+
+  if (!/^[a-z]{5}$/.test(guess)) {
+    sendOps(api.ws, [{ op: 'wordleError', message: 'Guess must be a 5-letter word.' }]); return;
+  }
+  const today = getWordleDate();
+  const dailyWord = getDailyWord();
+  if (!dailyWord) { sendOps(api.ws, [{ op: 'wordleError', message: 'Wordle is unavailable.' }]); return; }
+
+  if (wordleGetResult.get(state.username, today)) {
+    sendOps(api.ws, [{ op: 'wordleError', message: 'You have already played today.' }]); return;
+  }
+
+  const guessNum = wordleCountGuesses.get(state.username, today).n + 1;
+  if (guessNum > 6) {
+    sendOps(api.ws, [{ op: 'wordleError', message: 'No guesses remaining.' }]); return;
+  }
+
+  const result = scoreGuess(guess, dailyWord);
+  wordleInsertGuess.run(state.username, today, guessNum, guess, JSON.stringify(result), nowEpoch());
+
+  const solved = guess === dailyWord;
+  const failed = !solved && guessNum === 6;
+
+  if (solved || failed) {
+    wordleUpsertResult.run(state.username, today, solved ? 1 : 0, guessNum, nowEpoch());
+
+    const streakRow = wordleGetStreak.get(state.username);
+    let cur  = streakRow ? streakRow.current_streak : 0;
+    let best = streakRow ? streakRow.best_streak    : 0;
+    if (solved) {
+      cur = (streakRow && streakRow.last_played_date === getYesterday()) ? cur + 1 : 1;
+      if (cur > best) best = cur;
+    } else {
+      cur = 0;
+    }
+    wordleUpsertStreak.run(state.username, cur, best, today);
+
+    const allRows = wordleGetGuesses.all(state.username, today);
+    const emojiGrid = buildWordleEmojiGrid(allRows);
+    const msg = solved
+      ? `${state.username} solved today's Wordle in ${guessNum} guess${guessNum !== 1 ? 'es' : ''}! 🟩`
+      : `${state.username} was defeated by today's Wordle 💀`;
+    try { gameFeedInsert.run(state.username, solved ? 'wordle_solved' : 'wordle_failed', msg, nowEpoch()); } catch {}
+
+    sendOps(api.ws, [{
+      op:        'wordleGuessResult',
+      result,
+      guessNum,
+      solved,
+      failed,
+      dailyWord,
+      streak:    cur,
+      bestStreak: best,
+      emojiGrid: `DIS Wordle ${today}\n${guessNum}/6\n${emojiGrid}`,
+    }]);
+  } else {
+    sendOps(api.ws, [{ op: 'wordleGuessResult', result, guessNum, solved: false, failed: false }]);
+  }
 }
 
 /* ======================= Profiles (/aboutme, /profile) ======================= */
@@ -2484,8 +2682,8 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'deleteart':    cmdDeleteArt(api, state, args); return true;
 
     /* Games */
-    case 'games':        renderGames(api, state); return true;
-    case 'wordle':       cmdWordle(api, state); return true;
+    case 'games':    renderGames(api, state); return true;
+    case 'wordle':   cmdWordle(api, state, args[0]); return true;
 
     /* DMs / Suggestions */
     case 'post':         cmdPost(api, state, args); return true;
@@ -2650,6 +2848,7 @@ wss.on('connection', (ws, req) => {
 
     if (msg.type === 'save_pixel_art')   { handleSavePixelArt(msg, api, state); return; }
     if (msg.type === 'update_pixel_art') { handleUpdatePixelArt(msg, api, state); return; }
+    if (msg.type === 'wordle_guess')     { handleWordleGuess(msg, api, state); return; }
     if (msg.type !== 'input') return;
 
     const raw = String(msg.raw || '').trim();
@@ -2999,6 +3198,17 @@ app.post('/api/register', (req, res) => {
     expMs: Date.now() + AUTH_TOKEN_TTL_MS,
   });
   res.json({ ok: true, token: authToken, username: user.username });
+});
+
+/* ======================= Wordle REST endpoints ======================= */
+app.get('/api/wordle/leaderboard', (req, res) => {
+  const today = getWordleDate();
+  res.json({
+    currentStreaks: wordleLeaderCurrent.all(),
+    bestStreaks:    wordleLeaderBest.all(),
+    todaySolvers:  wordleGetTodaySolvers.all(today),
+    date:          today,
+  });
 });
 
 /* ======================= Password recovery ======================= */

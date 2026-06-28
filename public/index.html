@@ -86,6 +86,45 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
 .pxa-action-btn:hover{border-color:#555}
 .pxa-action-btn.primary:hover{background:rgba(25,195,195,.1)}
 
+/* ===== Wordle modal ===== */
+#wordle-overlay{position:fixed;inset:0;background:rgba(0,0,0,.92);display:flex;align-items:center;justify-content:center;z-index:1000;padding:12px;box-sizing:border-box}
+#wordle-modal{--tile:clamp(40px,11vw,52px);--key:clamp(22px,7vw,30px);background:#0a0a0a;border:1px solid #222;border-radius:6px;display:flex;flex-direction:column;gap:10px;padding:16px 14px;max-height:98vh;overflow:auto;width:min(360px,98vw);box-sizing:border-box}
+#wordle-title{color:var(--cyan);font-weight:bold;font-size:13px;letter-spacing:1px;text-align:center}
+#wordle-streak{text-align:center;font-size:11px;color:#888;margin-top:-4px}
+#wordle-grid{display:flex;flex-direction:column;gap:5px;align-items:center}
+.wl-row{display:flex;gap:5px}
+.wl-tile{width:var(--tile);height:var(--tile);border:1px solid #2a2a2a;display:flex;align-items:center;justify-content:center;font-size:clamp(16px,4.5vw,22px);font-weight:bold;text-transform:uppercase;color:var(--fg);box-sizing:border-box;transition:background .15s,border-color .15s}
+.wl-tile.correct{background:#2fd44f;border-color:#2fd44f;color:#000}
+.wl-tile.present{background:#e3c600;border-color:#e3c600;color:#000}
+.wl-tile.absent{background:#1e1e1e;border-color:#1e1e1e;color:#666}
+.wl-tile.filled{border-color:#555}
+#wordle-msg{text-align:center;font-size:12px;min-height:16px;color:var(--red)}
+#wordle-input-row{display:flex;gap:6px}
+#wordle-guess-input{background:#0c0c0c;color:var(--fg);border:1px solid #2a2a2a;border-radius:4px;padding:8px 10px;font:inherit;font-size:15px;flex:1;outline:none;caret-color:var(--cyan);text-transform:uppercase;letter-spacing:4px;min-width:0}
+#wordle-guess-input:focus{border-color:#444}
+#wordle-submit-btn{appearance:none;background:rgba(25,195,195,.1);border:1px solid var(--cyan);color:var(--cyan);border-radius:4px;padding:8px 12px;cursor:pointer;font:inherit;font-size:12px;white-space:nowrap}
+#wordle-submit-btn:disabled{opacity:.35;cursor:not-allowed}
+#wordle-keyboard{display:flex;flex-direction:column;gap:5px;align-items:center}
+.wl-kb-row{display:flex;gap:4px;justify-content:center}
+.wl-key{appearance:none;background:#1e1e1e;border:1px solid #2a2a2a;color:var(--fg);border-radius:4px;padding:0;cursor:pointer;font:inherit;font-size:clamp(10px,3vw,13px);font-weight:bold;width:var(--key);height:calc(var(--key)*1.35);display:flex;align-items:center;justify-content:center;text-transform:uppercase;flex-shrink:0}
+.wl-key.wide{width:calc(var(--key)*1.6);font-size:clamp(9px,2.5vw,11px)}
+.wl-key.correct{background:#2fd44f;border-color:#2fd44f;color:#000}
+.wl-key.present{background:#e3c600;border-color:#e3c600;color:#000}
+.wl-key.absent{background:#111;border-color:#111;color:#444}
+#wordle-result{display:none;flex-direction:column;gap:8px;align-items:center;text-align:center}
+#wordle-result.show{display:flex}
+#wordle-result-msg{font-size:13px;font-weight:bold}
+#wordle-share-text{background:#111;border:1px solid #222;border-radius:4px;padding:10px;font-size:13px;white-space:pre;line-height:1.6;cursor:pointer;color:var(--fg);width:100%;box-sizing:border-box;text-align:left;font-family:inherit}
+#wordle-share-text:hover{border-color:#333}
+.wl-copy-hint{font-size:10px;color:#555}
+#wordle-footer{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}
+.wl-footer-btn{appearance:none;border:1px solid #2a2a2a;background:#111;color:var(--fg);border-radius:4px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px}
+.wl-footer-btn:hover{border-color:#444}
+#wordle-stats-panel{display:none;flex-direction:column;gap:6px}
+#wordle-stats-panel.show{display:flex}
+#wordle-stats-panel h3{margin:0;font-size:12px;color:var(--yellow);font-weight:bold;letter-spacing:.5px}
+.wl-stat-row{font-size:12px;color:var(--cyan)}
+
 /* ===== Auth overlay ===== */
 #auth-overlay{position:fixed;inset:0;z-index:2000;background:#000;display:flex;flex-direction:column;align-items:center;overflow-y:auto;padding:0 0 48px;box-sizing:border-box}
 #auth-splash{width:100%;align-self:stretch;flex-shrink:0}
@@ -577,6 +616,9 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
           else if (op.op === 'auth') op_auth(op.token);
           else if (op.op === 'openUrl') op_openUrl(op.url);
           else if (op.op === 'openPixelEditor') openPixelEditor(op.id || null, op.name || null, op.pixel_data || null);
+          else if (op.op === 'openWordle') openWordle(op.state || {});
+          else if (op.op === 'wordleGuessResult') wordleHandleGuessResult(op);
+          else if (op.op === 'wordleError') wordleShowError(op.message || 'Error.');
         });
       }
     });
@@ -725,7 +767,7 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
 
   // ESC quickly refocuses prompt
   document.addEventListener('keydown', function(ev){
-    if (ev.key === 'Escape' && !document.getElementById('pxa-overlay')) focusInputEnd(input);
+    if (ev.key === 'Escape' && !document.getElementById('pxa-overlay') && !document.getElementById('wordle-overlay')) focusInputEnd(input);
   });
 
   // ===== Pixel Art Editor =====
@@ -897,6 +939,329 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
     var overlay = document.getElementById('pxa-overlay');
     if (overlay) overlay.remove();
     pxaData = null; pxaEditId = null; pxaPainting = false;
+    focusInputEnd(input);
+  }
+
+  // ===== Wordle =====
+  var wlTiles = [];      // [row][col] → DOM element
+  var wlKeys  = {};      // letter → DOM element
+  var wlCurrentRow = 0;
+  var wlSubmitting = false;
+  var wlGameOver = false;
+  var wlGuessInput = null;
+  var wlMsgEl = null;
+
+  function openWordle(data) {
+    if (document.getElementById('wordle-overlay')) return;
+    data = data || {};
+    var prevGuesses = Array.isArray(data.guesses) ? data.guesses : [];
+    wlCurrentRow  = prevGuesses.length;
+    wlSubmitting  = false;
+    wlGameOver    = !!data.gameOver;
+    wlTiles       = [];
+    wlKeys        = {};
+
+    var overlay = document.createElement('div'); overlay.id = 'wordle-overlay';
+    var modal   = document.createElement('div'); modal.id   = 'wordle-modal';
+
+    // Title
+    var titleEl = document.createElement('div'); titleEl.id = 'wordle-title';
+    titleEl.textContent = 'WORDLE'; modal.appendChild(titleEl);
+
+    // Streak
+    var streakEl = document.createElement('div'); streakEl.id = 'wordle-streak';
+    streakEl.textContent = 'streak: ' + (data.streak || 0) + ' • best: ' + (data.bestStreak || 0);
+    modal.appendChild(streakEl);
+
+    // 6×5 grid
+    var gridEl = document.createElement('div'); gridEl.id = 'wordle-grid';
+    for (var r = 0; r < 6; r++) {
+      var row = document.createElement('div'); row.className = 'wl-row';
+      wlTiles.push([]);
+      for (var c = 0; c < 5; c++) {
+        var tile = document.createElement('div'); tile.className = 'wl-tile';
+        wlTiles[r].push(tile); row.appendChild(tile);
+      }
+      gridEl.appendChild(row);
+    }
+    modal.appendChild(gridEl);
+
+    // Restore previous guesses
+    prevGuesses.forEach(function(g, ri) {
+      var letters = (g.guess || '').split('');
+      var result  = Array.isArray(g.result) ? g.result : [];
+      for (var ci = 0; ci < 5; ci++) {
+        var t = wlTiles[ri][ci];
+        t.textContent = (letters[ci] || '').toUpperCase();
+        var res = result[ci] ? result[ci].result : 'absent';
+        t.className = 'wl-tile ' + res;
+      }
+    });
+
+    // Error / message area
+    wlMsgEl = document.createElement('div'); wlMsgEl.id = 'wordle-msg';
+    modal.appendChild(wlMsgEl);
+
+    // Input row (hidden if game over)
+    var inputRow = document.createElement('div'); inputRow.id = 'wordle-input-row';
+    wlGuessInput = document.createElement('input');
+    wlGuessInput.id = 'wordle-guess-input'; wlGuessInput.type = 'text';
+    wlGuessInput.maxLength = 5; wlGuessInput.autocomplete = 'off';
+    wlGuessInput.spellcheck = false; wlGuessInput.placeholder = 'guess';
+    wlGuessInput.addEventListener('input', function() {
+      var v = wlGuessInput.value.toLowerCase().replace(/[^a-z]/g, '').slice(0, 5);
+      wlGuessInput.value = v.toUpperCase();
+      wlUpdateCurrentRowPreview(v);
+    });
+    wlGuessInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') { e.preventDefault(); wlSubmitGuess(); }
+    });
+    var submitBtn = document.createElement('button');
+    submitBtn.id = 'wordle-submit-btn'; submitBtn.type = 'button'; submitBtn.textContent = 'Enter';
+    submitBtn.addEventListener('click', wlSubmitGuess);
+    inputRow.appendChild(wlGuessInput); inputRow.appendChild(submitBtn);
+    if (wlGameOver) inputRow.style.display = 'none';
+    modal.appendChild(inputRow);
+
+    // On-screen keyboard
+    var kbEl = document.createElement('div'); kbEl.id = 'wordle-keyboard';
+    var rows = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm'];
+    rows.forEach(function(rowLetters, ri) {
+      var rowEl = document.createElement('div'); rowEl.className = 'wl-kb-row';
+      if (ri === 2) {
+        var enterKey = document.createElement('button');
+        enterKey.type = 'button'; enterKey.className = 'wl-key wide'; enterKey.textContent = 'ENT';
+        enterKey.addEventListener('click', wlSubmitGuess); rowEl.appendChild(enterKey);
+      }
+      rowLetters.split('').forEach(function(letter) {
+        var keyEl = document.createElement('button');
+        keyEl.type = 'button'; keyEl.className = 'wl-key'; keyEl.textContent = letter.toUpperCase();
+        keyEl.dataset.letter = letter;
+        keyEl.addEventListener('click', function() {
+          if (wlGameOver) return;
+          var cur = wlGuessInput.value.toLowerCase().replace(/[^a-z]/g, '');
+          if (cur.length < 5) {
+            var next = cur + letter;
+            wlGuessInput.value = next.toUpperCase();
+            wlUpdateCurrentRowPreview(next);
+          }
+        });
+        wlKeys[letter] = keyEl; rowEl.appendChild(keyEl);
+      });
+      if (ri === 2) {
+        var delKey = document.createElement('button');
+        delKey.type = 'button'; delKey.className = 'wl-key wide'; delKey.textContent = '⌫';
+        delKey.addEventListener('click', function() {
+          if (wlGameOver) return;
+          var cur = wlGuessInput.value.toLowerCase().replace(/[^a-z]/g, '');
+          if (cur.length > 0) {
+            var next = cur.slice(0, -1);
+            wlGuessInput.value = next.toUpperCase();
+            wlUpdateCurrentRowPreview(next);
+          }
+        });
+        rowEl.appendChild(delKey);
+      }
+      kbEl.appendChild(rowEl);
+    });
+    modal.appendChild(kbEl);
+
+    // Result panel (initially hidden unless game already over)
+    var resultEl = document.createElement('div'); resultEl.id = 'wordle-result';
+    if (wlGameOver) resultEl.className = 'show';
+    var resultMsg = document.createElement('div'); resultMsg.id = 'wordle-result-msg';
+    var shareText = document.createElement('div'); shareText.id = 'wordle-share-text';
+    var copyHint  = document.createElement('div'); copyHint.className = 'wl-copy-hint';
+    copyHint.textContent = 'click to copy'; resultEl.appendChild(resultMsg);
+    resultEl.appendChild(shareText); resultEl.appendChild(copyHint);
+    modal.appendChild(resultEl);
+
+    if (wlGameOver) {
+      if (data.solved) {
+        var prevCount = prevGuesses.length;
+        resultMsg.textContent = 'Solved in ' + prevCount + ' guess' + (prevCount !== 1 ? 'es' : '') + '! 💯';
+        resultMsg.style.color = 'var(--green)';
+      } else {
+        resultMsg.textContent = 'The word was ' + (data.dailyWord || '?').toUpperCase() + ' 💀';
+        resultMsg.style.color = 'var(--red)';
+      }
+      var grid = buildWlShareGrid(prevGuesses);
+      var today = new Date().toISOString().slice(0, 10);
+      shareText.textContent = 'DIS Wordle ' + today + '\n' + prevGuesses.length + '/6\n' + grid;
+      shareText.addEventListener('click', function() {
+        try { navigator.clipboard.writeText(shareText.textContent); copyHint.textContent = 'copied!'; }
+        catch(e) { copyHint.textContent = 'select and copy manually'; }
+      });
+    }
+
+    // Stats + Close buttons
+    var footerEl = document.createElement('div'); footerEl.id = 'wordle-footer';
+    var statsBtn = document.createElement('button');
+    statsBtn.type = 'button'; statsBtn.className = 'wl-footer-btn'; statsBtn.textContent = 'Stats';
+    var closeBtn = document.createElement('button');
+    closeBtn.type = 'button'; closeBtn.className = 'wl-footer-btn'; closeBtn.textContent = 'Close';
+    footerEl.appendChild(statsBtn); footerEl.appendChild(closeBtn);
+    modal.appendChild(footerEl);
+
+    // Stats panel
+    var statsPanel = document.createElement('div'); statsPanel.id = 'wordle-stats-panel';
+    modal.appendChild(statsPanel);
+    statsBtn.addEventListener('click', function() {
+      if (statsPanel.classList.contains('show')) {
+        statsPanel.classList.remove('show'); statsPanel.innerHTML = ''; statsBtn.textContent = 'Stats';
+      } else {
+        statsBtn.textContent = 'Loading…';
+        fetch('/api/wordle/leaderboard').then(function(r){ return r.json(); }).then(function(d){
+          statsPanel.innerHTML = '';
+          statsBtn.textContent = 'Stats';
+          statsPanel.classList.add('show');
+          function section(title, rows, key, label) {
+            var h = document.createElement('h3'); h.textContent = title; statsPanel.appendChild(h);
+            if (!rows.length) { var p = document.createElement('div'); p.textContent = 'No data yet.'; p.className = 'wl-stat-row'; statsPanel.appendChild(p); return; }
+            rows.forEach(function(r, i) {
+              var el = document.createElement('div'); el.className = 'wl-stat-row';
+              el.textContent = (i+1) + '. ' + r.username + ' — ' + r[key] + ' ' + label;
+              statsPanel.appendChild(el);
+            });
+          }
+          section('Current streaks', d.currentStreaks || [], 'current_streak', 'days');
+          section('Best streaks', d.bestStreaks || [], 'best_streak', 'days');
+          var h3 = document.createElement('h3'); h3.textContent = "Today's results (" + (d.date||'') + ')'; statsPanel.appendChild(h3);
+          var solvers = d.todaySolvers || [];
+          if (!solvers.length) { var p2 = document.createElement('div'); p2.textContent = 'Nobody has solved it yet!'; p2.className = 'wl-stat-row'; statsPanel.appendChild(p2); }
+          else { solvers.forEach(function(r, i) { var el = document.createElement('div'); el.className = 'wl-stat-row'; el.textContent = (i+1) + '. ' + r.username + ' in ' + r.guesses + ' guess' + (r.guesses !== 1 ? 'es' : ''); statsPanel.appendChild(el); }); }
+        }).catch(function() { statsBtn.textContent = 'Stats'; });
+      }
+    });
+    closeBtn.addEventListener('click', closeWordle);
+
+    // Color in keyboard from previous guesses
+    var keyState = {};
+    prevGuesses.forEach(function(g) {
+      if (!Array.isArray(g.result)) return;
+      g.result.forEach(function(r) {
+        var l = r.letter;
+        var prev = keyState[l];
+        if (r.result === 'correct') keyState[l] = 'correct';
+        else if (r.result === 'present' && prev !== 'correct') keyState[l] = 'present';
+        else if (!prev) keyState[l] = 'absent';
+      });
+    });
+    Object.keys(keyState).forEach(function(l) {
+      if (wlKeys[l]) { wlKeys[l].className = 'wl-key ' + (keyState[l] === 'correct' || keyState[l] === 'present' ? keyState[l] : 'absent') + (wlKeys[l].className.includes('wide') ? ' wide' : ''); }
+    });
+
+    // Escape to close
+    function wlEsc(e) { if (e.key === 'Escape') { closeWordle(); document.removeEventListener('keydown', wlEsc); } }
+    document.addEventListener('keydown', wlEsc);
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+    if (!wlGameOver) setTimeout(function() { if (wlGuessInput) wlGuessInput.focus(); }, 50);
+  }
+
+  function wlUpdateCurrentRowPreview(letters) {
+    if (wlCurrentRow >= 6) return;
+    for (var c = 0; c < 5; c++) {
+      var t = wlTiles[wlCurrentRow][c];
+      t.textContent = (letters[c] || '').toUpperCase();
+      t.className = 'wl-tile' + (letters[c] ? ' filled' : '');
+    }
+  }
+
+  function wlSubmitGuess() {
+    if (wlSubmitting || wlGameOver) return;
+    var guess = (wlGuessInput ? wlGuessInput.value : '').toLowerCase().replace(/[^a-z]/g, '');
+    if (guess.length !== 5) { wordleShowError('Type a 5-letter word first.'); return; }
+    wlSubmitting = true;
+    wordleShowError('');
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'wordle_guess', guess: guess }));
+    } else {
+      wordleShowError('Not connected. Try again.'); wlSubmitting = false;
+    }
+  }
+
+  function wordleHandleGuessResult(op) {
+    wlSubmitting = false;
+    if (!op.result || !Array.isArray(op.result)) return;
+    var ri = (op.guessNum || 1) - 1;
+    if (ri < 0 || ri >= 6) return;
+    // Color the tiles
+    op.result.forEach(function(r, ci) {
+      var t = wlTiles[ri] && wlTiles[ri][ci];
+      if (!t) return;
+      t.textContent = (r.letter || '').toUpperCase();
+      t.className = 'wl-tile ' + (r.result || 'absent');
+    });
+    // Update keyboard
+    op.result.forEach(function(r) {
+      var l = r.letter;
+      var keyEl = wlKeys[l];
+      if (!keyEl) return;
+      var cur = keyEl.dataset.state || '';
+      var next = r.result;
+      if (cur === 'correct') return;
+      if (next === 'correct' || (next === 'present' && cur !== 'correct')) {
+        keyEl.dataset.state = next;
+        keyEl.className = 'wl-key ' + next + (keyEl.dataset.wide ? ' wide' : '');
+      } else if (!cur) {
+        keyEl.dataset.state = 'absent';
+        keyEl.className = 'wl-key absent' + (keyEl.dataset.wide ? ' wide' : '');
+      }
+    });
+    wlCurrentRow = op.guessNum;
+    if (wlGuessInput) wlGuessInput.value = '';
+    wlUpdateCurrentRowPreview('');
+    if (op.solved || op.failed) {
+      wlGameOver = true;
+      var inputRow = document.getElementById('wordle-input-row');
+      if (inputRow) inputRow.style.display = 'none';
+      var resultEl = document.getElementById('wordle-result');
+      var resultMsg = document.getElementById('wordle-result-msg');
+      var shareText = document.getElementById('wordle-share-text');
+      var copyHint  = document.querySelector('.wl-copy-hint');
+      if (resultEl) resultEl.className = 'show';
+      // Update streak display
+      var streakEl = document.getElementById('wordle-streak');
+      if (streakEl) streakEl.textContent = 'streak: ' + (op.streak || 0) + ' • best: ' + (op.bestStreak || 0);
+      if (resultMsg) {
+        if (op.solved) {
+          resultMsg.textContent = 'Solved in ' + op.guessNum + ' guess' + (op.guessNum !== 1 ? 'es' : '') + '! 💯';
+          resultMsg.style.color = 'var(--green)';
+        } else {
+          resultMsg.textContent = 'The word was ' + (op.dailyWord || '?').toUpperCase() + ' 💀';
+          resultMsg.style.color = 'var(--red)';
+        }
+      }
+      if (shareText && op.emojiGrid) {
+        shareText.textContent = op.emojiGrid;
+        shareText.addEventListener('click', function() {
+          try { navigator.clipboard.writeText(shareText.textContent); if (copyHint) copyHint.textContent = 'copied!'; }
+          catch(e) { if (copyHint) copyHint.textContent = 'select and copy manually'; }
+        });
+      }
+    }
+  }
+
+  function wordleShowError(msg) {
+    if (wlMsgEl) wlMsgEl.textContent = msg || '';
+  }
+
+  function buildWlShareGrid(guesses) {
+    return guesses.map(function(g) {
+      var result = Array.isArray(g.result) ? g.result : [];
+      return result.map(function(r) {
+        return r.result === 'correct' ? '🟩' : r.result === 'present' ? '🟨' : '⬛';
+      }).join('');
+    }).join('\n');
+  }
+
+  function closeWordle() {
+    var overlay = document.getElementById('wordle-overlay');
+    if (overlay) overlay.remove();
+    wlTiles = []; wlKeys = {}; wlCurrentRow = 0; wlSubmitting = false;
+    wlGameOver = false; wlGuessInput = null; wlMsgEl = null;
     focusInputEnd(input);
   }
 
