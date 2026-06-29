@@ -1830,7 +1830,7 @@ function renderGames(api, state){
   api.batch(b=>{
     b.clear();
     b.setInputLimit(null);
-    b.print('── games ──', 'magenta');
+    b.print('== Games ==', 'magenta');
     b.hr();
     const wordleStatus = playedToday
       ? (resultRow.solved ? `✓ played today (solved in ${resultRow.guesses})` : '✓ played today')
@@ -2383,7 +2383,7 @@ function cmdDonate(api, state) {
 
   api.batch(b => {
     b.hr();
-    b.print('  ── support DIS ──', 'cyan');
+    b.print('  == Support DIS ==', 'magenta');
     b.hr();
     b.print('  DIS is a handmade space. no ads, no investors,', 'white');
     b.print('  no algorithm — just people.', 'white');
@@ -2403,7 +2403,7 @@ function cmdDonate(api, state) {
     if (KOFI_URL) {
       b.print(`  ${KOFI_URL}`, 'cyan');
     } else {
-      b.print('  visit our Ko-fi page', 'cyan');
+      b.print('  visit our Ko-fi page | https://ko-fi.com/punkyroo', 'cyan');
     }
     b.print('  include your DIS username in the message field', 'yellow');
     b.print('  to earn 100 ₢ per dollar donated.', 'cyan');
