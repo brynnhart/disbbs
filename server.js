@@ -1233,6 +1233,7 @@ function printStatusFeed(api, rows, opts = {}){
   const emptyMessage = opts.emptyMessage || 'No updates yet. Share one with /post <text>.';
 
   api.batch(b => {
+    b.clear();
     b.hr();
     b.print(`== ${headingText} ==`, 'magenta');
     b.hr();
