@@ -1959,9 +1959,6 @@ function renderChrome(api, state) {
   if (!requireAuth(api, state)) return;
   const username = state.username;
   const balance  = chrome.getBalance(username);
-  const today    = ymdFromEpoch(nowEpoch());
-  const balRow   = stmtGetChromeRow.get(username);
-  const stipendClaimed = balRow && balRow.last_stipend_at === today;
   const txRows   = stmtUserTransactions.all(username, 8);
   const leaders  = chrome.getLeaderboard(5);
 
@@ -1971,11 +1968,6 @@ function renderChrome(api, state) {
     b.print('== Chrome ==', 'magenta');
     b.hr();
     b.print(`  your balance:  ${fmtCr(balance)} ₢`, 'cyan');
-    if (stipendClaimed) {
-      b.print('  daily stipend: claimed ✓', 'dim');
-    } else {
-      b.print('  daily stipend: available — /stipend to claim', 'yellow');
-    }
     b.hr();
     b.print('── your recent transactions ──', 'dim');
     if (!txRows.length) {

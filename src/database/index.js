@@ -216,6 +216,25 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
   ensureChromeSchema(db);
   ensureDonationsSchema(db);
 
+  const alreadyMigrated = db.prepare('SELECT COUNT(1) AS n FROM activity_feed').get().n;
+  if (alreadyMigrated === 0) {
+    db.exec(`
+      INSERT INTO activity_feed (category, event_type, message, created_at)
+      SELECT
+        CASE
+          WHEN event_type IN ('slots_jackpot','slots_five','wordle_solved','wordle_failed','wordle_ace','blackjack_natural','blackjack_win') THEN 'games'
+          WHEN event_type = 'donation' THEN 'chrome'
+          ELSE 'community'
+        END,
+        event_type,
+        message,
+        created_at
+      FROM game_feed
+      ORDER BY created_at ASC
+    `);
+  }
+  console.log('[activity] feed count:', db.prepare('SELECT COUNT(1) AS n FROM activity_feed').get().n);
+
   const getSetting = db.prepare('SELECT value FROM settings WHERE key=?');
   const setSetting = db.prepare(`
     INSERT INTO settings(key,value) VALUES(?,?)
