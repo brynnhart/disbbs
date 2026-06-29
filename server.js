@@ -2026,13 +2026,14 @@ function evalSlots(reels) {
     if (s === '💀') skulls++;
   }
   const maxCount = Math.max(...Object.values(counts));
-  if (skulls === 5)   return { type: 'jackpot',   payout: 0 };
-  if (maxCount === 5) return { type: 'five',       payout: 150 };
-  if (maxCount >= 4)  return { type: 'four',       payout: 50 };
-  if (maxCount >= 3)  return { type: 'three',      payout: 15 };
-  if (skulls >= 2)    return { type: 'two_skull',  payout: 10 };
-  if (skulls === 1)   return { type: 'skull',      payout: 5 };
-  return                     { type: 'loss',       payout: 0 };
+  if (skulls === 5)   return { type: 'jackpot',     payout: 0 };
+  if (maxCount === 5) return { type: 'five',         payout: 100 };
+  if (maxCount >= 4)  return { type: 'four',         payout: 30 };
+  if (skulls >= 3)    return { type: 'three_skull',  payout: 20 };
+  if (maxCount >= 3)  return { type: 'three',        payout: 8 };
+  if (skulls >= 2)    return { type: 'two_skull',    payout: 6 };
+  if (skulls === 1)   return { type: 'one_skull',    payout: 0 };
+  return                     { type: 'loss',         payout: 0 };
 }
 
 function handleSlotsGetState(api, state) {
@@ -2076,19 +2077,22 @@ function handleSlotsSpin(msg, api, state) {
     payout     = outcome.payout;
     if (outcome.type === 'five') {
       message = `five of a kind! you won ${fmtCr(payout)} ₢! ⭐`;
-      try { gameFeedInsert.run(username, 'slots_five', `${username} hit five of a kind on slots and won 150 ₢! ⭐`, nowEpoch()); } catch {}
+      try { gameFeedInsert.run(username, 'slots_five', `${username} hit five of a kind on slots and won 100 ₢! ⭐`, nowEpoch()); } catch {}
     } else if (outcome.type === 'four') {
       message = `four of a kind! you won ${fmtCr(payout)} ₢!`;
+    } else if (outcome.type === 'three_skull') {
+      message = `three skulls! you won ${fmtCr(payout)} ₢! 💀`;
     } else if (outcome.type === 'three') {
       message = `three of a kind! you won ${fmtCr(payout)} ₢!`;
     } else if (outcome.type === 'two_skull') {
       message = `two skulls! you won ${fmtCr(payout)} ₢! 💀`;
-    } else {
-      message = `one skull — break even. ${fmtCr(payout)} ₢ back.`;
     }
+  } else if (outcome.type === 'one_skull') {
+    chrome.addToJackpot(1);
+    message = `one skull — you lost 5 ₢. 1 ₢ added to jackpot. 💀`;
   } else {
     chrome.addToJackpot(2);
-    message = 'no match. 2 ₢ added to jackpot.';
+    message = 'no match. you lost 5 ₢. 2 ₢ added to jackpot.';
   }
 
   sendOps(api.ws, [{
