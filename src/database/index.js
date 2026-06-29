@@ -188,6 +188,16 @@ CREATE TABLE IF NOT EXISTS users (
    preferred_color TEXT,
    display_name TEXT
 );
+
+CREATE TABLE IF NOT EXISTS activity_feed (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  category TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  message TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_activity_feed_created ON activity_feed(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category, created_at DESC);
 `);
 
   ensureNotificationsSchema(db);

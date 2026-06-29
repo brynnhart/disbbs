@@ -241,6 +241,44 @@ const {
   checkUserIsDonor,
 } = statements;
 
+/* ======================= Activity feed ======================= */
+const stmtInsertActivity = db.prepare(
+  'INSERT INTO activity_feed (category, event_type, message, created_at) VALUES (?, ?, ?, ?)'
+);
+function addActivityEvent(category, event_type, message) {
+  try { stmtInsertActivity.run(category, event_type, message, nowEpoch()); } catch (e) {
+    console.error('[activity]', e && e.message);
+  }
+}
+
+let _lastLeader = null;
+function checkLeaderChange() {
+  try {
+    const top = chrome.getLeaderboard(1);
+    if (!top.length) return;
+    const current = top[0].username;
+    if (_lastLeader && _lastLeader !== current) {
+      addActivityEvent('chrome', 'leaderboard', `🏆 ${current} just took the #1 spot on the chrome leaderboard!`);
+    }
+    _lastLeader = current;
+  } catch {}
+}
+
+const stmtActivityFeed = db.prepare(
+  'SELECT category, event_type, message, created_at FROM activity_feed ORDER BY created_at DESC LIMIT 20'
+);
+const stmtGamesFeed = db.prepare(
+  "SELECT message, created_at FROM activity_feed WHERE category = 'games' ORDER BY created_at DESC LIMIT 8"
+);
+const stmtUserTransactions = db.prepare(
+  'SELECT amount, reason, created_at FROM chrome_transactions WHERE username = ? ORDER BY created_at DESC LIMIT ?'
+);
+const stmtTotalUsers    = db.prepare('SELECT COUNT(1) AS n FROM chrome_balances');
+const stmtGetChromeRow  = db.prepare('SELECT balance, last_stipend_at FROM chrome_balances WHERE username = ?');
+const stmtUserRank      = db.prepare(
+  'SELECT COUNT(1) AS rank FROM chrome_balances WHERE balance > (SELECT balance FROM chrome_balances WHERE username = ?)'
+);
+
 const {
   refreshUserNormsByRow,
   resolveUserHandle,
@@ -628,6 +666,9 @@ function cmdHelp(api, state){
   api.print('  /blackjack    Simplified blackjack — bet ₢ against the house', 'cyan');
   api.print('  /blackjack stats  Your blackjack statistics', 'cyan');
   api.print('  /donate       Support DIS — progress, top donors, how to donate', 'cyan');
+  api.print('  /activity     Recent activity across DIS — games, community, chrome', 'cyan');
+  api.print('  /chrome       Your chrome balance, transactions, and leaderboard', 'cyan');
+  api.print('  /wallet [user]  Look up another user\'s chrome balance and rank', 'cyan');
 
   if (state && state.isAdmin){
     api.hr(); api.print('Admin:', 'yellow');
@@ -882,7 +923,12 @@ function renderMenu(api, state){
     b.print('  — entertainment —', 'dim');
     b.print('  /games           Launch a game', 'cyan');
     b.print('', 'dim');
+    b.print('  — economy —', 'dim');
+    b.print('  /chrome          Your chrome balance and transaction history', 'cyan');
+    b.print('  /wallet <user>   Look up another user\'s balance', 'cyan');
+    b.print('', 'dim');
     b.print('  — system —', 'dim');
+    b.print('  /activity        Recent activity across DIS', 'cyan');
     b.print('  /profile         Your profile (or /profile <user>)', 'cyan');
     b.print('  /announcements   Announcements from the sysop', 'cyan');
     b.print('  /about           About DIS', 'cyan');
@@ -1621,6 +1667,7 @@ function cmdNewTopic(api, state, args){
   const ts = nowEpoch();
   const days = +(getSetting.get('board_inactive_days')?.value || 0);
   insertTopic.run(raw, state.userId || null, ts, ts, days > 0 ? ts + days*86400 : null);
+  addActivityEvent('community', 'board_topic', `📋 ${state.username} started a new topic: ${raw}`);
   api.print('Topic created.', 'green');
   renderBoard(api, state);
 }
@@ -1760,6 +1807,7 @@ function cmdAddNews(api, state, args){
   const ts = nowEpoch();
   const days = +(getSetting.get('news_inactive_days')?.value || 0);
   insertNewsPost.run(headline, url, 'link', state.userId || null, ts, ts, days > 0 ? ts + days*86400 : null);
+  addActivityEvent('community', 'links', `🔗 ${state.username} shared a link: ${headline}`);
   api.print('Link added.', 'green');
   renderNewsList(api, state);
 }
@@ -1825,14 +1873,12 @@ function renderGames(api, state){
   const today = getWordleDate();
   const streakRow  = wordleGetStreak.get(state.username);
   const resultRow  = wordleGetResult.get(state.username, today);
-  const feedRows   = gameFeedList.all(10);
+  const feedRows   = stmtGamesFeed.all();
   const streak     = streakRow ? streakRow.current_streak : 0;
   const playedToday = !!resultRow;
 
   let jackpot = 500;
-  let leaders = [];
   try { jackpot = chrome.getJackpot(); } catch {}
-  try { leaders = chrome.getLeaderboard(5); } catch {}
 
   api.batch(b=>{
     b.clear();
@@ -1857,15 +1903,7 @@ function renderGames(api, state){
       }
       b.hr();
     }
-    if (leaders.length) {
-      b.print('── chrome leaderboard ──', 'dim');
-      leaders.forEach((r, i) => {
-        const rank = String(i + 1) + '.';
-        b.printHTML(`  ${escapeHTML(rank)} ${escapeHTML(r.username.padEnd(16))} ${escapeHTML(fmtCr(r.balance))} ₢`);
-      });
-      b.hr();
-    }
-    b.print('/leave to return to the main menu', 'dim');
+    b.print('/leave to return to the main menu  •  /chrome for your balance', 'dim');
   });
   state.currentScreen = 'games';
 }
@@ -1874,6 +1912,117 @@ function gamesHandleCommand(cmd, api, state){
   if (!requireAuth(api, state)) return true;
   if (cmd === 'leave' || cmd === 'menu' || cmd === 'main'){ routeGo(api, state, 'menu'); return true; }
   return false;
+}
+
+/* ======================= Activity / Chrome / Wallet views ======================= */
+function relativeTime(ts) {
+  const diff = nowEpoch() - ts;
+  if (diff < 60)      return 'just now';
+  if (diff < 3600)    return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400)   return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 172800)  return 'yesterday';
+  return `${Math.floor(diff / 86400)} days ago`;
+}
+
+function txEmoji(reason) {
+  if (/daily bonus|stipend/i.test(reason)) return '📅';
+  if (/donation|welcome/i.test(reason))    return '💙';
+  if (/slots/i.test(reason))               return '🎰';
+  if (/wordle/i.test(reason))              return '🟩';
+  if (/blackjack/i.test(reason))           return '🃏';
+  return '💸';
+}
+
+function renderActivity(api, state) {
+  if (!requireAuth(api, state)) return;
+  const rows = stmtActivityFeed.all();
+  api.batch(b => {
+    b.clear();
+    b.setInputLimit(null);
+    b.print('== Activity ==', 'magenta');
+    b.hr();
+    if (!rows.length) {
+      b.print('no activity yet.', 'dim');
+    } else {
+      for (const r of rows) {
+        const t   = relativeTime(r.created_at).padStart(12);
+        const msg = r.message.slice(0, 66).padEnd(66);
+        b.print(`${msg}  ${t}`, 'cyan');
+      }
+    }
+    b.hr();
+    b.print('— /activity to refresh  •  /games  /chrome  /board for focused views —', 'dim');
+  });
+}
+
+function renderChrome(api, state) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  const balance  = chrome.getBalance(username);
+  const today    = ymdFromEpoch(nowEpoch());
+  const balRow   = stmtGetChromeRow.get(username);
+  const stipendClaimed = balRow && balRow.last_stipend_at === today;
+  const txRows   = stmtUserTransactions.all(username, 8);
+  const leaders  = chrome.getLeaderboard(5);
+
+  api.batch(b => {
+    b.clear();
+    b.setInputLimit(null);
+    b.print('== Chrome ==', 'magenta');
+    b.hr();
+    b.print(`  your balance:  ${fmtCr(balance)} ₢`, 'cyan');
+    if (stipendClaimed) {
+      b.print('  daily stipend: claimed ✓', 'dim');
+    } else {
+      b.print('  daily stipend: available — /stipend to claim', 'yellow');
+    }
+    b.hr();
+    b.print('── your recent transactions ──', 'dim');
+    if (!txRows.length) {
+      b.print('  no transactions yet.', 'dim');
+    } else {
+      for (const tx of txRows) {
+        const emoji   = txEmoji(tx.reason);
+        const sign    = tx.amount >= 0 ? `+${fmtCr(tx.amount)}` : `${fmtCr(tx.amount)}`;
+        const t       = relativeTime(tx.created_at).padStart(12);
+        const reason  = tx.reason.slice(0, 28).padEnd(28);
+        const signStr = `${sign} ₢`.padStart(12);
+        b.print(`  ${emoji} ${reason}  ${signStr}    ${t}`, tx.amount >= 0 ? 'cyan' : 'dim');
+      }
+    }
+    b.hr();
+    b.print('── chrome leaderboard ──', 'dim');
+    if (!leaders.length) {
+      b.print('  no data yet.', 'dim');
+    } else {
+      leaders.forEach((r, i) => {
+        b.printHTML(`  ${escapeHTML(String(i + 1) + '.')} ${escapeHTML(r.username.padEnd(16))} ${escapeHTML(fmtCr(r.balance))} ₢`);
+      });
+    }
+    b.hr();
+    b.print("— /chrome to refresh  •  /wallet [user] to view someone's balance —", 'dim');
+  });
+}
+
+function cmdWallet(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  const target = ((args && args[0]) || '').trim();
+  if (!target) { api.print('Usage: /wallet <username>', 'yellow'); return; }
+  const row = db.prepare('SELECT username, balance FROM chrome_balances WHERE LOWER(username) = LOWER(?)').get(target);
+  if (!row) { api.print(`no user found: ${target}`, 'red'); return; }
+  const rankRow = stmtUserRank.get(row.username);
+  const rank    = (rankRow ? rankRow.rank : 0) + 1;
+  const total   = stmtTotalUsers.get().n;
+  api.batch(b => {
+    b.clear();
+    b.setInputLimit(null);
+    b.print(`== Wallet: ${row.username} ==`, 'magenta');
+    b.hr();
+    b.print(`  balance:  ${fmtCr(row.balance)} ₢`, 'cyan');
+    b.print(`  rank:     #${rank} of ${total} users`, 'cyan');
+    b.hr();
+    b.print('— /chrome for your own balance —', 'dim');
+  });
 }
 
 function cmdWordle(api, state, args){
@@ -1991,6 +2140,9 @@ function handleWordleGuess(msg, api, state) {
       ? `${state.username} solved today's Wordle in ${guessNum} guess${guessNum !== 1 ? 'es' : ''} and earned ${chromeEarned} ₢! 🟩`
       : `${state.username} was defeated by today's Wordle 💀`;
     try { gameFeedInsert.run(state.username, solved ? 'wordle_solved' : 'wordle_failed', feedMsg, nowEpoch()); } catch {}
+    if (solved && guessNum <= 2) {
+      addActivityEvent('games', 'wordle_ace', `🟩 ${state.username} solved today's Wordle in ${guessNum} guess${guessNum === 1 ? '' : 'es'}!`);
+    }
 
     sendOps(api.ws, [{
       op:        'wordleGuessResult',
@@ -2078,12 +2230,14 @@ function handleSlotsSpin(msg, api, state) {
     const feedMsg = `🎰 ${username} hit the jackpot and won ${fmtCr(jackpotAmount)} ₢! 💀`;
     broadcastSystem(feedMsg);
     try { gameFeedInsert.run(username, 'slots_jackpot', feedMsg, nowEpoch()); } catch {}
+    addActivityEvent('games', 'slots_jackpot', feedMsg);
   } else if (outcome.payout > 0) {
     newBalance = chrome.award(username, outcome.payout, 'slots win');
     payout     = outcome.payout;
     if (outcome.type === 'five') {
       message = `five of a kind! you won ${fmtCr(payout)} ₢! ⭐`;
       try { gameFeedInsert.run(username, 'slots_five', `${username} hit five of a kind on slots and won 100 ₢! ⭐`, nowEpoch()); } catch {}
+      addActivityEvent('games', 'slots_five', `⭐ ${username} hit five of a kind on slots and won 100 ₢!`);
     } else if (outcome.type === 'four') {
       message = `four of a kind! you won ${fmtCr(payout)} ₢!`;
     } else if (outcome.type === 'three_skull') {
@@ -3266,6 +3420,11 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'editart':      cmdEditArt(api, state, args); return true;
     case 'deleteart':    cmdDeleteArt(api, state, args); return true;
 
+    /* Activity / Economy */
+    case 'activity': renderActivity(api, state); return true;
+    case 'chrome':   renderChrome(api, state); return true;
+    case 'wallet':   cmdWallet(api, state, args); return true;
+
     /* Games */
     case 'games':    renderGames(api, state); return true;
     case 'wordle':   cmdWordle(api, state, args[0]); return true;
@@ -3792,6 +3951,8 @@ app.post('/api/register', (req, res) => {
   } catch (e) {
     console.error('[api/register] chrome welcome award failed:', e && e.message);
   }
+  addActivityEvent('community', 'registration', `👤 ${username} just joined DIS!`);
+  checkLeaderChange();
 
   const user = getUserByName.get(username);
   const authToken = makeAuthToken();
@@ -4088,6 +4249,7 @@ app.post('/api/kofi/webhook', (req, res) => {
     try { chrome.award(disUsername, chromeAmount, 'donation bonus'); } catch (e) {
       console.error('[kofi] chrome award failed:', e && e.message);
     }
+    checkLeaderChange();
 
     const sockets = HUB.socketsByUser.get(disUsername);
     if (sockets) {
@@ -4096,6 +4258,7 @@ app.post('/api/kofi/webhook', (req, res) => {
     }
 
     try { gameFeedInsert.run(disUsername, 'donation', `💙 ${disUsername} supported DIS and earned ${fmtCr(chromeAmount)} ₢!`, now); } catch {}
+    addActivityEvent('chrome', 'donation', `💙 ${disUsername} supported DIS and earned ${fmtCr(chromeAmount)} ₢!`);
   }
 
   console.log(`[kofi] donation: ${kofiName} $${amount}${disUsername ? ` → ${disUsername} +${chromeAmount}₢` : ' (unlinked)'}`);
