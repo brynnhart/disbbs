@@ -2176,14 +2176,14 @@ function evalSlots(reels) {
     if (s === '💀') skulls++;
   }
   const maxCount = Math.max(...Object.values(counts));
-  if (skulls === 5)   return { type: 'jackpot',     payout: 0 };
+  if (skulls === 5)   return { type: 'jackpot',     payout: 0   };
   if (maxCount === 5) return { type: 'five',         payout: 100 };
-  if (maxCount >= 4)  return { type: 'four',         payout: 30 };
-  if (skulls >= 3)    return { type: 'three_skull',  payout: 20 };
-  if (maxCount >= 3)  return { type: 'three',        payout: 8 };
-  if (skulls >= 2)    return { type: 'two_skull',    payout: 6 };
-  if (skulls === 1)   return { type: 'one_skull',    payout: 0 };
-  return                     { type: 'loss',         payout: 0 };
+  if (maxCount >= 4)  return { type: 'four',         payout: 20  };  // was 30
+  if (skulls >= 3)    return { type: 'three_skull',  payout: 12  };  // was 20
+  if (maxCount >= 3)  return { type: 'three',        payout: 7   };  // was 8
+  if (skulls >= 2)    return { type: 'two_skull',    payout: 4   };  // was 6
+  if (skulls === 1)   return { type: 'one_skull',    payout: 0   };
+  return                     { type: 'loss',         payout: 0   };
 }
 
 function handleSlotsGetState(api, state) {
