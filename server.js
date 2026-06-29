@@ -2382,6 +2382,7 @@ function cmdDonate(api, state) {
   if (pct >= 100) goalNote = pct > 100 ? `  +${Math.round(pct - 100)}% over goal ♥` : '  goal reached! ♥';
 
   api.batch(b => {
+    b.clear();
     b.hr();
     b.print('  == Support DIS ==', 'magenta');
     b.hr();
