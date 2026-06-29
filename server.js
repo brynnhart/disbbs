@@ -848,8 +848,8 @@ function renderMenu(api, state){
   api.batch(b=>{
     b.clear();
     b.setInputLimit(null);
-    b.printHTML('<div class="banner"><div class="line"><span class="cyan">▄▄▄</span><span class="magenta"> Dead Internet Society </span><span class="cyan">▄▄▄</span></div><div class="line dim">Command Hub — use slash commands to navigate.</div></div>');
-    b.print('Main Menu:', 'yellow');
+    b.printHTML('<div class="banner"><div class="line"><span class="cyan">▄▄▄</span><span class="magenta"> Dead Internet Society </span><span class="cyan">▄▄▄</span></div><div class="line dim">type a /command to launch something.</div></div>');
+    b.print('Programs:', 'yellow');
     if (unreadCount > 0) {
       const label = unreadCount === 1 ? 'message' : 'messages';
       b.printHTML(`<span style="color:#ff6b6b;font-weight:bold;">📬 NEW DIRECT MESSAGES: ${unreadCount} unread ${label}.</span>`);
@@ -867,27 +867,33 @@ function renderMenu(api, state){
       if (newItems.newArt)     b.print(`  ${pl(newItems.newArt,     'new pixel art')}`, 'cyan');
       if (newItems.unreadDMs)  b.print(`  ${pl(newItems.unreadDMs,  'unread direct message')}`, 'yellow');
     }
-    b.print('  /chat            Enter the Commons Chat', 'cyan');
-    b.print('  /post <text>     Share a short status update', 'cyan');
-    b.print('  /feed [user]     View the latest updates', 'cyan');
-    b.print('  /polls            Poll booth', 'cyan');
-    b.print('  /board           Bulletin board', 'cyan');
-    b.print('  /links           Community link share', 'cyan');
-    b.print('  /art             Pixel art library — browse and create community emoji', 'cyan');
-    b.print('  /games           Games', 'cyan');
-    b.print('  /messages        View your direct messages', 'cyan');
-    b.print('  /announcements   View site announcements', 'cyan');
+    b.print('  — communicate —', 'dim');
+    b.print('  /chat            Commons Chat — talk to everyone', 'cyan');
+    b.print('  /messages        Direct messages', 'cyan');
+    b.print('  /post <text>     Drop a status update', 'cyan');
+    b.print('  /feed [user]     Latest updates from the community', 'cyan');
+    b.print('', 'dim');
+    b.print('  — community —', 'dim');
+    b.print('  /board           Bulletin board — long-form threads', 'cyan');
+    b.print('  /links           Link share — stuff worth seeing', 'cyan');
+    b.print('  /polls           Poll booth', 'cyan');
+    b.print('  /art             Pixel art library — browse and create', 'cyan');
+    b.print('', 'dim');
+    b.print('  — entertainment —', 'dim');
+    b.print('  /games           Launch a game', 'cyan');
+    b.print('', 'dim');
+    b.print('  — system —', 'dim');
+    b.print('  /profile         Your profile (or /profile <user>)', 'cyan');
+    b.print('  /announcements   Announcements from the sysop', 'cyan');
     b.print('  /about           About DIS', 'cyan');
-    b.print('  /donate          Support DIS (thank you!)', 'cyan');
-    b.print('  /profile         View your profile (or /profile <user>)', 'cyan');
+    b.print('  /donate          Support DIS (thank you)', 'cyan');
     b.print('  /logout          Sign out', 'cyan');
     b.hr();
-    b.print('Tip: You can type these anywhere. /main returns here.', 'dim');
-    b.print('For a full list of commands use /help command.', 'dim');
+    b.print('/command works from anywhere. /main to come home. /help for everything.', 'dim');
     b.print('DIS runs on community support  •  /donate for info', 'white');
   });
 }
-function menuHandleRaw(text, api){ api.print('Use slash commands here. Try /chat, /board, /links or /help.', 'dim'); return true; }
+function menuHandleRaw(text, api){ api.print('Type a /command to launch something. Try /chat, /board, /games or /help.', 'dim'); return true; }
 
 /* ======================= Announcements ======================= */
 function fetchActiveAnnouncements(){
@@ -1434,12 +1440,12 @@ function renderAbout(api, state){
     b.clear();
     b.setInputLimit(null);
     b.print('== About Dead Internet Society ==', 'magenta'); b.hr();
-    b.print('The internet has largely become the bane of modern human existence.  What was once supposed to be a repository of knowledge and unlimited human connection has become a swirling cesspool of algorithm-driven content gluttony, consumerism, competitive idiocy, and bots emotionally abusing bots.  The internet as it once was, and what was once promised to us, is dead.  So we retreat back into the familiar embrace of the BBS.', 'white');
+    b.print('The internet has largely become the bane of modern human existence.  What was once supposed to be a repository of knowledge and unlimited human connection has become a swirling cesspool of algorithm-driven content gluttony, consumerism, competitive idiocy, and bots emotionally abusing bots.  The internet as it once was, and what was once promised to us, is dead.  So we built something else... smaller... ours.', 'white');
     b.print(' ', 'white');
     b.print('-- PunkyRoo, sysop', 'dim');
     b.print(' ', 'white');
     b.print(' ', 'white');
-    b.print('-=-= RULES =-=-', 'magenta');
+    b.print('== RULES ==', 'magenta');
     b.print(' ', 'white');
     b.print('Dont be a badger-sized dickhole.', 'white');
     b.print(' ', 'white');
