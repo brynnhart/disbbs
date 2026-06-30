@@ -642,7 +642,6 @@ function splashHandleRaw(text, api, state){
       api.print('Login successful.', 'green');
 
       routeGo(api, state, 'menu');
-      cmdAnnouncements(api, state);
     } else {
       api.print('Invalid credentials. Try again.', 'red');
       state.login.step='username'; state.login.tempUser='';
