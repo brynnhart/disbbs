@@ -217,6 +217,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
   ensureDonationsSchema(db);
   ensureMiningSchema(db);
   ensureMarketSchema(db);
+  ensureRobSchema(db);
 
   const alreadyMigrated = db.prepare('SELECT COUNT(1) AS n FROM activity_feed').get().n;
   if (alreadyMigrated === 0) {
@@ -1482,6 +1483,22 @@ function ensureMarketSchema(db) {
     const tx = db.transaction(() => { for (const [r, p] of seeds) insert.run(r, p); });
     tx();
   }
+}
+
+function ensureRobSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS rob_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      attacker TEXT NOT NULL,
+      target TEXT NOT NULL,
+      resource TEXT NOT NULL,
+      success INTEGER NOT NULL,
+      amount INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_rob_log_attacker ON rob_log(attacker, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_rob_log_target   ON rob_log(target, created_at DESC);
+  `);
 }
 
 module.exports = {

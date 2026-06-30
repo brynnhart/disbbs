@@ -125,6 +125,17 @@ const RESOURCE_CEILINGS = {
   bismuth: 10, cinnabar: 18, malachite: 35, vitriol: 50,
   brimstone: 85, obsidian: 130, alexandrite: 350,
 };
+const ROB_BASE_SUCCESS = {
+  common: 0.30, uncommon: 0.45, rare: 0.60, very_rare: 0.85,
+};
+const ROB_STEAL_PCT = {
+  common:    [0.02, 0.04],
+  uncommon:  [0.04, 0.07],
+  rare:      [0.07, 0.12],
+  very_rare: [0.12, 0.18],
+};
+const ROB_RESOURCE_TIER = {};
+for (const [key, val] of Object.entries(RESOURCES)) ROB_RESOURCE_TIER[key] = val.tier;
 
 const {
   getSetting,
@@ -310,6 +321,11 @@ const stmtGetResourceBals    = db.prepare('SELECT resource, amount FROM resource
 const stmtGetResourceBal     = db.prepare('SELECT amount FROM resource_balances WHERE username = ? AND resource = ?');
 const stmtDeductResourceBal  = db.prepare('UPDATE resource_balances SET amount = amount - ? WHERE username = ? AND resource = ?');
 const stmtAddResourceBal     = db.prepare('INSERT INTO resource_balances (username, resource, amount) VALUES (?, ?, ?) ON CONFLICT(username, resource) DO UPDATE SET amount = amount + excluded.amount');
+
+/* Rob */
+const stmtInsertRobLog = db.prepare(
+  'INSERT INTO rob_log (attacker, target, resource, success, amount, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+);
 
 /* Market */
 const stmtGetAllMarketPrices = db.prepare('SELECT resource, current_price, previous_price, last_drift_date FROM market_prices');
@@ -710,6 +726,7 @@ function cmdHelp(api, state){
   api.print('  /market         Browse resource prices and your inventory', 'cyan');
   api.print('  /sell [resource] [amount]   Sell resources for chrome', 'cyan');
   api.print('  /buy  [resource] [amount]   Buy resources with chrome', 'cyan');
+  api.print('  /rob  [user] [resource]     Steal chrome using a mined resource as bait', 'cyan');
 
   if (state && state.isAdmin){
     api.hr(); api.print('Admin:', 'yellow');
@@ -2598,6 +2615,95 @@ function cmdMarketBuy(api, state, args) {
   renderMarket(api, state, flash);
 }
 
+/* ======================= Rob ======================= */
+const robCooldowns = new Map(); // 'attacker:target' → last attempt timestamp (ms)
+
+function attemptRob(attackerUsername, targetUsername, resource) {
+  if (!RESOURCES[resource]) return { error: `unknown resource: ${resource}.` };
+
+  const { label, color, tier } = RESOURCES[resource];
+
+  const attackerRes = stmtGetResourceBal.get(attackerUsername, resource);
+  if (!attackerRes || attackerRes.amount < 1) {
+    return { error: `you don't have any ${label} to use.` };
+  }
+
+  const targetRow = db.prepare('SELECT username FROM chrome_balances WHERE LOWER(username) = LOWER(?)').get(targetUsername);
+  if (!targetRow) return { error: `no user found: ${targetUsername}.` };
+
+  const resolvedTarget = targetRow.username;
+  if (resolvedTarget.toLowerCase() === attackerUsername.toLowerCase()) {
+    return { error: 'you can\'t rob yourself.' };
+  }
+
+  const targetBalance   = chrome.getBalance(resolvedTarget);
+  if (targetBalance === 0) return { error: `${resolvedTarget} has nothing worth stealing.` };
+
+  const attackerBalance = chrome.getBalance(attackerUsername);
+  const ratio    = attackerBalance > 0 ? targetBalance / attackerBalance : 1.6;
+  const adjRatio = Math.max(0.4, Math.min(1.6, ratio));
+  const odds     = Math.max(0.05, Math.min(0.90, ROB_BASE_SUCCESS[tier] * adjRatio));
+
+  stmtDeductResourceBal.run(1, attackerUsername, resource);
+
+  if (Math.random() < odds) {
+    const [pctMin, pctMax] = ROB_STEAL_PCT[tier];
+    const pct    = pctMin + Math.random() * (pctMax - pctMin);
+    const amount = Math.min(targetBalance, Math.max(1, Math.round(targetBalance * pct)));
+    chrome.spend(resolvedTarget, amount, `robbed by ${attackerUsername}`);
+    chrome.award(attackerUsername, amount, `robbed ${resolvedTarget}`);
+    stmtInsertRobLog.run(attackerUsername, resolvedTarget, resource, 1, amount, nowEpoch());
+    addActivityEvent('chrome', 'robbery', `💀 ${attackerUsername} robbed ${resolvedTarget} for ${fmtCr(amount)} ₢!`);
+    return { success: true, amount, odds, resolvedTarget };
+  } else {
+    stmtInsertRobLog.run(attackerUsername, resolvedTarget, resource, 0, 0, nowEpoch());
+    return { success: false, odds, resolvedTarget };
+  }
+}
+
+function cmdRob(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  const attackerUsername = state.username;
+  const targetUsername   = String((args && args[0]) || '').trim();
+  const resource         = String((args && args[1]) || '').toLowerCase().trim();
+
+  if (!targetUsername || !resource) {
+    api.print('usage: /rob [username] [resource]   e.g. /rob marmalade cinnabar', 'yellow');
+    return;
+  }
+
+  const cooldownKey = `${attackerUsername.toLowerCase()}:${targetUsername.toLowerCase()}`;
+  const lastAttempt = robCooldowns.get(cooldownKey);
+  if (lastAttempt && (Date.now() - lastAttempt) < 5 * 60 * 1000) {
+    api.print(`you need to lay low before trying ${targetUsername} again. wait a few minutes.`, 'yellow');
+    return;
+  }
+
+  const result = attemptRob(attackerUsername, targetUsername, resource);
+
+  if (result.error) {
+    api.print(result.error, 'red');
+    return;
+  }
+
+  robCooldowns.set(cooldownKey, Date.now());
+
+  const { label, color } = RESOURCES[resource];
+  const newBalance = chrome.getBalance(attackerUsername);
+
+  if (result.success) {
+    api.batch(b => {
+      b.printHTML(
+        `you robbed ${escapeHTML(result.resolvedTarget)} for ${escapeHTML(fmtCr(result.amount))} ₢ ` +
+        `using <span style="color:${color}">${escapeHTML(label)}</span>!  ` +
+        `your balance: ${escapeHTML(fmtCr(newBalance))} ₢`
+      );
+    });
+  } else {
+    api.print(`the robbery failed. ${result.resolvedTarget} noticed nothing.  your balance: ${fmtCr(newBalance)} ₢`, 'dim');
+  }
+}
+
 /* ======================= Blackjack ======================= */
 const blackjackHands = new Map();
 
@@ -3723,6 +3829,7 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'market':   renderMarket(api, state); return true;
     case 'sell':     cmdMarketSell(api, state, args); return true;
     case 'buy':      cmdMarketBuy(api, state, args);  return true;
+    case 'rob':      cmdRob(api, state, args);        return true;
 
     /* Games */
     case 'games':    renderGames(api, state); return true;
