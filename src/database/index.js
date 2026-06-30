@@ -215,6 +215,8 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
   seedWordleWords(db);
   ensureChromeSchema(db);
   ensureDonationsSchema(db);
+  ensureMiningSchema(db);
+  ensureMarketSchema(db);
 
   const alreadyMigrated = db.prepare('SELECT COUNT(1) AS n FROM activity_feed').get().n;
   if (alreadyMigrated === 0) {
@@ -1430,6 +1432,56 @@ function seedWordleWords(db) {
   const insert = db.prepare('INSERT OR IGNORE INTO wordle_words (word) VALUES (?)');
   const tx = db.transaction((words) => { for (const w of words) insert.run(w); });
   tx(WORDLE_WORD_LIST);
+}
+
+function ensureMiningSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS mining_grid (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      grid_date TEXT NOT NULL,
+      cell_index INTEGER NOT NULL,
+      resource TEXT,
+      revealed_by TEXT,
+      revealed_at INTEGER,
+      UNIQUE(grid_date, cell_index)
+    );
+    CREATE INDEX IF NOT EXISTS idx_mining_grid_date ON mining_grid(grid_date);
+
+    CREATE TABLE IF NOT EXISTS mining_clicks (
+      username TEXT NOT NULL,
+      grid_date TEXT NOT NULL,
+      click_count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (username, grid_date)
+    );
+
+    CREATE TABLE IF NOT EXISTS resource_balances (
+      username TEXT NOT NULL,
+      resource TEXT NOT NULL,
+      amount INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (username, resource)
+    );
+  `);
+}
+
+function ensureMarketSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS market_prices (
+      resource TEXT PRIMARY KEY,
+      current_price REAL NOT NULL,
+      previous_price REAL,
+      last_drift_date TEXT
+    );
+  `);
+  const count = db.prepare('SELECT COUNT(1) AS n FROM market_prices').get().n;
+  if (count === 0) {
+    const insert = db.prepare('INSERT OR IGNORE INTO market_prices (resource, current_price) VALUES (?, ?)');
+    const seeds = [
+      ['bismuth', 3], ['cinnabar', 5], ['malachite', 10], ['vitriol', 15],
+      ['brimstone', 25], ['obsidian', 40], ['alexandrite', 100],
+    ];
+    const tx = db.transaction(() => { for (const [r, p] of seeds) insert.run(r, p); });
+    tx();
+  }
 }
 
 module.exports = {

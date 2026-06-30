@@ -108,6 +108,24 @@ const ANNOUNCEMENT_LIST_LIMIT = 50;
 const ANNOUNCEMENT_MAX_LEN = 600;
 const STATUS_FEED_LIMIT_CAP = 200;
 
+const RESOURCES = {
+  bismuth:     { label: 'Bismuth',     color: '#b39ddb', tier: 'common',    weight: 30 },
+  cinnabar:    { label: 'Cinnabar',    color: '#c62828', tier: 'common',    weight: 25 },
+  malachite:   { label: 'Malachite',   color: '#2e7d32', tier: 'uncommon',  weight: 18 },
+  vitriol:     { label: 'Vitriol',     color: '#aeea00', tier: 'uncommon',  weight: 14 },
+  brimstone:   { label: 'Brimstone',   color: '#f9a825', tier: 'rare',      weight: 8  },
+  obsidian:    { label: 'Obsidian',    color: '#9e9e9e', tier: 'rare',      weight: 4  },
+  alexandrite: { label: 'Alexandrite', color: '#6a1b9a', tier: 'very_rare', weight: 1  },
+};
+const RESOURCE_FLOORS = {
+  bismuth: 3, cinnabar: 5, malachite: 10, vitriol: 15,
+  brimstone: 25, obsidian: 40, alexandrite: 100,
+};
+const RESOURCE_CEILINGS = {
+  bismuth: 10, cinnabar: 18, malachite: 35, vitriol: 50,
+  brimstone: 85, obsidian: 130, alexandrite: 350,
+};
+
 const {
   getSetting,
   setSetting,
@@ -278,6 +296,26 @@ const stmtGetChromeRow  = db.prepare('SELECT balance, last_stipend_at FROM chrom
 const stmtUserRank      = db.prepare(
   'SELECT COUNT(1) AS rank FROM chrome_balances WHERE balance > (SELECT balance FROM chrome_balances WHERE username = ?)'
 );
+
+/* Mining */
+const stmtCheckGridExists    = db.prepare('SELECT COUNT(1) AS n FROM mining_grid WHERE grid_date = ?');
+const stmtInsertGridCell     = db.prepare('INSERT OR IGNORE INTO mining_grid (grid_date, cell_index, resource) VALUES (?, ?, ?)');
+const stmtGetMiningGrid      = db.prepare('SELECT cell_index, resource, revealed_by FROM mining_grid WHERE grid_date = ? ORDER BY cell_index ASC');
+const stmtGetMiningCell      = db.prepare('SELECT resource, revealed_by FROM mining_grid WHERE grid_date = ? AND cell_index = ?');
+const stmtGetMiningClicks    = db.prepare('SELECT click_count FROM mining_clicks WHERE username = ? AND grid_date = ?');
+const stmtRevealCell         = db.prepare('UPDATE mining_grid SET revealed_by = ?, revealed_at = ? WHERE grid_date = ? AND cell_index = ?');
+const stmtUpsertMiningClicks = db.prepare('INSERT INTO mining_clicks (username, grid_date, click_count) VALUES (?, ?, 1) ON CONFLICT(username, grid_date) DO UPDATE SET click_count = click_count + 1');
+const stmtUpsertResourceBal  = db.prepare('INSERT INTO resource_balances (username, resource, amount) VALUES (?, ?, 1) ON CONFLICT(username, resource) DO UPDATE SET amount = amount + 1');
+const stmtGetResourceBals    = db.prepare('SELECT resource, amount FROM resource_balances WHERE username = ?');
+const stmtGetResourceBal     = db.prepare('SELECT amount FROM resource_balances WHERE username = ? AND resource = ?');
+const stmtDeductResourceBal  = db.prepare('UPDATE resource_balances SET amount = amount - ? WHERE username = ? AND resource = ?');
+const stmtAddResourceBal     = db.prepare('INSERT INTO resource_balances (username, resource, amount) VALUES (?, ?, ?) ON CONFLICT(username, resource) DO UPDATE SET amount = amount + excluded.amount');
+
+/* Market */
+const stmtGetAllMarketPrices = db.prepare('SELECT resource, current_price, previous_price, last_drift_date FROM market_prices');
+const stmtGetMarketPrice     = db.prepare('SELECT resource, current_price, previous_price, last_drift_date FROM market_prices WHERE resource = ?');
+const stmtDriftMarketPrice   = db.prepare('UPDATE market_prices SET previous_price = current_price, current_price = ?, last_drift_date = ? WHERE resource = ?');
+const stmtNudgeMarketPrice   = db.prepare('UPDATE market_prices SET current_price = ? WHERE resource = ?');
 
 const {
   refreshUserNormsByRow,
@@ -669,6 +707,10 @@ function cmdHelp(api, state){
   api.print('  /activity     Recent activity across DIS — games, community, chrome', 'cyan');
   api.print('  /chrome       Your chrome balance, transactions, and leaderboard', 'cyan');
   api.print('  /wallet [user]  Look up another user\'s chrome balance and rank', 'cyan');
+  api.print('  /mining         Dig for resources in today\'s shared grid', 'cyan');
+  api.print('  /market         Browse resource prices and your inventory', 'cyan');
+  api.print('  /sell [resource] [amount]   Sell resources for chrome', 'cyan');
+  api.print('  /buy  [resource] [amount]   Buy resources with chrome', 'cyan');
 
   if (state && state.isAdmin){
     api.hr(); api.print('Admin:', 'yellow');
@@ -908,32 +950,26 @@ function renderMenu(api, state){
       if (newItems.newArt)     b.print(`  ${pl(newItems.newArt,     'new pixel art')}`, 'cyan');
       if (newItems.unreadDMs)  b.print(`  ${pl(newItems.unreadDMs,  'unread direct message')}`, 'yellow');
     }
-    b.print('  — communicate —', 'dim');
     b.print('  /chat            Commons Chat — talk to everyone', 'cyan');
     b.print('  /messages        Direct messages', 'cyan');
     b.print('  /post <text>     Drop a status update', 'cyan');
     b.print('  /feed [user]     Latest updates from the community', 'cyan');
     b.print('', 'dim');
-    b.print('  — community —', 'dim');
     b.print('  /board           Bulletin board — long-form threads', 'cyan');
     b.print('  /links           Link share — stuff worth seeing', 'cyan');
     b.print('  /polls           Poll booth', 'cyan');
     b.print('  /art             Pixel art library — browse and create', 'cyan');
     b.print('', 'dim');
-    b.print('  — entertainment —', 'dim');
     b.print('  /games           Launch a game', 'cyan');
     b.print('', 'dim');
-    b.print('  — economy —', 'dim');
     b.print('  /chrome          Your chrome balance and transaction history', 'cyan');
-    b.print('  /wallet <user>   Look up another user\'s balance', 'cyan');
+    b.print('  /mining          Dig for resources in today\'s shared grid', 'cyan');
+    b.print('  /market          Browse resource prices and your inventory', 'cyan');
     b.print('', 'dim');
-    b.print('  — system —', 'dim');
     b.print('  /activity        Recent activity across DIS', 'cyan');
     b.print('  /profile         Your profile (or /profile <user>)', 'cyan');
     b.print('  /announcements   Announcements from the sysop', 'cyan');
     b.print('  /about           About DIS', 'cyan');
-    b.print('  /donate          Support DIS (thank you)', 'cyan');
-    b.print('  /logout          Sign out', 'cyan');
     b.hr();
     b.print('/command works from anywhere. /main to come home. /help for everything.', 'dim');
     b.print('DIS runs on community support  •  /donate for info', 'white');
@@ -2295,6 +2331,274 @@ function cmdSlots(api, state, args) {
   sendOps(api.ws, [{ op: 'openSlots' }]);
 }
 
+/* ======================= Mining ======================= */
+const VEIN_SPECS = [
+  { resource: 'bismuth',     count: 6, minLen: 6,  maxLen: 12 },
+  { resource: 'cinnabar',    count: 6, minLen: 6,  maxLen: 12 },
+  { resource: 'malachite',   count: 4, minLen: 4,  maxLen: 8  },
+  { resource: 'vitriol',     count: 4, minLen: 4,  maxLen: 8  },
+  { resource: 'brimstone',   count: 2, minLen: 3,  maxLen: 5  },
+  { resource: 'obsidian',    count: 2, minLen: 3,  maxLen: 5  },
+  { resource: 'alexandrite', count: 1, minLen: 2,  maxLen: 3  },
+];
+const DIRS8 = [
+  { dc: -1, dr: -1 }, { dc: 0, dr: -1 }, { dc: 1, dr: -1 },
+  { dc: -1, dr:  0 },                     { dc: 1, dr:  0 },
+  { dc: -1, dr:  1 }, { dc: 0, dr:  1 }, { dc: 1, dr:  1 },
+];
+let _gridDateCached = null;
+
+function ensureGridForToday() {
+  const today = ymdFromEpoch(nowEpoch());
+  if (_gridDateCached === today) return;
+  const existing = stmtCheckGridExists.get(today);
+  if (existing && existing.n > 0) { _gridDateCached = today; return; }
+
+  const grid = new Array(800).fill(null);
+  function rInt(min, max) { return min + Math.floor(Math.random() * (max - min + 1)); }
+
+  for (const spec of VEIN_SPECS) {
+    for (let v = 0; v < spec.count; v++) {
+      let row = rInt(0, 19);
+      let col = rInt(0, 39);
+      const len = rInt(spec.minLen, spec.maxLen);
+      let dir = DIRS8[Math.floor(Math.random() * DIRS8.length)];
+      for (let step = 0; step < len; step++) {
+        const idx = row * 40 + col;
+        if (grid[idx] !== null) break;
+        grid[idx] = spec.resource;
+        if (Math.random() < 0.25) dir = DIRS8[Math.floor(Math.random() * DIRS8.length)];
+        const nr = row + dir.dr;
+        const nc = col + dir.dc;
+        if (nr < 0 || nr >= 20 || nc < 0 || nc >= 40) break;
+        row = nr; col = nc;
+      }
+    }
+  }
+
+  const insertAll = db.transaction(() => {
+    for (let i = 0; i < 800; i++) stmtInsertGridCell.run(today, i, grid[i]);
+  });
+  insertAll();
+  _gridDateCached = today;
+}
+
+function miningClickCost(clicksUsed) {
+  const next = clicksUsed + 1;
+  if (next <= 10) return 0;
+  if (next === 11) return 2;
+  if (next === 12) return 4;
+  if (next === 13) return 6;
+  if (next === 14) return 10;
+  return 15;
+}
+
+function buildMiningInventory(username) {
+  const inv = {};
+  for (const key of Object.keys(RESOURCES)) inv[key] = 0;
+  for (const row of stmtGetResourceBals.all(username)) {
+    if (inv[row.resource] !== undefined) inv[row.resource] = row.amount;
+  }
+  return inv;
+}
+
+function handleMiningGetState(api, state) {
+  if (!requireAuth(api, state)) return;
+  applyDailyMarketDrift();
+  const username = state.username;
+  const today = ymdFromEpoch(nowEpoch());
+  ensureGridForToday();
+  const gridRows = stmtGetMiningGrid.all(today);
+  const clickRow = stmtGetMiningClicks.get(username, today);
+  const clicksUsed = clickRow ? clickRow.click_count : 0;
+  const cells = gridRows.map(r => ({
+    index:      r.cell_index,
+    revealed:   r.revealed_by !== null,
+    resource:   r.revealed_by !== null ? r.resource : null,
+    revealedBy: r.revealed_by,
+  }));
+  sendOps(api.ws, [{
+    op:                  'mining_state',
+    cells,
+    clicksUsed,
+    freeClicksRemaining: Math.max(0, 10 - clicksUsed),
+    nextClickCost:       miningClickCost(clicksUsed),
+    balance:             chrome.getBalance(username),
+    inventory:           buildMiningInventory(username),
+  }]);
+}
+
+function handleMiningClick(msg, api, state) {
+  if (!requireAuth(api, state)) return;
+  const username  = state.username;
+  const cellIndex = typeof msg.cellIndex === 'number' ? Math.floor(msg.cellIndex) : -1;
+  if (cellIndex < 0 || cellIndex > 799) {
+    sendOps(api.ws, [{ op: 'error', message: 'invalid cell.' }]); return;
+  }
+  const today = ymdFromEpoch(nowEpoch());
+  ensureGridForToday();
+  const cell = stmtGetMiningCell.get(today, cellIndex);
+  if (!cell || cell.revealed_by !== null) {
+    sendOps(api.ws, [{ op: 'error', message: 'cell not available.' }]); return;
+  }
+  const clickRow  = stmtGetMiningClicks.get(username, today);
+  const clicksUsed = clickRow ? clickRow.click_count : 0;
+  const cost = miningClickCost(clicksUsed);
+  if (cost > 0) {
+    const spend = chrome.spend(username, cost, 'mining click');
+    if (!spend.success) {
+      sendOps(api.ws, [{ op: 'error', message: 'not enough chrome to dig deeper today.' }]); return;
+    }
+  }
+  stmtRevealCell.run(username, nowEpoch(), today, cellIndex);
+  stmtUpsertMiningClicks.run(username, today);
+  if (cell.resource) {
+    stmtUpsertResourceBal.run(username, cell.resource);
+    if (cell.resource === 'alexandrite') {
+      addActivityEvent('chrome', 'mining_rare', `💎 ${username} struck alexandrite while mining!`);
+    }
+  }
+  const newClicksUsed = clicksUsed + 1;
+  sendOps(api.ws, [{
+    op:                  'mining_result',
+    cellIndex,
+    resource:            cell.resource || null,
+    balance:             chrome.getBalance(username),
+    inventory:           buildMiningInventory(username),
+    clicksUsed:          newClicksUsed,
+    freeClicksRemaining: Math.max(0, 10 - newClicksUsed),
+    nextClickCost:       miningClickCost(newClicksUsed),
+  }]);
+}
+
+function cmdMining(api, state) {
+  if (!requireAuth(api, state)) return;
+  sendOps(api.ws, [{ op: 'openMining' }]);
+}
+
+/* ======================= Market ======================= */
+function applyDailyMarketDrift() {
+  const today = ymdFromEpoch(nowEpoch());
+  const rows  = stmtGetAllMarketPrices.all();
+  for (const row of rows) {
+    if (row.last_drift_date === today) continue;
+    const floor   = RESOURCE_FLOORS[row.resource];
+    const ceiling = RESOURCE_CEILINGS[row.resource];
+    if (!floor || !ceiling) continue;
+    const pct      = 0.10 + Math.random() * 0.10;
+    const sign     = Math.random() < 0.5 ? 1 : -1;
+    const newPrice = Math.max(floor, Math.min(ceiling, row.current_price * (1 + sign * pct)));
+    stmtDriftMarketPrice.run(newPrice, today, row.resource);
+  }
+}
+
+function buildMarketPrices() {
+  const rows   = stmtGetAllMarketPrices.all();
+  const prices = {};
+  for (const row of rows) {
+    const cur  = row.current_price;
+    const prev = row.previous_price;
+    let trend  = 'stable';
+    if (prev != null) {
+      if (cur > prev * 1.01) trend = 'rising';
+      else if (cur < prev * 0.99) trend = 'falling';
+    }
+    prices[row.resource] = { price: Math.round(cur), trend };
+  }
+  return prices;
+}
+
+function renderMarket(api, state, flash) {
+  if (!requireAuth(api, state)) return;
+  applyDailyMarketDrift();
+  const username  = state.username;
+  const prices    = buildMarketPrices();
+  const inventory = buildMiningInventory(username);
+  const balance   = chrome.getBalance(username);
+  api.batch(b => {
+    b.clear();
+    b.setInputLimit(null);
+    b.print('== Market ==', 'magenta');
+    b.hr();
+    if (flash) { b.printHTML(flash); b.hr(); }
+    for (const key of Object.keys(RESOURCES)) {
+      const r   = RESOURCES[key];
+      const p   = prices[key] || { price: 0, trend: 'stable' };
+      const inv = inventory[key] || 0;
+      const name     = r.label.padEnd(13);
+      const priceStr = (fmtCr(p.price) + ' ₢').padEnd(10);
+      let trendColor, trendStr;
+      if      (p.trend === 'rising')  { trendColor = '#4caf50'; trendStr = '↑ rising  '; }
+      else if (p.trend === 'falling') { trendColor = '#f44336'; trendStr = '↓ falling '; }
+      else                            { trendColor = '#555555'; trendStr = '↔ stable  '; }
+      b.printHTML(
+        `  <span style="color:${r.color}">${escapeHTML(name)}</span>` +
+        `  <span style="color:#aaa">${escapeHTML(priceStr)}</span>` +
+        `  <span style="color:${trendColor}">${escapeHTML(trendStr)}</span>` +
+        `  you have: <span style="color:${r.color}">${escapeHTML(String(inv))}</span>`
+      );
+    }
+    b.hr();
+    b.print(`  your balance: ${fmtCr(balance)} ₢`, 'cyan');
+    b.hr();
+    b.print('— /sell [resource] [amount]  •  /buy [resource] [amount]  •  /market to refresh —', 'dim');
+  });
+}
+
+function cmdMarketSell(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  const resource = String((args && args[0]) || '').toLowerCase().trim();
+  const amount   = Math.floor(Number((args && args[1]) || 0));
+  if (!RESOURCES[resource] || amount < 1) {
+    api.print('usage: /sell [resource] [amount]   e.g. /sell cinnabar 3', 'yellow'); return;
+  }
+  const balRow = stmtGetResourceBal.get(username, resource);
+  const have   = balRow ? balRow.amount : 0;
+  if (have < amount) {
+    api.print(`you don't have that much ${RESOURCES[resource].label} to sell.`, 'red'); return;
+  }
+  const priceRow   = stmtGetMarketPrice.get(resource);
+  const payout     = Math.round(priceRow.current_price * amount);
+  stmtDeductResourceBal.run(amount, username, resource);
+  chrome.award(username, payout, `market sell: ${resource}`);
+  const newPrice = Math.max(RESOURCE_FLOORS[resource], priceRow.current_price * 0.975);
+  stmtNudgeMarketPrice.run(newPrice, resource);
+  if (resource === 'alexandrite') {
+    addActivityEvent('chrome', 'market_alexandrite', `🔮 ${username} sold alexandrite on the market!`);
+  }
+  const newBalance = chrome.getBalance(username);
+  const { label, color } = RESOURCES[resource];
+  const flash = `  sold ${escapeHTML(String(amount))} <span style="color:${color}">${escapeHTML(label)}</span> for ${escapeHTML(fmtCr(payout))} ₢.  your balance: ${escapeHTML(fmtCr(newBalance))} ₢`;
+  renderMarket(api, state, flash);
+}
+
+function cmdMarketBuy(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  const resource = String((args && args[0]) || '').toLowerCase().trim();
+  const amount   = Math.floor(Number((args && args[1]) || 0));
+  if (!RESOURCES[resource] || amount < 1) {
+    api.print('usage: /buy [resource] [amount]   e.g. /buy cinnabar 3', 'yellow'); return;
+  }
+  const priceRow = stmtGetMarketPrice.get(resource);
+  const cost     = Math.round(priceRow.current_price * amount);
+  const spend    = chrome.spend(username, cost, `market buy: ${resource}`);
+  if (!spend.success) {
+    api.print('not enough chrome for that.', 'red'); return;
+  }
+  stmtAddResourceBal.run(username, resource, amount);
+  const newPrice = Math.min(RESOURCE_CEILINGS[resource], priceRow.current_price * 1.025);
+  stmtNudgeMarketPrice.run(newPrice, resource);
+  if (resource === 'alexandrite') {
+    addActivityEvent('chrome', 'market_alexandrite', `🔮 ${username} bought alexandrite on the market!`);
+  }
+  const newBalance = chrome.getBalance(username);
+  const { label, color } = RESOURCES[resource];
+  const flash = `  bought ${escapeHTML(String(amount))} <span style="color:${color}">${escapeHTML(label)}</span> for ${escapeHTML(fmtCr(cost))} ₢.  your balance: ${escapeHTML(fmtCr(newBalance))} ₢`;
+  renderMarket(api, state, flash);
+}
+
 /* ======================= Blackjack ======================= */
 const blackjackHands = new Map();
 
@@ -3416,6 +3720,10 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'activity': renderActivity(api, state); return true;
     case 'chrome':   renderChrome(api, state); return true;
     case 'wallet':   cmdWallet(api, state, args); return true;
+    case 'mining':   cmdMining(api, state); return true;
+    case 'market':   renderMarket(api, state); return true;
+    case 'sell':     cmdMarketSell(api, state, args); return true;
+    case 'buy':      cmdMarketBuy(api, state, args);  return true;
 
     /* Games */
     case 'games':    renderGames(api, state); return true;
@@ -3595,6 +3903,8 @@ wss.on('connection', (ws, req) => {
     if (msg.type === 'wordle_guess')     { handleWordleGuess(msg, api, state); return; }
     if (msg.type === 'slots_spin')       { handleSlotsSpin(msg, api, state); return; }
     if (msg.type === 'slots_getstate')   { handleSlotsGetState(api, state); return; }
+    if (msg.type === 'mining_getstate')  { handleMiningGetState(api, state); return; }
+    if (msg.type === 'mining_click')     { handleMiningClick(msg, api, state); return; }
     if (msg.type === 'blackjack_deal')     { handleBlackjackDeal(msg, api, state); return; }
     if (msg.type === 'blackjack_hit')      { handleBlackjackHit(msg, api, state); return; }
     if (msg.type === 'blackjack_stand')    { handleBlackjackStand(msg, api, state); return; }
