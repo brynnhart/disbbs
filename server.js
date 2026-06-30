@@ -3870,7 +3870,6 @@ wss.on('connection', (ws, req) => {
           if (userRow) {
             authenticateWsFromUserRow(ws, api, state, userRow);
             routeGo(api, state, 'menu');
-            cmdAnnouncements(api, state);
             return;
           }
         }
@@ -3886,7 +3885,6 @@ wss.on('connection', (ws, req) => {
             if (userRow) {
               authenticateWsFromUserRow(ws, api, state, userRow);
               routeGo(api, state, 'menu');
-              cmdAnnouncements(api, state);
               return;
             }
           }
