@@ -394,6 +394,7 @@ function buildFingerprintHash(fields) {
     fields.screenResolution || '',
     fields.timezone || '',
   ].join('|');
+  if (str === '||||') return null; // No data at all — don't produce a matchable hash
   return crypto.createHash('sha256').update(str).digest('hex');
 }
 
@@ -4413,6 +4414,11 @@ app.post('/api/register', (req, res) => {
   if (checkBanByUsername.get(username)) {
     return res.status(403).json({ ok: false, error: 'That username is not available.' });
   }
+  const usernameLower = username.toLowerCase();
+  const BLOCKED_USERNAME_SUBSTRINGS = ['hitler', 'nazi', 'n4zi'];
+  if (BLOCKED_USERNAME_SUBSTRINGS.some(b => usernameLower.includes(b))) {
+    return res.status(403).json({ ok: false, error: 'That username is not available.' });
+  }
   if (fp.ip && checkBanByIp.get(fp.ip)) {
     return res.status(403).json({ ok: false, error: 'Registration is not available.' });
   }
@@ -4426,7 +4432,11 @@ app.post('/api/register', (req, res) => {
 
   // Block if: no real IP and no user agent (headless/scripted client)
   // Block if: no real IP and client explicitly signals incomplete fingerprint
-  const shouldBlock = (ipUnresolvable && hasNoUserAgent) || (ipUnresolvable && clientIncompleteFp);
+  // Block if: no real IP and no fingerprint hash at all (nothing to identify the client)
+  const hasNoFingerprint = !fp.fpHash;
+  const shouldBlock = (ipUnresolvable && hasNoUserAgent) ||
+                      (ipUnresolvable && clientIncompleteFp) ||
+                      (ipUnresolvable && hasNoFingerprint);
 
   if (shouldBlock) {
     const rawIp = fp.ip || req.socket?.remoteAddress || req.ip || '';
