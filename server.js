@@ -4323,11 +4323,15 @@ app.post('/api/register', (req, res) => {
     return res.status(403).json({ ok: false, error: 'Registration is not available.' });
   }
 
-  // Registration guard: block only when BOTH IP is internal/unresolvable AND client
-  // signals incomplete fingerprint. Either signal alone lets the request through.
   const ipUnresolvable = isUnresolvableIp(fp.ip);
+  const hasNoUserAgent = !fp.userAgent || fp.userAgent.trim() === '';
   const clientIncompleteFp = req.body && req.body.incompleteFp === true;
-  if (ipUnresolvable && clientIncompleteFp) {
+
+  // Block if: no real IP and no user agent (headless/scripted client)
+  // Block if: no real IP and client explicitly signals incomplete fingerprint
+  const shouldBlock = (ipUnresolvable && hasNoUserAgent) || (ipUnresolvable && clientIncompleteFp);
+
+  if (shouldBlock) {
     const rawIp = fp.ip || req.socket?.remoteAddress || req.ip || '';
     try {
       insertRegistrationRejection.run(nowEpoch(), rawIp, fp.userAgent || '', username);
