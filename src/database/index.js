@@ -218,6 +218,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
   ensureMiningSchema(db);
   ensureMarketSchema(db);
   ensureRobSchema(db);
+  ensureGraffitiSchema(db);
 
   const alreadyMigrated = db.prepare('SELECT COUNT(1) AS n FROM activity_feed').get().n;
   if (alreadyMigrated === 0) {
@@ -1483,6 +1484,22 @@ function ensureMarketSchema(db) {
     const tx = db.transaction(() => { for (const [r, p] of seeds) insert.run(r, p); });
     tx();
   }
+}
+
+function ensureGraffitiSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS graffiti_wall (
+      cell_index INTEGER PRIMARY KEY,
+      color      TEXT NOT NULL,
+      painted_by TEXT NOT NULL,
+      painted_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS graffiti_activity (
+      username    TEXT PRIMARY KEY,
+      last_logged INTEGER NOT NULL
+    );
+  `);
 }
 
 function ensureRobSchema(db) {

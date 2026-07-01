@@ -66,9 +66,9 @@
 #pxa-overlay{position:fixed;inset:0;background:rgba(0,0,0,.88);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px;box-sizing:border-box}
 #pxa-modal{--cell:clamp(22px,3.5vmin,32px);background:#0a0a0a;border:1px solid #222;border-radius:6px;display:flex;flex-direction:column;gap:10px;padding:16px;max-height:98vh;overflow:auto;width:fit-content;max-width:98vw}
 #pxa-title{color:var(--cyan);font-weight:bold;font-size:13px;letter-spacing:1px;text-align:center}
-#pxa-grid{display:grid;grid-template-columns:repeat(16,var(--cell));grid-template-rows:repeat(16,var(--cell));border:1px solid #2a2a2a;cursor:crosshair;touch-action:none;user-select:none;-webkit-user-select:none}
+#pxa-grid{display:grid;grid-template-columns:repeat(16,var(--cell));grid-template-rows:repeat(16,var(--cell));border:none;cursor:crosshair;touch-action:none;user-select:none;-webkit-user-select:none}
 canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixelated;image-rendering:crisp-edges;flex-shrink:0}
-.pxa-cell{width:var(--cell);height:var(--cell);box-sizing:border-box;background:#111}
+.pxa-cell{width:var(--cell);height:var(--cell);box-sizing:border-box;background:#111;border:1px solid #1e1e1e}
 .pxa-cell:hover{outline:1px solid rgba(255,255,255,.25);outline-offset:-1px;z-index:1}
 #pxa-palette{display:flex;flex-wrap:wrap;gap:4px}
 .pxa-swatch{width:22px;height:22px;border-radius:3px;border:2px solid transparent;cursor:pointer;box-sizing:border-box;flex-shrink:0}
@@ -85,6 +85,21 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
 .pxa-action-btn.primary{border-color:var(--cyan);color:var(--cyan)}
 .pxa-action-btn:hover{border-color:#555}
 .pxa-action-btn.primary:hover{background:rgba(25,195,195,.1)}
+#grf-overlay{position:fixed;inset:0;background:rgba(0,0,0,.88);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px;box-sizing:border-box}
+#grf-modal{background:#0a0a0a;border:1px solid #222;border-radius:6px;display:flex;flex-direction:column;gap:10px;padding:16px;max-height:98vh;overflow:auto;width:fit-content;max-width:98vw}
+#grf-title{color:var(--cyan);font-weight:bold;font-size:13px;letter-spacing:1px;text-align:center}
+#grf-grid{display:grid;grid-template-columns:repeat(80,14px);grid-template-rows:repeat(30,14px);border:none;cursor:crosshair;touch-action:none;user-select:none;-webkit-user-select:none}
+.grf-cell{width:14px;height:14px;box-sizing:border-box;background:#111;border:1px solid #1e1e1e}
+.grf-cell:hover{outline:1px solid rgba(255,255,255,.2);outline-offset:-1px;z-index:1}
+#grf-palette{display:flex;flex-wrap:wrap;gap:4px;max-width:1120px}
+.grf-swatch{width:22px;height:22px;border-radius:3px;border:2px solid transparent;cursor:pointer;box-sizing:border-box;flex-shrink:0}
+.grf-swatch.active{border-color:#fff;box-shadow:0 0 0 1px #000}
+#grf-tools{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.grf-tool-btn{appearance:none;border:1px solid #333;background:#111;color:var(--fg);padding:5px 10px;border-radius:4px;cursor:pointer;font:inherit;font-size:12px}
+.grf-tool-btn.active{border-color:var(--cyan);color:var(--cyan)}
+.grf-tool-btn:hover{border-color:#555}
+.grf-action-btn{appearance:none;border:1px solid #333;background:#111;color:var(--fg);padding:6px 14px;border-radius:4px;cursor:pointer;font:inherit;font-size:12px}
+.grf-action-btn:hover{border-color:#555}
 
 /* ===== Wordle modal ===== */
 #wordle-overlay{position:fixed;inset:0;background:rgba(0,0,0,.92);display:flex;align-items:center;justify-content:center;z-index:1000;padding:12px;box-sizing:border-box}
@@ -689,6 +704,10 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
           else if (op.op === 'openBlackjack') openBlackjack(op);
           else if (op.op === 'blackjack_state') blackjackHandleState(op);
           else if (op.op === 'blackjack_result') blackjackHandleResult(op);
+          else if (op.op === 'openGraffiti')    openGraffiti();
+          else if (op.op === 'graffiti_state')  grfHandleState(op);
+          else if (op.op === 'graffiti_painted') grfHandlePainted(op);
+          else if (op.op === 'graffiti_erased')  grfHandleErased(op);
         });
       }
     });
@@ -837,7 +856,7 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
 
   // ESC quickly refocuses prompt
   document.addEventListener('keydown', function(ev){
-    if (ev.key === 'Escape' && !document.getElementById('pxa-overlay') && !document.getElementById('wordle-overlay') && !document.getElementById('bj-overlay') && !document.getElementById('mining-overlay')) focusInputEnd(input);
+    if (ev.key === 'Escape' && !document.getElementById('pxa-overlay') && !document.getElementById('wordle-overlay') && !document.getElementById('bj-overlay') && !document.getElementById('mining-overlay') && !document.getElementById('grf-overlay')) focusInputEnd(input);
   });
 
   // ===== Pixel Art Editor =====
@@ -1010,6 +1029,205 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
     if (overlay) overlay.remove();
     pxaData = null; pxaEditId = null; pxaPainting = false;
     focusInputEnd(input);
+  }
+
+  // ===== Graffiti Wall =====
+  var GRAFFITI_PALETTE = [
+    '#000000','#222222','#444444','#666666','#888888','#aaaaaa','#cccccc','#ffffff',
+    '#3e1f00','#7b3f00','#c47a2b','#e8b87a',
+    '#ffcba4','#d4956a','#8d5524','#4a2912',
+    '#2d1b69','#880e4f','#ad1457','#b71c1c','#0d47a1','#1b5e20','#e65100','#004d40',
+    '#ff00ff','#00ffff','#ff0000','#00ff00','#0000ff','#ffff00','#ff6600','#ff1493',
+    '#b39ddb','#c62828','#2e7d32','#aeea00','#f9a825','#9e9e9e','#6a1b9a','#19c3c3'
+  ];
+  var grfPainting = false, grfColor = GRAFFITI_PALETTE[7], grfEraser = false, grfBrush = 1;
+  var grfCells = null;
+  document.addEventListener('mouseup', function(){ grfPainting = false; });
+
+  function openGraffiti(){
+    if (document.getElementById('grf-overlay')) return;
+    grfColor = GRAFFITI_PALETTE[7]; grfEraser = false; grfPainting = false; grfBrush = 1;
+
+    var overlay = document.createElement('div'); overlay.id = 'grf-overlay';
+    var modal = document.createElement('div'); modal.id = 'grf-modal';
+
+    var title = document.createElement('div'); title.id = 'grf-title';
+    title.textContent = 'GRAFFITI WALL — 80\xd730'; modal.appendChild(title);
+
+    var grid = document.createElement('div'); grid.id = 'grf-grid';
+    grfCells = new Array(2400);
+    for (var gi = 0; gi < 2400; gi++){
+      var cell = document.createElement('div');
+      cell.className = 'grf-cell'; cell.dataset.i = gi;
+      grfCells[gi] = cell; grid.appendChild(cell);
+    }
+    modal.appendChild(grid);
+
+    var paletteEl = document.createElement('div'); paletteEl.id = 'grf-palette';
+    var swatches = [];
+    var grfPencilBtn, grfEraserBtn;
+    GRAFFITI_PALETTE.forEach(function(c){
+      var sw = document.createElement('div');
+      sw.className = 'grf-swatch' + (c === grfColor ? ' active' : '');
+      sw.style.background = c; sw.title = c;
+      sw.addEventListener('click', function(){
+        grfColor = c; grfEraser = false;
+        swatches.forEach(function(s){ s.classList.remove('active'); });
+        sw.classList.add('active');
+        if (grfPencilBtn){ grfPencilBtn.classList.add('active'); }
+        if (grfEraserBtn){ grfEraserBtn.classList.remove('active'); }
+      });
+      swatches.push(sw); paletteEl.appendChild(sw);
+    });
+    modal.appendChild(paletteEl);
+
+    var toolsEl = document.createElement('div'); toolsEl.id = 'grf-tools';
+    grfPencilBtn = document.createElement('button');
+    grfPencilBtn.className = 'grf-tool-btn active'; grfPencilBtn.type = 'button';
+    grfPencilBtn.textContent = '✏ Pencil';
+    grfEraserBtn = document.createElement('button');
+    grfEraserBtn.className = 'grf-tool-btn'; grfEraserBtn.type = 'button';
+    grfEraserBtn.textContent = '□ Eraser';
+    var btn1px = document.createElement('button');
+    btn1px.className = 'grf-tool-btn active'; btn1px.type = 'button'; btn1px.textContent = '1px';
+    var btn2x2 = document.createElement('button');
+    btn2x2.className = 'grf-tool-btn'; btn2x2.type = 'button'; btn2x2.textContent = '2\xd72';
+    var btn3x3 = document.createElement('button');
+    btn3x3.className = 'grf-tool-btn'; btn3x3.type = 'button'; btn3x3.textContent = '3\xd73';
+    var brushBtns = [btn1px, btn2x2, btn3x3];
+
+    grfPencilBtn.addEventListener('click', function(){
+      grfEraser = false;
+      grfPencilBtn.classList.add('active'); grfEraserBtn.classList.remove('active');
+    });
+    grfEraserBtn.addEventListener('click', function(){
+      grfEraser = true;
+      grfEraserBtn.classList.add('active'); grfPencilBtn.classList.remove('active');
+    });
+    btn1px.addEventListener('click', function(){
+      grfBrush = 1;
+      brushBtns.forEach(function(b){ b.classList.remove('active'); }); btn1px.classList.add('active');
+    });
+    btn2x2.addEventListener('click', function(){
+      grfBrush = 2;
+      brushBtns.forEach(function(b){ b.classList.remove('active'); }); btn2x2.classList.add('active');
+    });
+    btn3x3.addEventListener('click', function(){
+      grfBrush = 3;
+      brushBtns.forEach(function(b){ b.classList.remove('active'); }); btn3x3.classList.add('active');
+    });
+
+    toolsEl.appendChild(grfPencilBtn); toolsEl.appendChild(grfEraserBtn);
+    toolsEl.appendChild(btn1px); toolsEl.appendChild(btn2x2); toolsEl.appendChild(btn3x3);
+
+    var closeBtn = document.createElement('button');
+    closeBtn.className = 'grf-action-btn'; closeBtn.type = 'button'; closeBtn.textContent = 'Close';
+    closeBtn.addEventListener('click', function(){ closeGraffiti(); });
+    toolsEl.appendChild(closeBtn);
+    modal.appendChild(toolsEl);
+
+    overlay.appendChild(modal); document.body.appendChild(overlay);
+
+    if (ws && ws.readyState === WebSocket.OPEN){
+      ws.send(JSON.stringify({ type: 'graffiti_getstate' }));
+    }
+
+    function grfBrushIndices(cellIndex){
+      var col = cellIndex % 80;
+      var row = Math.floor(cellIndex / 80);
+      var indices = [];
+      if (grfBrush === 1){
+        indices = [cellIndex];
+      } else if (grfBrush === 2){
+        var pairs = [[row,col],[row,col+1],[row+1,col],[row+1,col+1]];
+        for (var i = 0; i < pairs.length; i++){
+          var r = pairs[i][0], c = pairs[i][1];
+          if (r >= 0 && r < 30 && c >= 0 && c < 80) indices.push(r*80 + c);
+        }
+      } else {
+        for (var dr = -1; dr <= 1; dr++){
+          for (var dc = -1; dc <= 1; dc++){
+            var r2 = row + dr, c2 = col + dc;
+            if (r2 >= 0 && r2 < 30 && c2 >= 0 && c2 < 80) indices.push(r2*80 + c2);
+          }
+        }
+      }
+      return indices;
+    }
+
+    function paintAt(target){
+      if (!target || !target.classList || !target.classList.contains('grf-cell')) return;
+      var idx = parseInt(target.dataset.i, 10);
+      if (isNaN(idx) || idx < 0 || idx >= 2400) return;
+      var indices = grfBrushIndices(idx);
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (grfEraser){
+        for (var i = 0; i < indices.length; i++) grfCells[indices[i]].style.background = '';
+        ws.send(JSON.stringify({ type: 'graffiti_erase', strokes: indices.map(function(n){ return { index: n }; }) }));
+      } else {
+        for (var i = 0; i < indices.length; i++) grfCells[indices[i]].style.background = grfColor;
+        ws.send(JSON.stringify({ type: 'graffiti_paint', strokes: indices.map(function(n){ return { index: n, color: grfColor }; }) }));
+      }
+    }
+
+    grid.addEventListener('mousedown', function(e){
+      if (e.button !== 0) return;
+      grfPainting = true; paintAt(e.target); e.preventDefault();
+    });
+    grid.addEventListener('mousemove', function(e){
+      if (!grfPainting) return; paintAt(e.target);
+    });
+    grid.addEventListener('touchstart', function(e){
+      grfPainting = true;
+      var t = e.touches[0];
+      paintAt(document.elementFromPoint(t.clientX, t.clientY));
+      e.preventDefault();
+    }, { passive: false });
+    grid.addEventListener('touchmove', function(e){
+      if (!grfPainting) return;
+      var t = e.touches[0];
+      paintAt(document.elementFromPoint(t.clientX, t.clientY));
+      e.preventDefault();
+    }, { passive: false });
+    grid.addEventListener('touchend', function(){ grfPainting = false; });
+
+    function grfEscHandler(e){
+      if (e.key === 'Escape'){ closeGraffiti(); document.removeEventListener('keydown', grfEscHandler); }
+    }
+    document.addEventListener('keydown', grfEscHandler);
+  }
+
+  function closeGraffiti(){
+    var overlay = document.getElementById('grf-overlay');
+    if (overlay) overlay.remove();
+    grfCells = null; grfPainting = false;
+    focusInputEnd(input);
+  }
+
+  function grfHandleState(op){
+    if (!grfCells) return;
+    var cells = op.cells || [];
+    for (var i = 0; i < cells.length; i++){
+      var c = cells[i];
+      if (grfCells[c.cell_index]) grfCells[c.cell_index].style.background = c.color;
+    }
+  }
+
+  function grfHandlePainted(op){
+    if (!grfCells) return;
+    var strokes = op.strokes || [];
+    for (var i = 0; i < strokes.length; i++){
+      var s = strokes[i];
+      if (grfCells[s.index]) grfCells[s.index].style.background = s.color;
+    }
+  }
+
+  function grfHandleErased(op){
+    if (!grfCells) return;
+    var indices = op.indices || [];
+    for (var i = 0; i < indices.length; i++){
+      if (grfCells[indices[i]]) grfCells[indices[i]].style.background = '';
+    }
   }
 
   // ===== Wordle =====

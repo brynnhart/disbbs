@@ -137,6 +137,25 @@ const ROB_STEAL_PCT = {
 const ROB_RESOURCE_TIER = {};
 for (const [key, val] of Object.entries(RESOURCES)) ROB_RESOURCE_TIER[key] = val.tier;
 
+const GRAFFITI_COLS = 80;
+const GRAFFITI_ROWS = 30;
+const GRAFFITI_TOTAL = GRAFFITI_COLS * GRAFFITI_ROWS; // 2400
+
+const GRAFFITI_PALETTE = [
+  // blacks/greys/whites
+  '#000000','#222222','#444444','#666666','#888888','#aaaaaa','#cccccc','#ffffff',
+  // browns/earth tones
+  '#3e1f00','#7b3f00','#c47a2b','#e8b87a',
+  // skin tones
+  '#ffcba4','#d4956a','#8d5524','#4a2912',
+  // jewel/goth tones
+  '#2d1b69','#880e4f','#ad1457','#b71c1c','#0d47a1','#1b5e20','#e65100','#004d40',
+  // neons/brights
+  '#ff00ff','#00ffff','#ff0000','#00ff00','#0000ff','#ffff00','#ff6600','#ff1493',
+  // DIS resource colors
+  '#b39ddb','#c62828','#2e7d32','#aeea00','#f9a825','#9e9e9e','#6a1b9a','#19c3c3'
+];
+
 const {
   getSetting,
   setSetting,
@@ -326,6 +345,13 @@ const stmtAddResourceBal     = db.prepare('INSERT INTO resource_balances (userna
 const stmtInsertRobLog = db.prepare(
   'INSERT INTO rob_log (attacker, target, resource, success, amount, created_at) VALUES (?, ?, ?, ?, ?, ?)'
 );
+
+/* Graffiti Wall */
+const stmtGraffitiGetAll    = db.prepare('SELECT cell_index, color, painted_by FROM graffiti_wall ORDER BY cell_index ASC');
+const stmtGraffitiPaint     = db.prepare('INSERT INTO graffiti_wall (cell_index, color, painted_by, painted_at) VALUES (?,?,?,?) ON CONFLICT(cell_index) DO UPDATE SET color=excluded.color, painted_by=excluded.painted_by, painted_at=excluded.painted_at');
+const stmtGraffitiErase     = db.prepare('DELETE FROM graffiti_wall WHERE cell_index = ?');
+const stmtGraffitiLastLog   = db.prepare('SELECT last_logged FROM graffiti_activity WHERE username = ?');
+const stmtGraffitiUpsertLog = db.prepare('INSERT INTO graffiti_activity (username, last_logged) VALUES (?,?) ON CONFLICT(username) DO UPDATE SET last_logged=excluded.last_logged');
 
 /* Market */
 const stmtGetAllMarketPrices = db.prepare('SELECT resource, current_price, previous_price, last_drift_date FROM market_prices');
@@ -727,6 +753,7 @@ function cmdHelp(api, state){
   api.print('  /sell [resource] [amount]   Sell resources for chrome', 'cyan');
   api.print('  /buy  [resource] [amount]   Buy resources with chrome', 'cyan');
   api.print('  /rob  [user] [resource]     Steal chrome using a mined resource as bait', 'cyan');
+  api.print('  /graffiti   The shared graffiti wall — draw anything', 'cyan');
 
   if (state && state.isAdmin){
     api.hr(); api.print('Admin:', 'yellow');
@@ -760,6 +787,11 @@ function isValidPixelColor(v){
 function cmdDraw(api, state){
   if (!requireAuth(api, state)) return;
   sendOps(api.ws, [{ op: 'openPixelEditor' }]);
+}
+
+function cmdGraffiti(api, state) {
+  if (!requireAuth(api, state)) return;
+  sendOps(api.ws, [{ op: 'openGraffiti' }]);
 }
 
 function cmdArt(api, state, args){
@@ -975,6 +1007,7 @@ function renderMenu(api, state){
     b.print('  /links           Link share — stuff worth seeing', 'cyan');
     b.print('  /polls           Poll booth', 'cyan');
     b.print('  /art             Pixel art library — browse and create', 'cyan');
+    b.print('  /graffiti        Shared graffiti wall', 'cyan');
     b.print('', 'dim');
     b.print('  /games           Launch a game', 'cyan');
     b.print('', 'dim');
@@ -3670,6 +3703,8 @@ function cmdBan(api, state, args) {
     db.prepare('DELETE FROM notifications  WHERE to_user_id = ? OR from_user_id = ?').run(userId, userId);
     db.prepare("DELETE FROM activity_feed WHERE message LIKE ?").run(`%${target.username}%`);
     db.prepare("DELETE FROM game_feed     WHERE message LIKE ? OR username = ?").run(`%${target.username}%`, target.username);
+    db.prepare('DELETE FROM graffiti_wall WHERE painted_by = ?').run(target.username);
+    db.prepare('DELETE FROM graffiti_activity WHERE username = ?').run(target.username);
 
     insertBan.run(now, state.username, target.username, target.registration_ip || null, target.fingerprint_hash || null, null);
 
@@ -3835,6 +3870,10 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'art':          cmdArt(api, state, args); return true;
     case 'editart':      cmdEditArt(api, state, args); return true;
     case 'deleteart':    cmdDeleteArt(api, state, args); return true;
+
+    /* Graffiti Wall */
+    case 'graffiti':     cmdGraffiti(api, state); return true;
+    case 'wall':         cmdGraffiti(api, state); return true;
 
     /* Activity / Economy */
     case 'activity': renderActivity(api, state); return true;
@@ -4029,6 +4068,50 @@ wss.on('connection', (ws, req) => {
     if (msg.type === 'blackjack_hit')      { handleBlackjackHit(msg, api, state); return; }
     if (msg.type === 'blackjack_stand')    { handleBlackjackStand(msg, api, state); return; }
     if (msg.type === 'blackjack_getstate') { handleBlackjackGetState(api, state); return; }
+
+    if (msg.type === 'graffiti_getstate') {
+      if (!requireAuth(api, state)) return;
+      const cells = stmtGraffitiGetAll.all();
+      sendOps(api.ws, [{ op: 'graffiti_state', cells }]);
+      return;
+    }
+
+    if (msg.type === 'graffiti_paint') {
+      if (!requireAuth(api, state)) return;
+      const strokes = Array.isArray(msg.strokes) ? msg.strokes.slice(0, 9) : [];
+      const valid = strokes.filter(s =>
+        Number.isInteger(s.index) && s.index >= 0 && s.index < GRAFFITI_TOTAL &&
+        isValidPixelColor(s.color) && GRAFFITI_PALETTE.includes(s.color)
+      );
+      if (!valid.length) return;
+      const now = nowEpoch();
+      for (const s of valid) {
+        stmtGraffitiPaint.run(s.index, s.color, state.username, now);
+      }
+      HUB.clients.forEach(ws => sendOps(ws, [{ op: 'graffiti_painted', strokes: valid, by: state.username }]));
+      const lastLog = stmtGraffitiLastLog.get(state.username);
+      const todayYmd = ymdFromEpoch(now);
+      if (!lastLog || ymdFromEpoch(lastLog.last_logged) !== todayYmd) {
+        stmtGraffitiUpsertLog.run(state.username, now);
+        addActivityEvent('community', 'graffiti', `🎨 ${state.username} tagged the graffiti wall`);
+      }
+      return;
+    }
+
+    if (msg.type === 'graffiti_erase') {
+      if (!requireAuth(api, state)) return;
+      const strokes = Array.isArray(msg.strokes) ? msg.strokes.slice(0, 9) : [];
+      const validIndices = strokes
+        .filter(s => Number.isInteger(s.index) && s.index >= 0 && s.index < GRAFFITI_TOTAL)
+        .map(s => s.index);
+      if (!validIndices.length) return;
+      for (const idx of validIndices) {
+        stmtGraffitiErase.run(idx);
+      }
+      HUB.clients.forEach(ws => sendOps(ws, [{ op: 'graffiti_erased', indices: validIndices, by: state.username }]));
+      return;
+    }
+
     if (msg.type !== 'input') return;
 
     const raw = String(msg.raw || '').trim();
