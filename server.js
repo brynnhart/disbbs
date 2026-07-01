@@ -1546,8 +1546,8 @@ function renderAbout(api, state){
     b.print('== RULES ==', 'magenta');
     b.print(' ', 'white');
     b.print('Dont be a badger-sized dickhole.', 'white');
-    b.print('No racism/bigotry', 'white');
-    b.print('No explicit conversation or content', 'white');
+    b.print('No racism/bigotry.', 'white');
+    b.print('No explicit conversation or content.', 'white');
     b.print(' ', 'white');
     b.hr(); b.print('Navigation: /main', 'dim');
   });
