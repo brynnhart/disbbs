@@ -948,7 +948,6 @@ function renderMenu(api, state){
     b.clear();
     b.setInputLimit(null);
     b.printHTML('<div class="banner"><div class="line"><span class="cyan">▄▄▄</span><span class="magenta"> Dead Internet Society </span><span class="cyan">▄▄▄</span></div><div class="line dim">type a /command to launch something.</div></div>');
-    b.print('Programs:', 'yellow');
     if (unreadCount > 0) {
       const label = unreadCount === 1 ? 'message' : 'messages';
       b.printHTML(`<span style="color:#ff6b6b;font-weight:bold;">📬 NEW DIRECT MESSAGES: ${unreadCount} unread ${label}.</span>`);
@@ -966,9 +965,9 @@ function renderMenu(api, state){
       if (newItems.newArt)     b.print(`  ${pl(newItems.newArt,     'new pixel art')}`, 'cyan');
       if (newItems.unreadDMs)  b.print(`  ${pl(newItems.unreadDMs,  'unread direct message')}`, 'yellow');
     }
+    b.print('Programs:', 'yellow');
     b.print('  /chat            Commons Chat — talk to everyone', 'cyan');
     b.print('  /messages        Direct messages', 'cyan');
-    b.print('  /post <text>     Drop a status update', 'cyan');
     b.print('  /feed [user]     Latest updates from the community', 'cyan');
     b.print('', 'dim');
     b.print('  /board           Bulletin board — long-form threads', 'cyan');
@@ -985,6 +984,7 @@ function renderMenu(api, state){
     b.print('  /activity        Recent activity across DIS', 'cyan');
     b.print('  /profile         Your profile (or /profile <user>)', 'cyan');
     b.print('  /announcements   Announcements from the sysop', 'cyan');
+    b.print('  /suggestions     Report bugs and suggest new features!', 'cyan');
     b.print('  /about           About DIS', 'cyan');
     b.hr();
     b.print('/command works from anywhere. /main to come home. /help for everything.', 'dim');
