@@ -742,6 +742,7 @@ function cmdHelp(api, state){
     api.print('  /unban <id>                  Remove a ban list entry by id', 'cyan');
     api.print('  /bannote <id> <text>         Add/update a note on a ban entry', 'cyan');
     api.print('  /checkuser <username>        Show fingerprint info + ban list matches for a user', 'cyan');
+    api.print('  /purgeactivity <username>    Remove all activity feed entries mentioning a user', 'cyan');
     api.print('  /donations                   Recent donations with chrome awarded', 'cyan');
     api.print('  /linkdonor <kofi> <dis>      Link a Ko-fi name to a DIS account (retroactive award)', 'cyan');
     api.print('  /unlinkdonor <kofi>          Remove a Ko-fi name link', 'cyan');
@@ -3667,6 +3668,8 @@ function cmdBan(api, state, args) {
     db.prepare('DELETE FROM dm_messages    WHERE sender_id = ?').run(userId);
     db.prepare('DELETE FROM pixel_art      WHERE creator_username = ?').run(target.username);
     db.prepare('DELETE FROM notifications  WHERE to_user_id = ? OR from_user_id = ?').run(userId, userId);
+    db.prepare("DELETE FROM activity_feed WHERE message LIKE ?").run(`%${target.username}%`);
+    db.prepare("DELETE FROM game_feed     WHERE message LIKE ? OR username = ?").run(`%${target.username}%`, target.username);
 
     insertBan.run(now, state.username, target.username, target.registration_ip || null, target.fingerprint_hash || null, null);
 
@@ -3696,6 +3699,16 @@ function cmdBan(api, state, args) {
   api.print(`  Fingerprint: ${target.fingerprint_hash ? target.fingerprint_hash.slice(0, 16) + '…' : '(none on record)'}`, 'dim');
   api.print(`  Deleted: ${summary.chatMsgs} chat msgs, ${summary.boardTopics} topics, ${summary.boardComments} board replies, ${summary.linkPosts} links, ${summary.linkComments} link comments, ${summary.pollVotes} votes, ${summary.pollsCreated} polls, ${summary.statusPosts} status posts, ${summary.dmSent} DMs sent, ${summary.pxArt} pixel art`, 'dim');
   broadcastSystem(`${target.username} has been removed.`);
+}
+
+function cmdPurgeActivity(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
+  const targetName = (args[0] || '').trim();
+  if (!targetName) { api.print('Usage: /purgeactivity <username>', 'yellow'); return; }
+  const r1 = db.prepare("DELETE FROM activity_feed WHERE message LIKE ?").run(`%${targetName}%`);
+  const r2 = db.prepare("DELETE FROM game_feed WHERE message LIKE ? OR username = ?").run(`%${targetName}%`, targetName);
+  api.print(`Purged activity: ${r1.changes} activity_feed rows, ${r2.changes} game_feed rows mentioning ${targetName}.`, 'green');
 }
 
 function cmdBanList(api, state) {
@@ -3898,11 +3911,12 @@ function handleGlobalCommand(cmd, api, state, args){
     /* Admin ban / blacklist */
     case 'newusers':    cmdNewUsers(api, state, args); return true;
     case 'rejections':  cmdRejections(api, state); return true;
-    case 'ban':         cmdBan(api, state, args); return true;
-    case 'banlist':     cmdBanList(api, state); return true;
-    case 'unban':       cmdUnban(api, state, args); return true;
-    case 'bannote':     cmdBanNote(api, state, args); return true;
-    case 'checkuser':   cmdCheckUser(api, state, args); return true;
+    case 'ban':           cmdBan(api, state, args); return true;
+    case 'banlist':       cmdBanList(api, state); return true;
+    case 'unban':         cmdUnban(api, state, args); return true;
+    case 'bannote':       cmdBanNote(api, state, args); return true;
+    case 'checkuser':     cmdCheckUser(api, state, args); return true;
+    case 'purgeactivity': cmdPurgeActivity(api, state, args); return true;
 
     default:
       return false;
