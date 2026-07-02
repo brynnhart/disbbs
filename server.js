@@ -754,6 +754,7 @@ function cmdHelp(api, state){
   api.print('  /sell [resource] [amount]   Sell resources for chrome', 'cyan');
   api.print('  /buy  [resource] [amount]   Buy resources with chrome', 'cyan');
   api.print('  /rob  [user] [resource]     Steal chrome using a mined resource as bait', 'cyan');
+  api.print('  /grind   earn 1 ₢. it\'s not much, but it\'s honest work.', 'cyan');
   api.print('  /graffiti   The shared graffiti wall — draw anything', 'cyan');
 
   if (state && state.isAdmin){
@@ -2698,6 +2699,13 @@ function attemptRob(attackerUsername, targetUsername, resource) {
   }
 }
 
+function cmdGrind(api, state) {
+  if (!requireAuth(api, state)) return;
+  chrome.award(state.username, 1, 'grind');
+  const balance = chrome.getBalance(state.username);
+  api.print(`you grind for a moment... +1 ₢  (balance: ${balance} ₢)`, 'dim');
+}
+
 function cmdRob(api, state, args) {
   if (!requireAuth(api, state)) return;
   const attackerUsername = state.username;
@@ -3897,6 +3905,7 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'sell':     cmdMarketSell(api, state, args); return true;
     case 'buy':      cmdMarketBuy(api, state, args);  return true;
     case 'rob':      cmdRob(api, state, args);        return true;
+    case 'grind':    cmdGrind(api, state);             return true;
 
     /* Games */
     case 'games':    renderGames(api, state); return true;
