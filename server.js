@@ -3706,6 +3706,8 @@ function cmdBan(api, state, args) {
     db.prepare("DELETE FROM game_feed     WHERE message LIKE ? OR username = ?").run(`%${target.username}%`, target.username);
     db.prepare('DELETE FROM graffiti_wall WHERE painted_by = ?').run(target.username);
     db.prepare('DELETE FROM graffiti_activity WHERE username = ?').run(target.username);
+    db.prepare('DELETE FROM chrome_balances    WHERE username = ?').run(target.username);
+    db.prepare('DELETE FROM chrome_transactions WHERE username = ?').run(target.username);
 
     insertBan.run(now, state.username, target.username, target.registration_ip || null, target.fingerprint_hash || null, null);
 
@@ -3745,6 +3747,16 @@ function cmdPurgeActivity(api, state, args) {
   const r1 = db.prepare("DELETE FROM activity_feed WHERE message LIKE ?").run(`%${targetName}%`);
   const r2 = db.prepare("DELETE FROM game_feed WHERE message LIKE ? OR username = ?").run(`%${targetName}%`, targetName);
   api.print(`Purged activity: ${r1.changes} activity_feed rows, ${r2.changes} game_feed rows mentioning ${targetName}.`, 'green');
+}
+
+function cmdPurgeChrome(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
+  const targetName = (args[0] || '').trim();
+  if (!targetName) { api.print('usage: /purgechrome <username>', 'yellow'); return; }
+  const r1 = db.prepare('DELETE FROM chrome_balances WHERE username = ?').run(targetName);
+  const r2 = db.prepare('DELETE FROM chrome_transactions WHERE username = ?').run(targetName);
+  api.print(`Purged chrome: ${r1.changes} balance rows, ${r2.changes} transaction rows for ${targetName}.`, 'green');
 }
 
 function cmdBanList(api, state) {
@@ -3957,6 +3969,7 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'bannote':       cmdBanNote(api, state, args); return true;
     case 'checkuser':     cmdCheckUser(api, state, args); return true;
     case 'purgeactivity': cmdPurgeActivity(api, state, args); return true;
+    case 'purgechrome':   cmdPurgeChrome(api, state, args); return true;
 
     default:
       return false;
