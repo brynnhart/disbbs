@@ -201,6 +201,25 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
 #bj-close-btn{appearance:none;border:1px solid #333;background:none;color:#888;font:inherit;font-size:12px;padding:7px;border-radius:4px;cursor:pointer;width:100%}
 #bj-close-btn:hover{border-color:#555;color:var(--fg)}
 
+/* ===== Hack modal ===== */
+#hack-overlay { position:fixed; inset:0; background:rgba(0,0,0,.95); display:flex; align-items:center; justify-content:center; z-index:1000 }
+#hack-modal { background:#000; border:1px solid #00ff41; border-radius:4px; padding:24px; width:560px; max-width:96vw; max-height:96vh; overflow:auto; font-family:monospace; color:#00ff41; text-shadow:0 0 8px #00ff41; box-shadow:0 0 32px rgba(0,255,65,.15), inset 0 0 32px rgba(0,0,0,.8) }
+#hack-modal * { font-family:monospace }
+#hack-title { font-size:11px; color:#00ff41; margin-bottom:16px; line-height:1.6; opacity:.8 }
+#hack-noise { font-size:12px; line-height:1.5; letter-spacing:1px; margin-bottom:16px; word-break:break-all; color:#00a82d }
+.hack-word { color:#00ff41; cursor:pointer; font-weight:bold; text-decoration:underline; text-shadow:0 0 12px #00ff41 }
+.hack-word:hover { color:#fff; text-shadow:0 0 12px #fff }
+.hack-word.used { color:#003a0e; text-decoration:none; cursor:default; text-shadow:none }
+.hack-bracket { color:#00ff41; cursor:pointer; opacity:.6 }
+.hack-bracket:hover { opacity:1; text-shadow:0 0 8px #00ff41 }
+.hack-bracket.used { opacity:.2; cursor:default }
+#hack-attempts { margin-bottom:12px; font-size:13px }
+#hack-words-list { margin-bottom:16px; display:grid; grid-template-columns:1fr 1fr; gap:4px 8px }
+#hack-log { font-size:12px; color:#00a82d; min-height:60px; margin-bottom:12px; line-height:1.8 }
+#hack-result { font-size:13px; min-height:20px; margin-bottom:12px }
+.hack-close-btn { appearance:none; background:transparent; border:1px solid #00ff41; color:#00ff41; padding:6px 16px; cursor:pointer; font-family:monospace; font-size:12px; text-shadow:0 0 8px #00ff41 }
+.hack-close-btn:hover { background:#00ff41; color:#000 }
+
 /* ===== Auth overlay ===== */
 #auth-overlay{position:fixed;inset:0;z-index:2000;background:#000;display:flex;flex-direction:column;align-items:center;overflow-y:auto;padding:0 0 48px;box-sizing:border-box}
 #auth-splash{width:100%;align-self:stretch;flex-shrink:0}
@@ -708,6 +727,11 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
           else if (op.op === 'graffiti_state')  grfHandleState(op);
           else if (op.op === 'graffiti_painted') grfHandlePainted(op);
           else if (op.op === 'graffiti_erased')  grfHandleErased(op);
+          else if (op.op === 'openHack')        openHack();
+          else if (op.op === 'hack_state')      hackHandleState(op);
+          else if (op.op === 'hack_result')     hackHandleResult(op);
+          else if (op.op === 'hack_bracket')    hackHandleBracket(op);
+          else if (op.op === 'hack_error')      hackShowError(op.message || 'Error.');
         });
       }
     });
@@ -856,7 +880,7 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
 
   // ESC quickly refocuses prompt
   document.addEventListener('keydown', function(ev){
-    if (ev.key === 'Escape' && !document.getElementById('pxa-overlay') && !document.getElementById('wordle-overlay') && !document.getElementById('bj-overlay') && !document.getElementById('mining-overlay') && !document.getElementById('grf-overlay')) focusInputEnd(input);
+    if (ev.key === 'Escape' && !document.getElementById('pxa-overlay') && !document.getElementById('wordle-overlay') && !document.getElementById('bj-overlay') && !document.getElementById('mining-overlay') && !document.getElementById('grf-overlay') && !document.getElementById('hack-overlay')) focusInputEnd(input);
   });
 
   // ===== Pixel Art Editor =====
@@ -1258,6 +1282,18 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
     alexandrite:'#6a1b9a'
   };
   var MN_RESOURCE_KEYS = ['bismuth','cinnabar','malachite','vitriol','brimstone','obsidian','alexandrite'];
+
+  // ===== Hack =====
+  var hkNoise             = '';
+  var hkWords              = [];   // today's 5 valid words (password + decoys)
+  var hkBrackets            = [];  // today's 2 bracket tokens
+  var hkGuessed            = [];   // words already guessed (strings)
+  var hkUsedBrackets       = [];   // bracket tokens already used
+  var hkRemovedWords       = [];   // decoys removed via a 'dud' bracket
+  var hkAttemptsRemaining  = 4;
+  var hkWordLength         = 5;
+  var hkGameOver           = false;
+  var hkSubmitting         = false;
 
   function fmtCr(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
 
@@ -2110,6 +2146,280 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'mining_getstate' }));
     }
+  }
+
+  // ===== Hack (terminal cracking) =====
+  function openHack() {
+    if (document.getElementById('hack-overlay')) return;
+    hkNoise = ''; hkWords = []; hkBrackets = []; hkGuessed = []; hkUsedBrackets = []; hkRemovedWords = [];
+    hkAttemptsRemaining = 4; hkWordLength = 5; hkGameOver = false; hkSubmitting = false;
+
+    var overlay = document.createElement('div'); overlay.id = 'hack-overlay';
+    var modal   = document.createElement('div'); modal.id   = 'hack-modal';
+
+    var titleEl = document.createElement('div'); titleEl.id = 'hack-title';
+    ['ROBCO INDUSTRIES UNIFIED OPERATING SYSTEM', 'COPYRIGHT 2075-2077 ROBCO INDUSTRIES', 'TERMINAL LOCKED. ENTER PASSWORD NOW.'].forEach(function(line) {
+      var d = document.createElement('div'); d.textContent = line; titleEl.appendChild(d);
+    });
+    modal.appendChild(titleEl);
+
+    var attemptsEl = document.createElement('div'); attemptsEl.id = 'hack-attempts';
+    attemptsEl.textContent = 'ATTEMPTS REMAINING: ▓▓▓▓';
+    modal.appendChild(attemptsEl);
+
+    var noiseEl = document.createElement('div'); noiseEl.id = 'hack-noise';
+    noiseEl.textContent = 'loading…';
+    modal.appendChild(noiseEl);
+
+    var wordsListEl = document.createElement('div'); wordsListEl.id = 'hack-words-list';
+    modal.appendChild(wordsListEl);
+
+    var logEl = document.createElement('div'); logEl.id = 'hack-log';
+    modal.appendChild(logEl);
+
+    var resultEl = document.createElement('div'); resultEl.id = 'hack-result';
+    modal.appendChild(resultEl);
+
+    var closeBtn = document.createElement('button');
+    closeBtn.id = 'hack-close-btn'; closeBtn.className = 'hack-close-btn';
+    closeBtn.type = 'button'; closeBtn.textContent = 'Close';
+    closeBtn.addEventListener('click', closeHack);
+    modal.appendChild(closeBtn);
+
+    function hkEsc(e) { if (e.key === 'Escape') { closeHack(); document.removeEventListener('keydown', hkEsc); } }
+    document.addEventListener('keydown', hkEsc);
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'hack_getstate' }));
+    }
+  }
+
+  function hackRenderAttempts() {
+    var attemptsEl = document.getElementById('hack-attempts');
+    if (!attemptsEl) return;
+    var filled = Math.max(0, Math.min(4, hkAttemptsRemaining));
+    var bar = '';
+    for (var i = 0; i < 4; i++) bar += (i < filled ? '▓' : '░');
+    attemptsEl.textContent = 'ATTEMPTS REMAINING: ' + bar;
+  }
+
+  function hackRenderNoise() {
+    var noiseEl = document.getElementById('hack-noise');
+    if (!noiseEl) return;
+    noiseEl.innerHTML = '';
+    var activeWords = hkWords.filter(function(w) { return hkRemovedWords.indexOf(w) === -1; });
+
+    var matches = [];
+    activeWords.forEach(function(w) {
+      var idx = hkNoise.indexOf(w);
+      if (idx !== -1) matches.push({ start: idx, end: idx + w.length, type: 'word', value: w });
+    });
+    hkBrackets.forEach(function(tok) {
+      var idx = hkNoise.indexOf(tok);
+      if (idx !== -1) matches.push({ start: idx, end: idx + tok.length, type: 'bracket', value: tok });
+    });
+    matches.sort(function(a, b) { return a.start - b.start; });
+
+    var pos = 0;
+    matches.forEach(function(m) {
+      if (m.start > pos) noiseEl.appendChild(document.createTextNode(hkNoise.slice(pos, m.start)));
+      var span = document.createElement('span');
+      if (m.type === 'word') {
+        var isUsed = hkGuessed.indexOf(m.value) !== -1;
+        span.className = 'hack-word' + (isUsed ? ' used' : '');
+        span.textContent = m.value;
+        if (!isUsed && !hkGameOver) {
+          span.addEventListener('click', function() { hackSubmitGuess(m.value); });
+        }
+      } else {
+        var tokUsed = hkUsedBrackets.indexOf(m.value) !== -1;
+        span.className = 'hack-bracket' + (tokUsed ? ' used' : '');
+        span.textContent = m.value;
+        if (!tokUsed && !hkGameOver) {
+          span.addEventListener('click', function() { hackSubmitBracket(m.value); });
+        }
+      }
+      noiseEl.appendChild(span);
+      pos = m.end;
+    });
+    if (pos < hkNoise.length) noiseEl.appendChild(document.createTextNode(hkNoise.slice(pos)));
+  }
+
+  function hackRenderWordsList() {
+    var wordsListEl = document.getElementById('hack-words-list');
+    if (!wordsListEl) return;
+    wordsListEl.innerHTML = '';
+    hkWords.forEach(function(w) {
+      if (hkRemovedWords.indexOf(w) !== -1) return;
+      var isUsed = hkGuessed.indexOf(w) !== -1;
+      var span = document.createElement('span');
+      span.className = 'hack-word' + (isUsed ? ' used' : '');
+      span.textContent = '> ' + w;
+      if (!isUsed && !hkGameOver) {
+        span.addEventListener('click', function() { hackSubmitGuess(w); });
+      }
+      wordsListEl.appendChild(span);
+    });
+  }
+
+  function hackAppendLog(word, likeness, wordLength) {
+    var logEl = document.getElementById('hack-log');
+    if (!logEl) return;
+    var line = document.createElement('div');
+    line.textContent = '>' + word.padEnd(12, ' ') + 'LIKENESS ' + likeness + '/' + wordLength;
+    logEl.appendChild(line);
+  }
+
+  function hackSubmitGuess(word) {
+    if (hkSubmitting || hkGameOver) return;
+    if (hkGuessed.indexOf(word) !== -1) return;
+    hkSubmitting = true;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'hack_guess', word: word }));
+    } else {
+      hkSubmitting = false;
+    }
+  }
+
+  function hackSubmitBracket(token) {
+    if (hkGameOver) return;
+    if (hkUsedBrackets.indexOf(token) !== -1) return;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'hack_bracket', token: token }));
+    }
+  }
+
+  function hackShowError(msg) {
+    var resultEl = document.getElementById('hack-result');
+    if (resultEl) { resultEl.textContent = msg || ''; resultEl.style.color = '#ff3b3b'; }
+    hkSubmitting = false;
+  }
+
+  function hackHandleState(op) {
+    var noiseEl = document.getElementById('hack-noise');
+    if (!noiseEl) return;
+
+    if (op.alreadyPlayed) {
+      hkGameOver = true;
+      var wordsListEl = document.getElementById('hack-words-list');
+      var attemptsEl  = document.getElementById('hack-attempts');
+      var logEl       = document.getElementById('hack-log');
+      var resultEl    = document.getElementById('hack-result');
+      noiseEl.textContent = '';
+      if (wordsListEl) wordsListEl.innerHTML = '';
+      if (attemptsEl)  attemptsEl.textContent = '';
+      if (logEl)       logEl.innerHTML = '';
+      if (resultEl) {
+        resultEl.innerHTML = '';
+        var l1 = document.createElement('div');
+        l1.textContent = op.solved ? ('>ACCESS GRANTED. (attempt ' + op.attemptsUsed + ')') : '>TERMINAL LOCKED.';
+        l1.style.color = op.solved ? '#00ff41' : '#ff3b3b';
+        resultEl.appendChild(l1);
+        var l2 = document.createElement('div');
+        l2.textContent = '>+' + fmtCr(op.chromeWon) + ' ₢ AWARDED.';
+        resultEl.appendChild(l2);
+        var l3 = document.createElement('div');
+        l3.textContent = '>you already ran this terminal today.';
+        resultEl.appendChild(l3);
+      }
+      var closeBtnEl = document.getElementById('hack-close-btn');
+      if (closeBtnEl) closeBtnEl.textContent = 'Close';
+      return;
+    }
+
+    hkWordLength        = op.wordLength || 5;
+    hkNoise             = op.noise || '';
+    hkWords             = Array.isArray(op.words) ? op.words.slice() : [];
+    hkBrackets          = Array.isArray(op.brackets) ? op.brackets.slice() : [];
+    hkGuessed           = Array.isArray(op.guesses) ? op.guesses.map(function(g) { return g.word; }) : [];
+    hkUsedBrackets      = Array.isArray(op.usedBrackets) ? op.usedBrackets.slice() : [];
+    hkRemovedWords      = op.removedWord ? [op.removedWord] : [];
+    hkAttemptsRemaining = op.attemptsRemaining != null ? op.attemptsRemaining : 4;
+    hkGameOver          = false;
+
+    hackRenderAttempts();
+    hackRenderNoise();
+    hackRenderWordsList();
+
+    var logEl2 = document.getElementById('hack-log');
+    if (logEl2) {
+      logEl2.innerHTML = '';
+      (op.guesses || []).forEach(function(g) { hackAppendLog(g.word, g.likeness, hkWordLength); });
+    }
+    var resultEl2 = document.getElementById('hack-result');
+    if (resultEl2) { resultEl2.textContent = ''; resultEl2.style.color = ''; }
+  }
+
+  function hackHandleResult(op) {
+    hkSubmitting = false;
+    if (!op.word) return;
+    hackAppendLog(op.word, op.likeness, hkWordLength);
+    hkGuessed.push(op.word);
+    hkAttemptsRemaining = op.attemptsRemaining != null ? op.attemptsRemaining : hkAttemptsRemaining;
+    hackRenderAttempts();
+    hackRenderNoise();
+    hackRenderWordsList();
+
+    if (op.gameOver) {
+      hkGameOver = true;
+      var resultEl = document.getElementById('hack-result');
+      if (resultEl) {
+        resultEl.innerHTML = '';
+        var l1 = document.createElement('div');
+        if (op.solved) {
+          l1.textContent = '>ACCESS GRANTED.';
+          l1.style.color = '#00ff41';
+          resultEl.appendChild(l1);
+          var l2 = document.createElement('div');
+          l2.textContent = '>+' + fmtCr(op.chromeWon) + ' ₢ AWARDED.';
+          resultEl.appendChild(l2);
+        } else {
+          l1.textContent = '>TERMINAL LOCKED.';
+          l1.style.color = '#ff3b3b';
+          resultEl.appendChild(l1);
+          var l2b = document.createElement('div');
+          l2b.textContent = '>LOCKOUT INITIATED.';
+          resultEl.appendChild(l2b);
+          var l3 = document.createElement('div');
+          l3.textContent = '>PASSWORD WAS: ' + (op.password || '?');
+          resultEl.appendChild(l3);
+        }
+      }
+      var closeBtnEl = document.getElementById('hack-close-btn');
+      if (closeBtnEl) closeBtnEl.textContent = 'Done';
+    }
+  }
+
+  function hackHandleBracket(op) {
+    if (!op.token) return;
+    hkUsedBrackets.push(op.token);
+    if (op.effect === 'dud' && op.removeWord) {
+      hkRemovedWords.push(op.removeWord);
+    } else if (op.effect === 'reset') {
+      hkAttemptsRemaining = op.attemptsRemaining != null ? op.attemptsRemaining : hkAttemptsRemaining;
+    }
+    hackRenderAttempts();
+    hackRenderNoise();
+    hackRenderWordsList();
+    var logEl = document.getElementById('hack-log');
+    if (logEl) {
+      var line = document.createElement('div');
+      line.textContent = op.effect === 'dud'
+        ? ('>DUD REMOVED: ' + (op.removeWord || '?'))
+        : '>ATTEMPT RESTORED.';
+      logEl.appendChild(line);
+    }
+  }
+
+  function closeHack() {
+    var overlay = document.getElementById('hack-overlay');
+    if (overlay) overlay.remove();
+    hkNoise = ''; hkWords = []; hkBrackets = []; hkGuessed = []; hkUsedBrackets = []; hkRemovedWords = [];
+    hkAttemptsRemaining = 4; hkGameOver = false; hkSubmitting = false;
+    focusInputEnd(input);
   }
 
   // ===== Auth overlay logic =====

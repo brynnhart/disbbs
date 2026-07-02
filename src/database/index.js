@@ -219,6 +219,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
   ensureMarketSchema(db);
   ensureRobSchema(db);
   ensureGraffitiSchema(db);
+  ensureHackSchema(db);
 
   const alreadyMigrated = db.prepare('SELECT COUNT(1) AS n FROM activity_feed').get().n;
   if (alreadyMigrated === 0) {
@@ -1515,6 +1516,20 @@ function ensureRobSchema(db) {
     );
     CREATE INDEX IF NOT EXISTS idx_rob_log_attacker ON rob_log(attacker, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_rob_log_target   ON rob_log(target, created_at DESC);
+  `);
+}
+
+function ensureHackSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS hack_log (
+      username    TEXT NOT NULL,
+      play_date   TEXT NOT NULL,
+      solved      INTEGER NOT NULL DEFAULT 0,
+      attempts    INTEGER NOT NULL DEFAULT 0,
+      chrome_won  INTEGER NOT NULL DEFAULT 0,
+      word_length INTEGER NOT NULL DEFAULT 5,
+      PRIMARY KEY (username, play_date)
+    );
   `);
 }
 

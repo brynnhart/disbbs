@@ -46,6 +46,7 @@ try {
 }
 
 const app = express();
+app.set('trust proxy', true);
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -155,6 +156,37 @@ const GRAFFITI_PALETTE = [
   // DIS resource colors
   '#b39ddb','#c62828','#2e7d32','#aeea00','#f9a825','#9e9e9e','#6a1b9a','#19c3c3'
 ];
+
+/* Hack (terminal cracking) */
+const HACK_WORDS = {
+  5: ['PROXY','VIRUS','PIXEL','GHOST','STEEL','TOXIC','BYTES','GLOOM','BLACK','NIGHT',
+      'SPARK','FLAME','CRAWL','CRASH','CHAOS','BLINK','SURGE','BLEED','RAVEN','GRAVE',
+      'ASHEN','DREAD','WITCH','CURSE','SKULK','DECAY','GROAN','MOURN','DIRGE','BLEAK',
+      'CRYPT','REBEL','FERAL','SCRAP','RUINS','SHARD','SMOKE','GRIME','SLASH','PROWL',
+      'EXILE','STRAY','ROGUE','CRAWL','GLARE','SNARL'],
+
+  6: ['CIPHER','GLITCH','BREACH','KERNEL','DAEMON','STATIC','SIGNAL','BINARY','MALICE',
+      'SCRIPT','BUFFER','VECTOR','TROJAN','PACKET','SYNTAX','REBOOT','UPLOAD','ACCESS',
+      'SHADOW','ROTTEN','COFFIN','SHROUD','PLAGUE','WRAITH','HOLLOW','FALLEN','WITHER',
+      'SOMBER','DISMAL','MORBID','GRIEVE','LAMENT','VANDAL','OUTLAW','MUTANT','FRENZY',
+      'RUCKUS','FIERCE','DEFACE','ERRANT','LURKER','WANTED','SCRAWL','SPECTER','RAVAGE',
+      'FLOTSAM','SULFUR'],
+
+  7: ['NETWORK','DECRYPT','CORRUPT','EXPLOIT','CIRCUIT','MALWARE','COMPILE','EXECUTE',
+      'ROOTKIT','COMMAND','PROCESS','SECTORS','RUNTIME','OFFLINE','INVALID','ABORTED',
+      'PHANTOM','REMAINS','ROTTING','HAUNTED','MACABRE','OBSCURE','DESPAIR','TORMENT',
+      'ANGUISH','FORLORN','GHASTLY','OUTCAST','DEFIANT','ABANDON','VAGRANT','RAMPAGE',
+      'SUBVERT','PROWLER','INVADER','RAVAGED','SPECTER','SINISTER','WRECKER','CORRODE',
+      'NULLIFY','SEVERED','DECRYPT','BLACKEN','STAGNATE'],
+};
+const HACK_PAYOUTS = {
+  5: [10, 8, 5, 3],
+  6: [18, 14, 10, 5],
+  7: [30, 22, 15, 8],
+};
+const HACK_FAIL_CONSOLATION = 2;
+const HACK_NOISE_CHARSET = '!@#$%^&*()_+-=[]{}|;:,.<>?/~';
+const HACK_NOISE_LEN = 480; // 2 columns of 20 chars wide x 12 rows each
 
 const {
   getSetting,
@@ -352,6 +384,18 @@ const stmtGraffitiPaint     = db.prepare('INSERT INTO graffiti_wall (cell_index,
 const stmtGraffitiErase     = db.prepare('DELETE FROM graffiti_wall WHERE cell_index = ?');
 const stmtGraffitiLastLog   = db.prepare('SELECT last_logged FROM graffiti_activity WHERE username = ?');
 const stmtGraffitiUpsertLog = db.prepare('INSERT INTO graffiti_activity (username, last_logged) VALUES (?,?) ON CONFLICT(username) DO UPDATE SET last_logged=excluded.last_logged');
+
+/* Hack (terminal cracking) */
+const stmtHackGetLog = db.prepare('SELECT solved, attempts, chrome_won, word_length FROM hack_log WHERE username = ? AND play_date = ?');
+const stmtHackUpsertLog = db.prepare(`
+  INSERT INTO hack_log (username, play_date, solved, attempts, chrome_won, word_length)
+  VALUES (?, ?, ?, ?, ?, ?)
+  ON CONFLICT(username, play_date) DO UPDATE SET
+    solved = excluded.solved,
+    attempts = excluded.attempts,
+    chrome_won = excluded.chrome_won,
+    word_length = excluded.word_length
+`);
 
 /* Market */
 const stmtGetAllMarketPrices = db.prepare('SELECT resource, current_price, previous_price, last_drift_date FROM market_prices');
@@ -745,6 +789,7 @@ function cmdHelp(api, state){
   api.print('  /slots stats  Your slots statistics', 'cyan');
   api.print('  /blackjack    Simplified blackjack — bet ₢ against the house', 'cyan');
   api.print('  /blackjack stats  Your blackjack statistics', 'cyan');
+  api.print('  /hack     daily terminal crack  •  new terminal every day', 'cyan');
   api.print('  /donate       Support DIS — progress, top donors, how to donate', 'cyan');
   api.print('  /activity     Recent activity across DIS — games, community, chrome', 'cyan');
   api.print('  /chrome       Your chrome balance, transactions, and leaderboard', 'cyan');
@@ -1966,6 +2011,7 @@ function renderGames(api, state){
   const feedRows   = stmtGamesFeed.all();
   const streak     = streakRow ? streakRow.current_streak : 0;
   const playedToday = !!resultRow;
+  const hackRow    = stmtHackGetLog.get(state.username, today);
 
   let jackpot = 500;
   try { jackpot = chrome.getJackpot(); } catch {}
@@ -1985,6 +2031,16 @@ function renderGames(api, state){
     const playerBalance = chrome.getBalance(state.username);
     b.print('  /blackjack     simplified blackjack', 'cyan');
     b.printHTML(`             <span class="yellow">your balance: ${escapeHTML(fmtCr(playerBalance))} ₢</span>`);
+    
+    b.print('  /mining      Dig for resources in today\'s shared grid', 'cyan');
+    b.print('  /hack        daily terminal crack — new terminal every day', 'cyan');
+    if (hackRow) {
+      if (hackRow.solved) {
+        b.print(`             ✓ cracked today (attempt ${hackRow.attempts}, +${hackRow.chrome_won} ₢)`, 'green');
+      } else {
+        b.print('             ✗ locked out today', 'red');
+      }
+    }
     b.hr();
     if (feedRows.length) {
       b.print('── recent activity ──', 'dim');
@@ -2528,6 +2584,291 @@ function handleMiningClick(msg, api, state) {
 function cmdMining(api, state) {
   if (!requireAuth(api, state)) return;
   sendOps(api.ws, [{ op: 'openMining' }]);
+}
+
+/* ======================= Hack (terminal cracking) ======================= */
+function hackSeededRng(seedStr) {
+  let h = 1779033703 ^ seedStr.length;
+  for (let i = 0; i < seedStr.length; i++) {
+    h = Math.imul(h ^ seedStr.charCodeAt(i), 3432918353);
+    h = (h << 13) | (h >>> 19);
+  }
+  return function () {
+    h = Math.imul(h ^ (h >>> 16), 2246822519);
+    h = Math.imul(h ^ (h >>> 13), 3266489917);
+    h ^= h >>> 16;
+    return (h >>> 0) / 4294967296;
+  };
+}
+
+function hackRandInt(rng, n) {
+  return Math.floor(rng() * n);
+}
+
+function hackShuffle(arr, rng) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = hackRandInt(rng, i + 1);
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+let _hackDailyCache = { date: null, data: null };
+
+function getDailyHack(dateStr) {
+  if (_hackDailyCache.date === dateStr && _hackDailyCache.data) return _hackDailyCache.data;
+
+  const rng = hackSeededRng(`hack:${dateStr}`);
+  const epochDay = Math.floor(Date.parse(`${dateStr}T00:00:00Z`) / 86400000);
+  const lengths = [5, 6, 7];
+  const wordLength = lengths[((epochDay % 3) + 3) % 3];
+
+  // Defensive: the curated lists may contain stray duplicates/mismatched lengths — filter to be safe.
+  const pool = Array.from(new Set((HACK_WORDS[wordLength] || []).filter(w => w.length === wordLength)));
+  hackShuffle(pool, rng);
+  const password = pool[0];
+  const decoys = pool.slice(1, 5);
+  const words = hackShuffle([password, ...decoys], rng);
+
+  const noiseChars = [];
+  for (let i = 0; i < HACK_NOISE_LEN; i++) {
+    noiseChars.push(HACK_NOISE_CHARSET[hackRandInt(rng, HACK_NOISE_CHARSET.length)]);
+  }
+
+  const occupied = [];
+  function canPlace(start, len) {
+    if (start < 0 || start + len > HACK_NOISE_LEN) return false;
+    const bufStart = Math.max(0, start - 1);
+    const bufEnd = Math.min(HACK_NOISE_LEN, start + len + 1);
+    for (const [os, oe] of occupied) {
+      if (bufStart < oe && os < bufEnd) return false;
+    }
+    return true;
+  }
+  function place(str) {
+    let start = -1;
+    for (let tries = 0; tries < 500; tries++) {
+      const candidate = hackRandInt(rng, HACK_NOISE_LEN - str.length + 1);
+      if (canPlace(candidate, str.length)) { start = candidate; break; }
+    }
+    if (start === -1) {
+      for (let s = 0; s <= HACK_NOISE_LEN - str.length; s++) {
+        if (canPlace(s, str.length)) { start = s; break; }
+      }
+    }
+    if (start === -1) return;
+    for (let i = 0; i < str.length; i++) noiseChars[start + i] = str[i];
+    occupied.push([start, start + str.length]);
+  }
+
+  function randToken(open, close) {
+    let inner = '';
+    for (let i = 0; i < 4; i++) inner += HACK_NOISE_CHARSET[hackRandInt(rng, HACK_NOISE_CHARSET.length)];
+    return `${open}${inner}${close}`;
+  }
+  const dudToken   = randToken('(', ')');
+  const resetToken = randToken('[', ']');
+
+  words.forEach(w => place(w));
+  place(dudToken);
+  place(resetToken);
+
+  const data = {
+    wordLength,
+    password,
+    decoys,
+    words,
+    noise: noiseChars.join(''),
+    brackets: [
+      { token: dudToken, effect: 'dud' },
+      { token: resetToken, effect: 'reset' },
+    ],
+  };
+  _hackDailyCache = { date: dateStr, data };
+  return data;
+}
+
+const hackSessions = new Map(); // username -> in-progress session state for today's terminal
+
+function getOrCreateHackSession(username, dateStr) {
+  const existing = hackSessions.get(username);
+  if (existing && existing.date === dateStr) return existing;
+  const daily = getDailyHack(dateStr);
+  const session = {
+    date:        dateStr,
+    wordLength:  daily.wordLength,
+    password:    daily.password,
+    decoys:      daily.decoys.slice(),
+    words:       daily.words.slice(),
+    noise:       daily.noise,
+    brackets:    daily.brackets.map(b => ({ token: b.token, effect: b.effect, used: false })),
+    guessed:     [],
+    attemptsUsed: 0,
+    removedWord: null,
+    over:        false,
+    solved:      false,
+  };
+  hackSessions.set(username, session);
+  return session;
+}
+
+function handleHackGetState(api, state) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  const today = getWordleDate();
+  const logRow = stmtHackGetLog.get(username, today);
+
+  if (logRow) {
+    hackSessions.delete(username);
+    sendOps(api.ws, [{
+      op:            'hack_state',
+      alreadyPlayed: true,
+      solved:        !!logRow.solved,
+      attemptsUsed:  logRow.attempts,
+      chromeWon:     logRow.chrome_won,
+    }]);
+    return;
+  }
+
+  const session = getOrCreateHackSession(username, today);
+  sendOps(api.ws, [{
+    op:                 'hack_state',
+    alreadyPlayed:      false,
+    solved:             false,
+    attemptsUsed:       session.attemptsUsed,
+    chromeWon:          0,
+    wordLength:         session.wordLength,
+    noise:              session.noise,
+    words:              session.words,
+    brackets:           session.brackets.map(b => b.token),
+    attemptsRemaining:  4 - session.attemptsUsed,
+    guesses:            session.guessed,
+    usedBrackets:       session.brackets.filter(b => b.used).map(b => b.token),
+    removedWord:        session.removedWord,
+  }]);
+}
+
+function handleHackGuess(msg, api, state) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  const today = getWordleDate();
+
+  if (stmtHackGetLog.get(username, today)) {
+    sendOps(api.ws, [{ op: 'hack_error', message: 'You have already played today.' }]); return;
+  }
+
+  const session = getOrCreateHackSession(username, today);
+  if (session.over) {
+    sendOps(api.ws, [{ op: 'hack_error', message: 'Terminal session already ended.' }]); return;
+  }
+  if (session.attemptsUsed >= 4) {
+    sendOps(api.ws, [{ op: 'hack_error', message: 'No attempts remaining.' }]); return;
+  }
+
+  const raw = typeof msg.word === 'string' ? msg.word.trim().toUpperCase() : '';
+  if (!session.words.includes(raw)) {
+    sendOps(api.ws, [{ op: 'hack_error', message: 'Not a valid password candidate.' }]); return;
+  }
+  if (session.guessed.some(g => g.word === raw)) {
+    sendOps(api.ws, [{ op: 'hack_error', message: 'You already tried that word.' }]); return;
+  }
+
+  const password = session.password;
+  let likeness = 0;
+  for (let i = 0; i < password.length; i++) {
+    if (raw[i] === password[i]) likeness++;
+  }
+  const correct = raw === password;
+
+  session.attemptsUsed++;
+  session.guessed.push({ word: raw, likeness });
+  const attemptsRemaining = 4 - session.attemptsUsed;
+
+  let gameOver = false;
+  let chromeWon = 0;
+
+  if (correct) {
+    gameOver = true;
+    session.over = true;
+    session.solved = true;
+    const payoutTable = HACK_PAYOUTS[session.wordLength] || HACK_PAYOUTS[5];
+    chromeWon = payoutTable[session.attemptsUsed - 1] || payoutTable[payoutTable.length - 1];
+    try { chrome.award(username, chromeWon, `hack solve in ${session.attemptsUsed}`); } catch {}
+    try { stmtHackUpsertLog.run(username, today, 1, session.attemptsUsed, chromeWon, session.wordLength); }
+    catch (e) { console.error('[hack] log failed:', e && e.message); }
+
+    addActivityEvent('games', 'hack_solved', `💻 ${username} cracked today's terminal`);
+    if (session.attemptsUsed === 1) {
+      addActivityEvent('games', 'hack_ace', `💻 ${username} cracked the terminal on the first try!`);
+    }
+    hackSessions.delete(username);
+  } else if (attemptsRemaining <= 0) {
+    gameOver = true;
+    session.over = true;
+    session.solved = false;
+    chromeWon = HACK_FAIL_CONSOLATION;
+    try { chrome.award(username, chromeWon, 'hack fail consolation'); } catch {}
+    try { stmtHackUpsertLog.run(username, today, 0, session.attemptsUsed, chromeWon, session.wordLength); }
+    catch (e) { console.error('[hack] log failed:', e && e.message); }
+    hackSessions.delete(username);
+  }
+
+  sendOps(api.ws, [{
+    op:    'hack_result',
+    word:  raw,
+    correct,
+    likeness,
+    attemptsRemaining,
+    gameOver,
+    solved: correct,
+    chromeWon,
+    password: gameOver ? password : undefined,
+  }]);
+}
+
+function handleHackBracket(msg, api, state) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  const today = getWordleDate();
+
+  if (stmtHackGetLog.get(username, today)) {
+    sendOps(api.ws, [{ op: 'hack_error', message: 'You have already played today.' }]); return;
+  }
+
+  const session = hackSessions.get(username);
+  if (!session || session.date !== today || session.over) {
+    sendOps(api.ws, [{ op: 'hack_error', message: 'No active terminal session.' }]); return;
+  }
+
+  const token = typeof msg.token === 'string' ? msg.token : '';
+  const bracket = session.brackets.find(b => b.token === token);
+  if (!bracket || bracket.used) {
+    sendOps(api.ws, [{ op: 'hack_error', message: 'Invalid or already-used bracket.' }]); return;
+  }
+  bracket.used = true;
+
+  if (bracket.effect === 'dud') {
+    const candidates = session.decoys.filter(w =>
+      !session.guessed.some(g => g.word === w) && w !== session.removedWord
+    );
+    const pool = candidates.length ? candidates : session.decoys.filter(w => w !== session.removedWord);
+    const removeWord = pool.length ? pool[Math.floor(Math.random() * pool.length)] : null;
+    session.removedWord = removeWord;
+    sendOps(api.ws, [{ op: 'hack_bracket', token, effect: 'dud', removeWord }]);
+    return;
+  }
+
+  if (bracket.effect === 'reset') {
+    session.attemptsUsed = Math.max(0, session.attemptsUsed - 1);
+    const attemptsRemaining = 4 - session.attemptsUsed;
+    sendOps(api.ws, [{ op: 'hack_bracket', token, effect: 'reset', attemptsRemaining }]);
+    return;
+  }
+}
+
+function cmdHack(api, state) {
+  if (!requireAuth(api, state)) return;
+  sendOps(api.ws, [{ op: 'openHack' }]);
 }
 
 /* ======================= Market ======================= */
@@ -3912,6 +4253,7 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'wordle':   cmdWordle(api, state, args[0]); return true;
     case 'slots':     cmdSlots(api, state, args); return true;
     case 'blackjack': cmdBlackjack(api, state, args); return true;
+    case 'hack':      cmdHack(api, state); return true;
 
     /* Donations */
     case 'donate':       cmdDonate(api, state); return true;
@@ -4087,6 +4429,9 @@ wss.on('connection', (ws, req) => {
     if (msg.type === 'slots_getstate')   { handleSlotsGetState(api, state); return; }
     if (msg.type === 'mining_getstate')  { handleMiningGetState(api, state); return; }
     if (msg.type === 'mining_click')     { handleMiningClick(msg, api, state); return; }
+    if (msg.type === 'hack_getstate')    { handleHackGetState(api, state); return; }
+    if (msg.type === 'hack_guess')       { handleHackGuess(msg, api, state); return; }
+    if (msg.type === 'hack_bracket')     { handleHackBracket(msg, api, state); return; }
     if (msg.type === 'blackjack_deal')     { handleBlackjackDeal(msg, api, state); return; }
     if (msg.type === 'blackjack_hit')      { handleBlackjackHit(msg, api, state); return; }
     if (msg.type === 'blackjack_stand')    { handleBlackjackStand(msg, api, state); return; }
@@ -4415,6 +4760,16 @@ app.post('/api/login', (req, res) => {
 });
 
 app.post('/api/register', (req, res) => {
+  console.log('[register attempt]', {
+    username: req.body && req.body.username,
+    ip: req.ip,
+    socket: req.socket?.remoteAddress,
+    xff: req.headers['x-forwarded-for'],
+    ua: req.headers['user-agent'],
+    flyClientIp: req.headers['fly-client-ip'],
+    cfConnectingIp: req.headers['cf-connecting-ip'],
+    incompleteFp: req.body && req.body.incompleteFp,
+  });
   const username     = req.body && typeof req.body.username     === 'string' ? req.body.username.trim()     : '';
   const password     = req.body && typeof req.body.password     === 'string' ? req.body.password            : '';
   const email        = req.body && typeof req.body.email        === 'string' ? req.body.email.trim()        : '';
@@ -4461,6 +4816,7 @@ app.post('/api/register', (req, res) => {
                       (ipUnresolvable && hasNoFingerprint);
 
   if (shouldBlock) {
+    console.log('[register blocked]', { username, reason: { ipUnresolvable, hasNoUserAgent, clientIncompleteFp } });
     const rawIp = fp.ip || req.socket?.remoteAddress || req.ip || '';
     try {
       insertRegistrationRejection.run(nowEpoch(), rawIp, fp.userAgent || '', username);
@@ -4503,6 +4859,7 @@ app.post('/api/register', (req, res) => {
     isAdmin: !!user.is_admin,
     expMs: Date.now() + AUTH_TOKEN_TTL_MS,
   });
+  console.log('[register success]', { username, ip: fp.ip, ua: fp.userAgent });
   res.json({ ok: true, token: authToken, username: user.username });
 });
 
