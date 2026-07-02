@@ -163,21 +163,21 @@ const HACK_WORDS = {
       'SPARK','FLAME','CRAWL','CRASH','CHAOS','BLINK','SURGE','BLEED','RAVEN','GRAVE',
       'ASHEN','DREAD','WITCH','CURSE','SKULK','DECAY','GROAN','MOURN','DIRGE','BLEAK',
       'CRYPT','REBEL','FERAL','SCRAP','RUINS','SHARD','SMOKE','GRIME','SLASH','PROWL',
-      'EXILE','STRAY','ROGUE','CRAWL','GLARE','SNARL'],
+      'EXILE','STRAY','ROGUE','GLARE','SNARL','DWELL','PATCH','CLANK','GRIND','SMEAR'],
 
   6: ['CIPHER','GLITCH','BREACH','KERNEL','DAEMON','STATIC','SIGNAL','BINARY','MALICE',
       'SCRIPT','BUFFER','VECTOR','TROJAN','PACKET','SYNTAX','REBOOT','UPLOAD','ACCESS',
       'SHADOW','ROTTEN','COFFIN','SHROUD','PLAGUE','WRAITH','HOLLOW','FALLEN','WITHER',
       'SOMBER','DISMAL','MORBID','GRIEVE','LAMENT','VANDAL','OUTLAW','MUTANT','FRENZY',
-      'RUCKUS','FIERCE','DEFACE','ERRANT','LURKER','WANTED','SCRAWL','SPECTER','RAVAGE',
-      'FLOTSAM','SULFUR'],
+      'RUCKUS','FIERCE','DEFACE','ERRANT','LURKER','WANTED','SCRAWL','RAVAGE','SULFUR',
+      'MAYHEM','TANGLE','CINDER','PUTRID','NETHER'],
 
   7: ['NETWORK','DECRYPT','CORRUPT','EXPLOIT','CIRCUIT','MALWARE','COMPILE','EXECUTE',
       'ROOTKIT','COMMAND','PROCESS','SECTORS','RUNTIME','OFFLINE','INVALID','ABORTED',
       'PHANTOM','REMAINS','ROTTING','HAUNTED','MACABRE','OBSCURE','DESPAIR','TORMENT',
       'ANGUISH','FORLORN','GHASTLY','OUTCAST','DEFIANT','ABANDON','VAGRANT','RAMPAGE',
-      'SUBVERT','PROWLER','INVADER','RAVAGED','SPECTER','SINISTER','WRECKER','CORRODE',
-      'NULLIFY','SEVERED','DECRYPT','BLACKEN','STAGNATE'],
+      'SUBVERT','PROWLER','INVADER','RAVAGED','WRECKER','CORRODE','NULLIFY','SEVERED',
+      'BLACKEN','CORRODE','STAGGER','CRUMBLE','FESTIVE','DESOLATE','CARRION','TWISTED'],
 };
 const HACK_PAYOUTS = {
   5: [10, 8, 5, 3],
@@ -186,7 +186,7 @@ const HACK_PAYOUTS = {
 };
 const HACK_FAIL_CONSOLATION = 2;
 const HACK_NOISE_CHARSET = '!@#$%^&*()_+-=[]{}|;:,.<>?/~';
-const HACK_NOISE_LEN = 480; // 2 columns of 20 chars wide x 12 rows each
+const HACK_NOISE_LEN = 900;
 
 const {
   getSetting,
@@ -2627,7 +2627,7 @@ function getDailyHack(dateStr) {
   const pool = Array.from(new Set((HACK_WORDS[wordLength] || []).filter(w => w.length === wordLength)));
   hackShuffle(pool, rng);
   const password = pool[0];
-  const decoys = pool.slice(1, 5);
+  const decoys = pool.slice(1, 12);
   const words = hackShuffle([password, ...decoys], rng);
 
   const noiseChars = [];
