@@ -2182,7 +2182,7 @@ function renderChrome(api, state) {
   const username = state.username;
   const balance  = chrome.getBalance(username);
   const txRows   = stmtUserTransactions.all(username, 8);
-  const leaders  = chrome.getLeaderboard(5);
+  const leaders  = chrome.getLeaderboard(10);
 
   api.batch(b => {
     b.clear();
