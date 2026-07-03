@@ -2181,7 +2181,7 @@ function renderChrome(api, state) {
   if (!requireAuth(api, state)) return;
   const username = state.username;
   const balance  = chrome.getBalance(username);
-  const txRows   = stmtUserTransactions.all(username, 8);
+  const txRows   = stmtUserTransactions.all(username, 6);
   const leaders  = chrome.getLeaderboard(10);
 
   api.batch(b => {
