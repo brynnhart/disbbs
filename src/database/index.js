@@ -220,6 +220,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
   ensureRobSchema(db);
   ensureGraffitiSchema(db);
   ensureHackSchema(db);
+  ensureDotsSchema(db);
 
   const alreadyMigrated = db.prepare('SELECT COUNT(1) AS n FROM activity_feed').get().n;
   if (alreadyMigrated === 0) {
@@ -1530,6 +1531,44 @@ function ensureHackSchema(db) {
       word_length INTEGER NOT NULL DEFAULT 5,
       PRIMARY KEY (username, play_date)
     );
+  `);
+}
+
+function ensureDotsSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS dots_game (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      started_at  INTEGER NOT NULL,
+      ends_at     INTEGER NOT NULL,
+      finished    INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS dots_lines (
+      game_id    INTEGER NOT NULL,
+      line_idx   INTEGER NOT NULL,
+      drawn_by   TEXT NOT NULL,
+      drawn_at   INTEGER NOT NULL,
+      PRIMARY KEY (game_id, line_idx)
+    );
+
+    CREATE TABLE IF NOT EXISTS dots_squares (
+      game_id    INTEGER NOT NULL,
+      sq_row     INTEGER NOT NULL,
+      sq_col     INTEGER NOT NULL,
+      claimed_by TEXT NOT NULL,
+      claimed_at INTEGER NOT NULL,
+      PRIMARY KEY (game_id, sq_row, sq_col)
+    );
+
+    CREATE TABLE IF NOT EXISTS dots_turns (
+      game_id      INTEGER NOT NULL,
+      username     TEXT NOT NULL,
+      last_drew_at INTEGER NOT NULL,
+      PRIMARY KEY (game_id, username)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_dots_lines_game ON dots_lines(game_id);
+    CREATE INDEX IF NOT EXISTS idx_dots_squares_game ON dots_squares(game_id);
   `);
 }
 

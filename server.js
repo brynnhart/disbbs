@@ -118,6 +118,59 @@ const RESOURCES = {
   obsidian:    { label: 'Obsidian',    color: '#9e9e9e', tier: 'rare',      weight: 4  },
   alexandrite: { label: 'Alexandrite', color: '#6a1b9a', tier: 'very_rare', weight: 1  },
 };
+
+/* Dots and Boxes */
+const DOTS_GRID   = 6;                          // 6x6 dots
+const DOTS_COLS   = DOTS_GRID - 1;             // 5 squares per row
+const DOTS_H_LINES = DOTS_GRID * DOTS_COLS;    // 30 horizontal lines
+const DOTS_V_LINES = DOTS_COLS * DOTS_GRID;    // 30 vertical lines
+const DOTS_TOTAL_LINES = DOTS_H_LINES + DOTS_V_LINES; // 60
+const DOTS_SQUARES = DOTS_COLS * DOTS_COLS;    // 25
+
+// Line index helpers
+function dotsHIdx(row, col) { return row * DOTS_COLS + col; }
+function dotsVIdx(row, col) { return DOTS_H_LINES + row * DOTS_GRID + col; }
+
+// Returns array of [row,col] squares adjacent to a line index
+function dotsSquaresForLine(lineIdx) {
+  const sq = [];
+  if (lineIdx < DOTS_H_LINES) {
+    const row = Math.floor(lineIdx / DOTS_COLS);
+    const col = lineIdx % DOTS_COLS;
+    if (row > 0)            sq.push([row-1, col]);
+    if (row < DOTS_COLS)    sq.push([row,   col]);
+  } else {
+    const v   = lineIdx - DOTS_H_LINES;
+    const row = Math.floor(v / DOTS_GRID);
+    const col = v % DOTS_GRID;
+    if (col > 0)            sq.push([row, col-1]);
+    if (col < DOTS_COLS)    sq.push([row, col]);
+  }
+  return sq;
+}
+
+// Returns true if all 4 edges of square (r,c) are drawn
+function dotsSquareComplete(lines, r, c) {
+  return lines[dotsHIdx(r,   c)] &&
+         lines[dotsHIdx(r+1, c)] &&
+         lines[dotsVIdx(r,   c)] &&
+         lines[dotsVIdx(r,   c+1)];
+}
+
+const DOTS_CHROME_LINE    = 1;   // for drawing any line
+const DOTS_CHROME_SQUARE  = 5;   // per square claimed
+const DOTS_CHROME_WIN     = 50;  // bonus for most squares when board completes
+
+const DOTS_PLAYER_COLORS = [
+  '#00ffff','#ff00ff','#ffff00','#00ff88','#ff6600',
+  '#ff3399','#33ccff','#aaff00','#ff4444','#bb88ff',
+];
+function dotsPlayerColor(username) {
+  let hash = 0;
+  for (let i = 0; i < username.length; i++) hash = (hash * 31 + username.charCodeAt(i)) & 0xffffffff;
+  return DOTS_PLAYER_COLORS[Math.abs(hash) % DOTS_PLAYER_COLORS.length];
+}
+
 const RESOURCE_FLOORS = {
   bismuth: 3, cinnabar: 5, malachite: 10, vitriol: 15,
   brimstone: 25, obsidian: 40, alexandrite: 100,
@@ -396,6 +449,20 @@ const stmtHackUpsertLog = db.prepare(`
     chrome_won = excluded.chrome_won,
     word_length = excluded.word_length
 `);
+
+/* Dots and Boxes */
+const stmtDotsActiveGame   = db.prepare('SELECT * FROM dots_game WHERE finished = 0 ORDER BY id DESC LIMIT 1');
+const stmtDotsCreateGame   = db.prepare('INSERT INTO dots_game (started_at, ends_at, finished) VALUES (?,?,0)');
+const stmtDotsFinishGame   = db.prepare('UPDATE dots_game SET finished = 1 WHERE id = ?');
+const stmtDotsGetLines     = db.prepare('SELECT line_idx, drawn_by FROM dots_lines WHERE game_id = ?');
+const stmtDotsInsertLine   = db.prepare('INSERT INTO dots_lines (game_id, line_idx, drawn_by, drawn_at) VALUES (?,?,?,?)');
+const stmtDotsGetSquares   = db.prepare('SELECT sq_row, sq_col, claimed_by FROM dots_squares WHERE game_id = ?');
+const stmtDotsInsertSquare = db.prepare('INSERT INTO dots_squares (game_id, sq_row, sq_col, claimed_by, claimed_at) VALUES (?,?,?,?,?)');
+const stmtDotsGetTurn      = db.prepare('SELECT last_drew_at FROM dots_turns WHERE game_id = ? AND username = ?');
+const stmtDotsUpsertTurn   = db.prepare('INSERT INTO dots_turns (game_id, username, last_drew_at) VALUES (?,?,?) ON CONFLICT(game_id, username) DO UPDATE SET last_drew_at = excluded.last_drew_at');
+const stmtDotsLastDraw     = db.prepare('SELECT MAX(drawn_at) AS last FROM dots_lines WHERE game_id = ?');
+const stmtDotsScores       = db.prepare('SELECT claimed_by, COUNT(1) AS squares FROM dots_squares WHERE game_id = ? GROUP BY claimed_by ORDER BY squares DESC LIMIT 5');
+const stmtDotsLineCount    = db.prepare('SELECT COUNT(1) AS n FROM dots_lines WHERE game_id = ?');
 
 /* Market */
 const stmtGetAllMarketPrices = db.prepare('SELECT resource, current_price, previous_price, last_drift_date FROM market_prices');
@@ -790,6 +857,7 @@ function cmdHelp(api, state){
   api.print('  /blackjack    Simplified blackjack — bet ₢ against the house', 'cyan');
   api.print('  /blackjack stats  Your blackjack statistics', 'cyan');
   api.print('  /hack     daily terminal crack  •  new terminal every day', 'cyan');
+  api.print('  /dots    community dots & boxes — draw lines, claim squares, earn ₢', 'cyan');
   api.print('  /donate       Support DIS — progress, top donors, how to donate', 'cyan');
   api.print('  /activity     Recent activity across DIS — games, community, chrome', 'cyan');
   api.print('  /chrome       Your chrome balance, transactions, and leaderboard', 'cyan');
@@ -2041,6 +2109,14 @@ function renderGames(api, state){
         b.print('             ✗ locked out today', 'red');
       }
     }
+    b.print('  /dots       community dots & boxes — claim squares, earn ₢', 'cyan');
+    const dotsGame = stmtDotsActiveGame.get();
+    if (dotsGame) {
+      const dotsCount = stmtDotsLineCount.get(dotsGame.id).n;
+      const dotsScores = stmtDotsScores.all(dotsGame.id);
+      const leader = dotsScores.length ? dotsScores[0] : null;
+      b.print(`             ${dotsCount}/${DOTS_TOTAL_LINES} lines drawn${leader ? '  •  leader: ' + leader.claimed_by + ' (' + leader.squares + ' sq)' : ''}`, 'dim');
+    }
     b.hr();
     if (feedRows.length) {
       b.print('── recent activity ──', 'dim');
@@ -2568,6 +2644,14 @@ function handleMiningClick(msg, api, state) {
       addActivityEvent('chrome', 'mining_rare', `💎 ${username} struck alexandrite while mining!`);
     }
   }
+
+  HUB.clients.forEach(ws => sendOps(ws, [{
+    op: 'mining_cell_revealed',
+    cellIndex,
+    resource: cell.resource || null,
+    revealedBy: username,
+  }]));
+
   const newClicksUsed = clicksUsed + 1;
   sendOps(api.ws, [{
     op:                  'mining_result',
@@ -2869,6 +2953,57 @@ function handleHackBracket(msg, api, state) {
 function cmdHack(api, state) {
   if (!requireAuth(api, state)) return;
   sendOps(api.ws, [{ op: 'openHack' }]);
+}
+
+/* ======================= Dots and Boxes ======================= */
+// nowEpoch() has 1-second resolution; turn eligibility relies on strict
+// timestamp ordering (lastDraw.last > myTurn.last_drew_at), so two moves
+// landing in the same wall-clock second would otherwise tie and wrongly
+// block the next legitimate turn. Guarantee strictly increasing values
+// per game instead of touching the shared nowEpoch() behavior.
+const _dotsLastTimestamp = new Map(); // gameId -> last used monotonic timestamp
+function dotsNextTimestamp(gameId) {
+  const now = nowEpoch();
+  const prev = _dotsLastTimestamp.get(gameId) || 0;
+  const next = now > prev ? now : prev + 1;
+  _dotsLastTimestamp.set(gameId, next);
+  return next;
+}
+
+function dotsGetOrCreateGame() {
+  let game = stmtDotsActiveGame.get();
+  const now = nowEpoch();
+  if (!game || now > game.ends_at) {
+    if (game) stmtDotsFinishGame.run(game.id);
+    stmtDotsCreateGame.run(now, now + 7 * 86400);
+    game = stmtDotsActiveGame.get();
+  }
+  return game;
+}
+
+// Build full board state from DB for a given game_id
+function dotsBuildState(gameId) {
+  const lines   = new Array(DOTS_TOTAL_LINES).fill(null);
+  const squares = {};
+  for (const r of stmtDotsGetLines.all(gameId))   lines[r.line_idx] = r.drawn_by;
+  for (const s of stmtDotsGetSquares.all(gameId)) squares[`${s.sq_row},${s.sq_col}`] = s.claimed_by;
+  const scores = stmtDotsScores.all(gameId);
+  return { lines, squares, scores };
+}
+
+// Build { username: color } for everyone who has drawn a line or claimed a square this game
+function dotsBuildPlayerColors(gameId) {
+  const usernames = new Set();
+  for (const r of stmtDotsGetLines.all(gameId))   usernames.add(r.drawn_by);
+  for (const s of stmtDotsScores.all(gameId))     usernames.add(s.claimed_by);
+  const colors = {};
+  for (const u of usernames) colors[u] = dotsPlayerColor(u);
+  return colors;
+}
+
+function cmdDots(api, state) {
+  if (!requireAuth(api, state)) return;
+  sendOps(api.ws, [{ op: 'openDots' }]);
 }
 
 /* ======================= Market ======================= */
@@ -4057,6 +4192,9 @@ function cmdBan(api, state, args) {
     db.prepare('DELETE FROM graffiti_activity WHERE username = ?').run(target.username);
     db.prepare('DELETE FROM chrome_balances    WHERE username = ?').run(target.username);
     db.prepare('DELETE FROM chrome_transactions WHERE username = ?').run(target.username);
+    db.prepare('DELETE FROM dots_lines   WHERE drawn_by  = ?').run(target.username);
+    db.prepare('DELETE FROM dots_squares WHERE claimed_by = ?').run(target.username);
+    db.prepare('DELETE FROM dots_turns   WHERE username   = ?').run(target.username);
 
     insertBan.run(now, state.username, target.username, target.registration_ip || null, target.fingerprint_hash || null, null);
 
@@ -4254,6 +4392,7 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'slots':     cmdSlots(api, state, args); return true;
     case 'blackjack': cmdBlackjack(api, state, args); return true;
     case 'hack':      cmdHack(api, state); return true;
+    case 'dots':      cmdDots(api, state); return true;
 
     /* Donations */
     case 'donate':       cmdDonate(api, state); return true;
@@ -4436,6 +4575,123 @@ wss.on('connection', (ws, req) => {
     if (msg.type === 'blackjack_hit')      { handleBlackjackHit(msg, api, state); return; }
     if (msg.type === 'blackjack_stand')    { handleBlackjackStand(msg, api, state); return; }
     if (msg.type === 'blackjack_getstate') { handleBlackjackGetState(api, state); return; }
+
+    if (msg.type === 'dots_getstate') {
+      if (!requireAuth(api, state)) return;
+      const game = dotsGetOrCreateGame();
+      const board = dotsBuildState(game.id);
+      const myTurn = stmtDotsGetTurn.get(game.id, state.username);
+      const lastDraw = stmtDotsLastDraw.get(game.id);
+      // Can draw if: never drew in this game, OR someone else drew after our last draw
+      const canDraw = !myTurn || (lastDraw && lastDraw.last > myTurn.last_drew_at);
+      const playerColors = dotsBuildPlayerColors(game.id);
+      sendOps(api.ws, [{ op: 'dots_state', gameId: game.id, endsAt: game.ends_at, ...board, playerColors, canDraw, username: state.username }]);
+      return;
+    }
+
+    if (msg.type === 'dots_draw') {
+      if (!requireAuth(api, state)) return;
+      const username = state.username;
+      const game = dotsGetOrCreateGame();
+      const now = dotsNextTimestamp(game.id);
+
+      // Validate line index
+      if (!Number.isInteger(msg.lineIdx) || msg.lineIdx < 0 || msg.lineIdx >= DOTS_TOTAL_LINES) {
+        sendOps(api.ws, [{ op: 'dots_error', message: 'invalid line.' }]); return;
+      }
+
+      // Check line not already drawn
+      const existingLines = dotsBuildState(game.id).lines;
+      if (existingLines[msg.lineIdx] !== null) {
+        sendOps(api.ws, [{ op: 'dots_error', message: 'line already drawn.' }]); return;
+      }
+
+      // Check turn eligibility
+      const myTurn = stmtDotsGetTurn.get(game.id, username);
+      const lastDraw = stmtDotsLastDraw.get(game.id);
+      const canDraw = !myTurn || (lastDraw && lastDraw.last > myTurn.last_drew_at);
+      if (!canDraw) {
+        sendOps(api.ws, [{ op: 'dots_error', message: 'wait for another player to draw before your next turn.' }]); return;
+      }
+
+      // Draw the line
+      stmtDotsInsertLine.run(game.id, msg.lineIdx, username, now);
+
+      // Award line chrome
+      try { chrome.award(username, DOTS_CHROME_LINE, 'dots: drew a line'); } catch {}
+
+      // Check for completed squares
+      const newSquares = [];
+      for (const [r, c] of dotsSquaresForLine(msg.lineIdx)) {
+        const board = dotsBuildState(game.id);
+        if (!board.squares[`${r},${c}`] && dotsSquareComplete(board.lines, r, c)) {
+          stmtDotsInsertSquare.run(game.id, r, c, username, now);
+          newSquares.push({ r, c, claimedBy: username });
+          try { chrome.award(username, DOTS_CHROME_SQUARE, 'dots: claimed square'); } catch {}
+        }
+      }
+
+      // Only spend the turn lock if this draw did NOT complete a square — completing a
+      // square grants a bonus turn, so the turn record intentionally stays unadvanced,
+      // letting the same user draw again immediately (canDraw checks last_drew_at against
+      // the newly-updated global last-draw time from this very line).
+      if (newSquares.length === 0) {
+        stmtDotsUpsertTurn.run(game.id, username, now);
+      }
+
+      // Build updated board state
+      const updated = dotsBuildState(game.id);
+      const lineCount = stmtDotsLineCount.get(game.id).n;
+      const gameComplete = lineCount >= DOTS_TOTAL_LINES;
+      const playerColors = dotsBuildPlayerColors(game.id);
+
+      // Activity event for big square chains
+      if (newSquares.length >= 3) {
+        addActivityEvent('games', 'dots_chain', `🟦 ${username} claimed ${newSquares.length} squares in one move on the dots board!`);
+      }
+
+      // Broadcast to ALL connected clients
+      HUB.clients.forEach(ws => sendOps(ws, [{
+        op: 'dots_update',
+        gameId: game.id,
+        lineIdx: msg.lineIdx,
+        drawnBy: username,
+        newSquares,
+        scores: updated.scores,
+        playerColors,
+        canDraw: false,  // each client recalculates their own canDraw on receipt
+        gameComplete,
+      }]));
+
+      // Handle game completion
+      if (gameComplete) {
+        stmtDotsFinishGame.run(game.id);
+        // Find winner (most squares)
+        const scores = updated.scores;
+        if (scores.length) {
+          const winner = scores[0].claimed_by;
+          const winnerSquares = scores[0].squares;
+          try { chrome.award(winner, DOTS_CHROME_WIN, 'dots: board winner'); } catch {}
+          addActivityEvent('games', 'dots_winner', `🟦 ${winner} won the dots board with ${winnerSquares} squares and earned ${DOTS_CHROME_WIN} ₢!`);
+          // Broadcast game over then reset
+          const newGame = dotsGetOrCreateGame();
+          const newBoard = dotsBuildState(newGame.id);
+          HUB.clients.forEach(ws => sendOps(ws, [{
+            op: 'dots_newgame',
+            gameId: newGame.id,
+            endsAt: newGame.ends_at,
+            winner,
+            winnerSquares,
+            winnerChrome: DOTS_CHROME_WIN,
+            ...newBoard,
+            playerColors: {},
+            canDraw: true,
+          }]));
+        }
+      }
+
+      return;
+    }
 
     if (msg.type === 'graffiti_getstate') {
       if (!requireAuth(api, state)) return;

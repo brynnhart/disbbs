@@ -219,6 +219,20 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
 .hack-close-btn { appearance:none; background:transparent; border:1px solid #00ff41; color:#00ff41; padding:6px 16px; cursor:pointer; font-family:monospace; font-size:12px; text-shadow:0 0 8px #00ff41 }
 .hack-close-btn:hover { background:#00ff41; color:#000 }
 
+/* ===== Dots and Boxes modal ===== */
+#dots-overlay { position:fixed; inset:0; background:rgba(0,0,0,.88); display:flex; align-items:center; justify-content:center; z-index:1000; padding:16px; box-sizing:border-box }
+#dots-modal { background:#0a0a0a; border:1px solid #222; border-radius:6px; display:flex; flex-direction:column; gap:12px; padding:20px; max-height:96vh; overflow:auto; width:fit-content }
+#dots-title { color:var(--cyan); font-weight:bold; font-size:13px; letter-spacing:1px; text-align:center }
+#dots-status { font-size:12px; color:#666; text-align:center }
+#dots-canvas { position:relative; display:block }
+#dots-scores { font-size:12px; color:#888 }
+#dots-scores table { border-collapse:collapse; width:100% }
+#dots-scores td { padding:2px 8px }
+#dots-scores td:first-child { color:#aaa }
+#dots-turn-msg { font-size:12px; text-align:center; min-height:16px }
+.dots-close-btn { appearance:none; border:1px solid #333; background:#111; color:#888; font:inherit; font-size:12px; padding:6px 14px; border-radius:4px; cursor:pointer; align-self:center }
+.dots-close-btn:hover { border-color:#555; color:var(--fg) }
+
 /* ===== Auth overlay ===== */
 #auth-overlay{position:fixed;inset:0;z-index:2000;background:#000;display:flex;flex-direction:column;align-items:center;overflow-y:auto;padding:0 0 48px;box-sizing:border-box}
 #auth-splash{width:100%;align-self:stretch;flex-shrink:0}
@@ -719,6 +733,7 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
           else if (op.op === 'openMining') openMining();
           else if (op.op === 'mining_state') miningHandleState(op);
           else if (op.op === 'mining_result') miningHandleResult(op);
+          else if (op.op === 'mining_cell_revealed') miningHandleCellRevealed(op);
           else if (op.op === 'openBlackjack') openBlackjack(op);
           else if (op.op === 'blackjack_state') blackjackHandleState(op);
           else if (op.op === 'blackjack_result') blackjackHandleResult(op);
@@ -731,6 +746,11 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
           else if (op.op === 'hack_result')     hackHandleResult(op);
           else if (op.op === 'hack_bracket')    hackHandleBracket(op);
           else if (op.op === 'hack_error')      hackShowError(op.message || 'Error.');
+          else if (op.op === 'openDots')        openDots();
+          else if (op.op === 'dots_state')      dotsHandleState(op);
+          else if (op.op === 'dots_update')     dotsHandleUpdate(op);
+          else if (op.op === 'dots_newgame')    dotsHandleNewGame(op);
+          else if (op.op === 'dots_error')      dotsShowError(op.message);
         });
       }
     });
@@ -879,7 +899,7 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
 
   // ESC quickly refocuses prompt
   document.addEventListener('keydown', function(ev){
-    if (ev.key === 'Escape' && !document.getElementById('pxa-overlay') && !document.getElementById('wordle-overlay') && !document.getElementById('bj-overlay') && !document.getElementById('mining-overlay') && !document.getElementById('grf-overlay') && !document.getElementById('hack-overlay')) focusInputEnd(input);
+    if (ev.key === 'Escape' && !document.getElementById('pxa-overlay') && !document.getElementById('wordle-overlay') && !document.getElementById('bj-overlay') && !document.getElementById('mining-overlay') && !document.getElementById('grf-overlay') && !document.getElementById('hack-overlay') && !document.getElementById('dots-overlay')) focusInputEnd(input);
   });
 
   // ===== Pixel Art Editor =====
@@ -1293,6 +1313,16 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
   var hkWordLength         = 5;
   var hkGameOver           = false;
   var hkSubmitting         = false;
+
+  // ===== Dots and Boxes =====
+  var dotsGameId = null, dotsLines = [], dotsSquares = {}, dotsCanDraw = false;
+  var dotsPlayerColors = {}, dotsMyUsername = '';
+  var dotsEndsAt = 0, dotsScores = [];
+  var DOTS_GRID = 6, DOTS_COLS = 5, DOTS_H_LINES = 30, DOTS_TOTAL_LINES = 60;
+  var DOTS_CELL = 52; // pixels between dots
+  var DOTS_DOT_R = 5; // dot radius px
+  var DOTS_LINE_HIT = 14; // hit area width for line clicks
+  var dotsErrorTimer = null, dotsNewGameTimer = null;
 
   function fmtCr(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
 
@@ -2082,6 +2112,16 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
     mnUpdateInventory(op.inventory);
   }
 
+  function miningHandleCellRevealed(op) {
+    // Only relevant if the mining modal is currently open
+    var cell = mnCells[op.cellIndex];
+    if (!cell) return;
+    // Skip if already revealed locally (current user's own click already handled it via mining_result)
+    if (cell.className.indexOf('revealed') !== -1) return;
+    mnApplyCell({ index: op.cellIndex, revealed: true, resource: op.resource || null });
+    cell.title = op.resource ? (op.resource + ' (found by ' + op.revealedBy + ')') : ('dirt (dug by ' + op.revealedBy + ')');
+  }
+
   function closeMining() {
     var ov = document.getElementById('mining-overlay');
     if (ov) ov.remove();
@@ -2393,6 +2433,322 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
     if (overlay) overlay.remove();
     hkNoise = ''; hkWords = []; hkBrackets = []; hkGuessed = []; hkUsedBrackets = []; hkRemovedWords = [];
     hkAttemptsRemaining = 4; hkGameOver = false; hkSubmitting = false;
+    focusInputEnd(input);
+  }
+
+  // ===== Dots and Boxes =====
+  function dotsHIdx(row, col) { return row * DOTS_COLS + col; }
+  function dotsVIdx(row, col) { return DOTS_H_LINES + row * DOTS_GRID + col; }
+
+  function openDots() {
+    if (document.getElementById('dots-overlay')) return;
+    dotsGameId = null; dotsLines = []; dotsSquares = {}; dotsCanDraw = false;
+    dotsPlayerColors = {}; dotsScores = []; dotsEndsAt = 0;
+
+    var overlay = document.createElement('div'); overlay.id = 'dots-overlay';
+    var modal   = document.createElement('div'); modal.id   = 'dots-modal';
+
+    var titleEl = document.createElement('div'); titleEl.id = 'dots-title';
+    titleEl.textContent = 'DOTS & BOXES';
+    modal.appendChild(titleEl);
+
+    var statusEl = document.createElement('div'); statusEl.id = 'dots-status';
+    statusEl.textContent = 'loading…';
+    modal.appendChild(statusEl);
+
+    var canvasWrap = document.createElement('div'); canvasWrap.id = 'dots-canvas';
+    var svgSize = DOTS_COLS * DOTS_CELL + 20;
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.id = 'dots-svg';
+    svg.setAttribute('width', svgSize);
+    svg.setAttribute('height', svgSize);
+    canvasWrap.appendChild(svg);
+    modal.appendChild(canvasWrap);
+
+    var scoresEl = document.createElement('div'); scoresEl.id = 'dots-scores';
+    modal.appendChild(scoresEl);
+
+    var turnMsgEl = document.createElement('div'); turnMsgEl.id = 'dots-turn-msg';
+    turnMsgEl.textContent = 'loading…';
+    modal.appendChild(turnMsgEl);
+
+    var closeBtn = document.createElement('button');
+    closeBtn.id = 'dots-close-btn'; closeBtn.className = 'dots-close-btn';
+    closeBtn.type = 'button'; closeBtn.textContent = 'Close';
+    closeBtn.addEventListener('click', closeDots);
+    modal.appendChild(closeBtn);
+
+    function dotsEsc(e) { if (e.key === 'Escape') { closeDots(); document.removeEventListener('keydown', dotsEsc); } }
+    document.addEventListener('keydown', dotsEsc);
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'dots_getstate' }));
+    }
+  }
+
+  function dotsAddHitRect(svg, lineIdx, x, y, w, h) {
+    var SVGNS = 'http://www.w3.org/2000/svg';
+    var rect = document.createElementNS(SVGNS, 'rect');
+    rect.setAttribute('x', x);
+    rect.setAttribute('y', y);
+    rect.setAttribute('width', w);
+    rect.setAttribute('height', h);
+    rect.setAttribute('fill', 'transparent');
+    rect.style.cursor = 'pointer';
+    rect.addEventListener('mouseenter', function() { rect.setAttribute('fill', 'rgba(255,255,255,0.18)'); });
+    rect.addEventListener('mouseleave', function() { rect.setAttribute('fill', 'transparent'); });
+    rect.addEventListener('click', function() {
+      if (dotsCanDraw) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'dots_draw', lineIdx: lineIdx }));
+        }
+      } else {
+        dotsFlashTurnMsg();
+      }
+    });
+    svg.appendChild(rect);
+  }
+
+  function dotsRenderGrid(svg) {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    var SVGNS = 'http://www.w3.org/2000/svg';
+    var CELL = DOTS_CELL;
+
+    // Claimed squares (background)
+    Object.keys(dotsSquares).forEach(function(key) {
+      var parts = key.split(',');
+      var r = parseInt(parts[0], 10), c = parseInt(parts[1], 10);
+      var claimedBy = dotsSquares[key];
+      var color = dotsPlayerColors[claimedBy] || '#888';
+
+      var rect = document.createElementNS(SVGNS, 'rect');
+      rect.setAttribute('x', c * CELL + 11);
+      rect.setAttribute('y', r * CELL + 11);
+      rect.setAttribute('width', CELL - 2);
+      rect.setAttribute('height', CELL - 2);
+      rect.setAttribute('fill', color);
+      rect.setAttribute('fill-opacity', '0.3');
+      svg.appendChild(rect);
+
+      var text = document.createElementNS(SVGNS, 'text');
+      text.setAttribute('x', c * CELL + 11 + (CELL - 2) / 2);
+      text.setAttribute('y', r * CELL + 11 + (CELL - 2) / 2 + 4);
+      text.setAttribute('text-anchor', 'middle');
+      text.setAttribute('font-size', '11');
+      text.setAttribute('fill', color);
+      text.textContent = (claimedBy || '').slice(0, 2).toUpperCase();
+      svg.appendChild(text);
+    });
+
+    // Clickable hit areas for undrawn lines
+    for (var row = 0; row < DOTS_GRID; row++) {
+      for (var col = 0; col < DOTS_COLS; col++) {
+        var hidx = dotsHIdx(row, col);
+        if (dotsLines[hidx]) continue;
+        dotsAddHitRect(svg, hidx, col * CELL + 15, row * CELL + 6, CELL - 10, 8);
+      }
+    }
+    for (var vrow = 0; vrow < DOTS_COLS; vrow++) {
+      for (var vcol = 0; vcol < DOTS_GRID; vcol++) {
+        var vidx = dotsVIdx(vrow, vcol);
+        if (dotsLines[vidx]) continue;
+        dotsAddHitRect(svg, vidx, vcol * CELL + 6, vrow * CELL + 15, 8, CELL - 10);
+      }
+    }
+
+    // Drawn lines
+    for (var row2 = 0; row2 < DOTS_GRID; row2++) {
+      for (var col2 = 0; col2 < DOTS_COLS; col2++) {
+        var hidx2 = dotsHIdx(row2, col2);
+        var drawnBy = dotsLines[hidx2];
+        if (!drawnBy) continue;
+        var line = document.createElementNS(SVGNS, 'line');
+        line.setAttribute('x1', col2 * CELL + 10);
+        line.setAttribute('y1', row2 * CELL + 10);
+        line.setAttribute('x2', (col2 + 1) * CELL + 10);
+        line.setAttribute('y2', row2 * CELL + 10);
+        line.setAttribute('stroke', dotsPlayerColors[drawnBy] || '#fff');
+        line.setAttribute('stroke-width', '3');
+        line.setAttribute('stroke-linecap', 'round');
+        svg.appendChild(line);
+      }
+    }
+    for (var vrow2 = 0; vrow2 < DOTS_COLS; vrow2++) {
+      for (var vcol2 = 0; vcol2 < DOTS_GRID; vcol2++) {
+        var vidx2 = dotsVIdx(vrow2, vcol2);
+        var drawnBy2 = dotsLines[vidx2];
+        if (!drawnBy2) continue;
+        var vline = document.createElementNS(SVGNS, 'line');
+        vline.setAttribute('x1', vcol2 * CELL + 10);
+        vline.setAttribute('y1', vrow2 * CELL + 10);
+        vline.setAttribute('x2', vcol2 * CELL + 10);
+        vline.setAttribute('y2', (vrow2 + 1) * CELL + 10);
+        vline.setAttribute('stroke', dotsPlayerColors[drawnBy2] || '#fff');
+        vline.setAttribute('stroke-width', '3');
+        vline.setAttribute('stroke-linecap', 'round');
+        svg.appendChild(vline);
+      }
+    }
+
+    // Dots (drawn on top)
+    for (var dr = 0; dr < DOTS_GRID; dr++) {
+      for (var dc = 0; dc < DOTS_GRID; dc++) {
+        var dot = document.createElementNS(SVGNS, 'circle');
+        dot.setAttribute('cx', dc * CELL + 10);
+        dot.setAttribute('cy', dr * CELL + 10);
+        dot.setAttribute('r', DOTS_DOT_R);
+        dot.setAttribute('fill', '#aaaaaa');
+        svg.appendChild(dot);
+      }
+    }
+  }
+
+  function dotsRenderScores() {
+    var scoresEl = document.getElementById('dots-scores');
+    if (!scoresEl) return;
+    scoresEl.innerHTML = '';
+    if (!dotsScores.length) {
+      var p = document.createElement('div'); p.textContent = 'no squares claimed yet.';
+      scoresEl.appendChild(p);
+      return;
+    }
+    var table = document.createElement('table');
+    dotsScores.slice(0, 5).forEach(function(row) {
+      var tr = document.createElement('tr');
+      var tdName = document.createElement('td');
+      tdName.textContent = row.claimed_by;
+      tdName.style.color = dotsPlayerColors[row.claimed_by] || '#aaa';
+      var tdCount = document.createElement('td');
+      tdCount.textContent = row.squares + ' sq';
+      tr.appendChild(tdName); tr.appendChild(tdCount);
+      table.appendChild(tr);
+    });
+    scoresEl.appendChild(table);
+  }
+
+  function dotsUpdateTurnMsg() {
+    var turnMsgEl = document.getElementById('dots-turn-msg');
+    if (!turnMsgEl) return;
+    turnMsgEl.textContent = dotsCanDraw ? 'your turn — click a line to draw' : 'waiting for another player...';
+    turnMsgEl.style.color = dotsCanDraw ? 'var(--green)' : '#666';
+  }
+
+  function dotsFlashTurnMsg() {
+    var turnMsgEl = document.getElementById('dots-turn-msg');
+    if (!turnMsgEl) return;
+    var prevText = turnMsgEl.textContent;
+    var prevColor = turnMsgEl.style.color;
+    turnMsgEl.textContent = 'not your turn yet!';
+    turnMsgEl.style.color = 'var(--red)';
+    setTimeout(function() {
+      if (!document.getElementById('dots-turn-msg')) return;
+      turnMsgEl.textContent = prevText;
+      turnMsgEl.style.color = prevColor;
+    }, 1200);
+  }
+
+  function dotsShowError(msg) {
+    var turnMsgEl = document.getElementById('dots-turn-msg');
+    if (!turnMsgEl) return;
+    if (dotsErrorTimer) clearTimeout(dotsErrorTimer);
+    turnMsgEl.textContent = msg || 'error';
+    turnMsgEl.style.color = 'var(--red)';
+    dotsErrorTimer = setTimeout(function() {
+      dotsErrorTimer = null;
+      dotsUpdateTurnMsg();
+    }, 2000);
+  }
+
+  function dotsHandleState(op) {
+    dotsGameId        = op.gameId;
+    dotsEndsAt         = op.endsAt;
+    dotsLines          = Array.isArray(op.lines) ? op.lines.slice() : [];
+    dotsSquares        = (op.squares && typeof op.squares === 'object') ? Object.assign({}, op.squares) : {};
+    dotsScores         = Array.isArray(op.scores) ? op.scores.slice() : [];
+    dotsPlayerColors   = (op.playerColors && typeof op.playerColors === 'object') ? Object.assign({}, op.playerColors) : {};
+    dotsCanDraw        = !!op.canDraw;
+    dotsMyUsername     = op.username || dotsMyUsername;
+
+    var statusEl = document.getElementById('dots-status');
+    if (statusEl) {
+      var endsDate = new Date(dotsEndsAt * 1000);
+      statusEl.textContent = 'board resets ' + endsDate.toLocaleDateString() + ' or when all lines are drawn';
+    }
+    var svg = document.getElementById('dots-svg');
+    if (svg) dotsRenderGrid(svg);
+    dotsRenderScores();
+    dotsUpdateTurnMsg();
+  }
+
+  function dotsHandleUpdate(op) {
+    if (!document.getElementById('dots-overlay')) return;
+    dotsLines[op.lineIdx] = op.drawnBy;
+    (op.newSquares || []).forEach(function(s) {
+      dotsSquares[s.r + ',' + s.c] = s.claimedBy;
+    });
+    if (op.playerColors && typeof op.playerColors === 'object') {
+      for (var u in op.playerColors) { dotsPlayerColors[u] = op.playerColors[u]; }
+    }
+    dotsScores = Array.isArray(op.scores) ? op.scores.slice() : dotsScores;
+
+    if (op.drawnBy === dotsMyUsername) {
+      dotsCanDraw = !!(op.newSquares && op.newSquares.length > 0);
+    } else {
+      dotsCanDraw = true;
+    }
+
+    var svg = document.getElementById('dots-svg');
+    if (svg) dotsRenderGrid(svg);
+    dotsRenderScores();
+
+    if (op.gameComplete) {
+      var turnMsgEl = document.getElementById('dots-turn-msg');
+      if (turnMsgEl) { turnMsgEl.textContent = 'board complete! new game starting…'; turnMsgEl.style.color = 'var(--yellow)'; }
+    } else {
+      dotsUpdateTurnMsg();
+    }
+  }
+
+  function dotsHandleNewGame(op) {
+    var turnMsgEl = document.getElementById('dots-turn-msg');
+    if (turnMsgEl) {
+      turnMsgEl.textContent = '🟦 ' + op.winner + ' won with ' + op.winnerSquares + ' squares! new game starting…';
+      turnMsgEl.style.color = 'var(--yellow)';
+    }
+    if (dotsNewGameTimer) clearTimeout(dotsNewGameTimer);
+    dotsNewGameTimer = setTimeout(function() {
+      dotsNewGameTimer = null;
+      if (!document.getElementById('dots-overlay')) return;
+      dotsGameId        = op.gameId;
+      dotsEndsAt         = op.endsAt;
+      dotsLines          = Array.isArray(op.lines) ? op.lines.slice() : new Array(DOTS_TOTAL_LINES).fill(null);
+      dotsSquares        = (op.squares && typeof op.squares === 'object') ? Object.assign({}, op.squares) : {};
+      dotsScores         = Array.isArray(op.scores) ? op.scores.slice() : [];
+      dotsPlayerColors   = (op.playerColors && typeof op.playerColors === 'object') ? Object.assign({}, op.playerColors) : {};
+      dotsCanDraw        = !!op.canDraw;
+
+      var statusEl = document.getElementById('dots-status');
+      if (statusEl) {
+        var endsDate = new Date(dotsEndsAt * 1000);
+        statusEl.textContent = 'board resets ' + endsDate.toLocaleDateString() + ' or when all lines are drawn';
+      }
+      var svg = document.getElementById('dots-svg');
+      if (svg) dotsRenderGrid(svg);
+      dotsRenderScores();
+      dotsUpdateTurnMsg();
+    }, 3000);
+  }
+
+  function closeDots() {
+    var overlay = document.getElementById('dots-overlay');
+    if (overlay) overlay.remove();
+    if (dotsErrorTimer) { clearTimeout(dotsErrorTimer); dotsErrorTimer = null; }
+    if (dotsNewGameTimer) { clearTimeout(dotsNewGameTimer); dotsNewGameTimer = null; }
+    dotsGameId = null; dotsLines = []; dotsSquares = {}; dotsCanDraw = false;
+    dotsPlayerColors = {}; dotsScores = []; dotsEndsAt = 0;
     focusInputEnd(input);
   }
 
