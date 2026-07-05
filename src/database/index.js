@@ -205,6 +205,8 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
   ensureNormalizationColumns(db);
   ensureSignupReasonColumn(db);
   ensurePixelArtSchema(db);
+  ensureSynthPatchesSchema(db);
+  ensureTrackerSongsSchema(db);
   ensureEmailColumn(db);
   ensurePasswordResetTokensSchema(db);
   ensureFingerprintColumns(db);
@@ -801,6 +803,21 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
   const updatePixelArt    = db.prepare('UPDATE pixel_art SET name = ?, pixel_data = ? WHERE id = ?');
   const deletePixelArt    = db.prepare('DELETE FROM pixel_art WHERE id = ?');
 
+  const insertSynthPatch    = db.prepare(`INSERT INTO synth_patches (name, creator_username, patch_data, created_at) VALUES (?, ?, ?, ?)`);
+  const listSynthPatches    = db.prepare(`SELECT id, name, creator_username, created_at FROM synth_patches ORDER BY created_at DESC LIMIT 200`);
+  const listSynthPatchesWithData = db.prepare(`SELECT id, name, creator_username, patch_data FROM synth_patches ORDER BY created_at DESC LIMIT 200`);
+  const getSynthPatchByName = db.prepare('SELECT * FROM synth_patches WHERE name = ?');
+  const getSynthPatchById   = db.prepare('SELECT * FROM synth_patches WHERE id = ?');
+  const updateSynthPatch    = db.prepare('UPDATE synth_patches SET name = ?, patch_data = ? WHERE id = ?');
+  const deleteSynthPatch    = db.prepare('DELETE FROM synth_patches WHERE id = ?');
+
+  const insertTrackerSong    = db.prepare(`INSERT INTO tracker_songs (name, creator_username, song_data, created_at) VALUES (?, ?, ?, ?)`);
+  const listTrackerSongs     = db.prepare(`SELECT id, name, creator_username, created_at FROM tracker_songs ORDER BY created_at DESC LIMIT 200`);
+  const getTrackerSongByName = db.prepare('SELECT * FROM tracker_songs WHERE name = ?');
+  const getTrackerSongById   = db.prepare('SELECT * FROM tracker_songs WHERE id = ?');
+  const updateTrackerSong    = db.prepare('UPDATE tracker_songs SET name = ?, song_data = ? WHERE id = ?');
+  const deleteTrackerSong    = db.prepare('DELETE FROM tracker_songs WHERE id = ?');
+
   function defSetting(key, val){
     if (!getSetting.get(key)) setSetting.run(key, String(val));
   }
@@ -1041,6 +1058,19 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
     getPixelArtEmoji,
     updatePixelArt,
     deletePixelArt,
+    insertSynthPatch,
+    listSynthPatches,
+    listSynthPatchesWithData,
+    getSynthPatchByName,
+    getSynthPatchById,
+    updateSynthPatch,
+    deleteSynthPatch,
+    insertTrackerSong,
+    listTrackerSongs,
+    getTrackerSongByName,
+    getTrackerSongById,
+    updateTrackerSong,
+    deleteTrackerSong,
     setSetting,
   };
 
@@ -1129,6 +1159,36 @@ function ensurePixelArtSchema(db){
     );
     CREATE INDEX IF NOT EXISTS idx_pixel_art_name       ON pixel_art(name);
     CREATE INDEX IF NOT EXISTS idx_pixel_art_created_at ON pixel_art(created_at DESC);
+  `);
+}
+
+function ensureSynthPatchesSchema(db){
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS synth_patches (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      name             TEXT NOT NULL UNIQUE,
+      creator_username TEXT NOT NULL,
+      patch_data       TEXT NOT NULL,
+      created_at       INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_synth_patches_name       ON synth_patches(name);
+    CREATE INDEX IF NOT EXISTS idx_synth_patches_creator    ON synth_patches(creator_username);
+    CREATE INDEX IF NOT EXISTS idx_synth_patches_created_at ON synth_patches(created_at DESC);
+  `);
+}
+
+function ensureTrackerSongsSchema(db){
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tracker_songs (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      name             TEXT NOT NULL UNIQUE,
+      creator_username TEXT NOT NULL,
+      song_data        TEXT NOT NULL,
+      created_at       INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_tracker_songs_name       ON tracker_songs(name);
+    CREATE INDEX IF NOT EXISTS idx_tracker_songs_creator    ON tracker_songs(creator_username);
+    CREATE INDEX IF NOT EXISTS idx_tracker_songs_created_at ON tracker_songs(created_at DESC);
   `);
 }
 
