@@ -59,6 +59,11 @@ const database = createDatabase({ dbPath: DB_PATH });
 const { db, statements, helpers } = database;
 module.exports.__db = db;
 
+// Fast in-memory ban cache — populated at startup, updated on /ban
+const BANNED_USERNAMES = new Set(
+  db.prepare('SELECT username FROM ban_list WHERE username IS NOT NULL').all().map(r => r.username.toLowerCase())
+);
+
 const hubApi = createHub({ timeUtils, formatting });
 const notifications = createNotificationService({
   statements,
@@ -4651,6 +4656,7 @@ function cmdBan(api, state, args) {
     db.prepare('DELETE FROM dots_turns   WHERE username   = ?').run(target.username);
 
     insertBan.run(now, state.username, target.username, target.registration_ip || null, target.fingerprint_hash || null, null);
+    BANNED_USERNAMES.add(target.username.toLowerCase());
 
     db.prepare('INSERT INTO ban_log (created_at, banned_by, username, chat_msgs, board_topics, board_comments, link_posts, link_comments, poll_votes, polls_created, status_posts, dm_sent, pixel_art) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
       now, state.username, target.username,
@@ -4672,6 +4678,13 @@ function cmdBan(api, state, args) {
     HUB.socketsByUser.delete(target.username);
   }
   HUB.online.delete(target.username);
+
+  // Invalidate any pending auth tokens for the banned user
+  for (const [token, record] of AUTH_TOKENS.entries()) {
+    if (record.username.toLowerCase() === target.username.toLowerCase()) {
+      AUTH_TOKENS.delete(token);
+    }
+  }
 
   api.print(`Banned: ${target.username}`, 'red');
   api.print(`  IP: ${target.registration_ip || '(none on record)'}`, 'dim');
@@ -4952,6 +4965,18 @@ function authenticateWsFromUserRow(ws, api, state, userRow) {
   HUB.socketsByUser.get(state.username).add(ws);
   broadcastSystem(`${state.username} joined`);
   setLastLogin.run(nowEpoch(), state.userId);
+
+  // Update fingerprint on every login so IP/UA stays current
+  try {
+    const ip = ws.__ip || null;
+    const ua = ws.__ua || null;
+    const lang = ws.__acceptLanguage || null;
+    if (ip || ua) {
+      updateUserFingerprint.run(ip, ip, ua, lang, null, state.userId);
+    }
+  } catch (e) {
+    console.error('[auth] fingerprint update failed:', e && e.message);
+  }
 }
 
 const heartbeatTimer = setInterval(() => {
@@ -4975,6 +5000,15 @@ wss.on('connection', (ws, req) => {
   ws.on('pong', markAlive);
 
   HUB.clients.add(ws);
+
+  // Capture connection metadata for fingerprint updates
+  ws.__ip = req.headers['fly-client-ip'] ||
+            (req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : null) ||
+            req.socket?.remoteAddress ||
+            null;
+  ws.__ua = req.headers['user-agent'] || null;
+  ws.__acceptLanguage = req.headers['accept-language'] || null;
+
   const api = makeApi(ws);
   const state = makeInitialState();
   ws.__ctx = { state };
@@ -5000,6 +5034,12 @@ wss.on('connection', (ws, req) => {
           AUTH_TOKENS.delete(msg.token);
           const userRow = getUserByName.get(record.username);
           if (userRow) {
+            // Check if user is banned before authenticating
+            if (BANNED_USERNAMES.has(userRow.username.toLowerCase())) {
+              sendOps(ws, [{ op: 'error', message: 'This account has been suspended.' }]);
+              try { ws.close(4003, 'banned'); } catch {}
+              return;
+            }
             authenticateWsFromUserRow(ws, api, state, userRow);
             routeGo(api, state, 'menu');
             return;
@@ -5015,6 +5055,12 @@ wss.on('connection', (ws, req) => {
           if (payload) {
             const userRow = getUserByName.get(payload.u);
             if (userRow) {
+              // Check if user is banned before authenticating
+              if (BANNED_USERNAMES.has(userRow.username.toLowerCase())) {
+                sendOps(ws, [{ op: 'error', message: 'This account has been suspended.' }]);
+                try { ws.close(4003, 'banned'); } catch {}
+                return;
+              }
               authenticateWsFromUserRow(ws, api, state, userRow);
               routeGo(api, state, 'menu');
               return;
