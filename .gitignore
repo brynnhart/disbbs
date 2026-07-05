@@ -1,6 +1,4 @@
-dis.sqlite3-wal
-dis.sqlite3-shm
-dis.sqlite3
-dis.sqlite3
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 dis_data.tar.gz
-dis.sqlite3
