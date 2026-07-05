@@ -823,7 +823,7 @@ function splashHandleRaw(text, api, state){
 function cmdHelp(api, state){
   api.hr();
   api.print('Global slash commands:', 'yellow');
-  api.print('  /register  Create an account: /register <user> <pass>', 'cyan');
+  //api.print('  /register  Create an account: /register <user> <pass>', 'cyan');
   api.print('  /chat      Enter the Commons Chat', 'cyan');
   api.print('  /here      Show who is currently in the chat', 'cyan');
   api.print('  /post <text>  Share a short status update (swept after ~30 days)', 'cyan');
