@@ -4440,6 +4440,8 @@ function cmdNotifications(api, state, args){
 
 /* ======================= Splash: Register ======================= */
 function cmdRegister(api, state, args){
+  api.print('Registration is not available via this method.', 'red');
+  return;
   const [username, password] = args || [];
 
   if (!username || !password) {
