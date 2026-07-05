@@ -4451,6 +4451,25 @@ function cmdRegister(api, state, args){
     return;
   }
 
+  // Username substring block
+  const usernameLower = username.toLowerCase();
+  const BLOCKED_USERNAME_SUBSTRINGS = ['hitler', 'nazi', 'n4zi'];
+  if (BLOCKED_USERNAME_SUBSTRINGS.some(b => usernameLower.includes(b))) {
+    api.print('That username is not available.', 'red');
+    return;
+  }
+
+  // IP/UA guard — same logic as /api/register
+  const wsIp = api.ws.__ip || null;
+  const wsUa = api.ws.__ua || null;
+  const ipUnresolvable = isUnresolvableIp(wsIp);
+  const hasNoUserAgent = !wsUa || wsUa.trim() === '';
+  if (ipUnresolvable && hasNoUserAgent) {
+    api.print('Registration is currently unavailable. Please try again with a standard browser.', 'red');
+    console.log('[register-ws blocked]', { username, ip: wsIp, ua: wsUa });
+    return;
+  }
+
   // Pre-check username availability before asking the question
   const existing = getUserByName.get(username);
   if (existing) {
@@ -4492,6 +4511,17 @@ function handleRegisterAnswer(answer, api, state){
     setUserSignupReason.run(answer.trim(), res.id);
   } catch (e) {
     console.error('Failed to save signup reason:', e && e.message ? e.message : e);
+  }
+
+  // Store registration IP and UA for the WebSocket registration path
+  try {
+    const wsIp = api.ws.__ip || null;
+    const wsUa = api.ws.__ua || null;
+    if (wsIp || wsUa) {
+      updateUserFingerprintOnRegister.run(wsIp, wsIp, wsUa, null, null, res.id);
+    }
+  } catch (e) {
+    console.error('[register-ws] fingerprint store failed:', e && e.message);
   }
 
   try {
@@ -4952,6 +4982,21 @@ function authenticateWsFromUserRow(ws, api, state, userRow) {
   setLastLogin.run(nowEpoch(), state.userId);
 }
 
+// Auto-ban accounts with no IP and no UA on record — these are bot registrations
+// that slipped through the registration guard. Returns true if the account was banned.
+function autoBanIfNoFingerprint(ws, userRow) {
+  if (userRow.registration_ip || userRow.user_agent) return false;
+  console.log('[auto-ban] no ip/ua on login:', userRow.username);
+  try {
+    insertBan.run(nowEpoch(), 'system', userRow.username, userRow.registration_ip || null, userRow.fingerprint_hash || null, 'auto-ban: no registration IP/UA fingerprint');
+    db.prepare('DELETE FROM users WHERE id = ?').run(userRow.id);
+  } catch (e) {
+    console.error('[auto-ban] failed:', e && e.message);
+  }
+  sendOps(ws, [{ op: 'error', message: 'This account has been suspended.' }]);
+  return true;
+}
+
 const heartbeatTimer = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (ws.isAlive === false) {
@@ -4973,6 +5018,15 @@ wss.on('connection', (ws, req) => {
   ws.on('pong', markAlive);
 
   HUB.clients.add(ws);
+
+  // Capture connection metadata for registration guard
+  const xff = req.headers['x-forwarded-for'];
+  ws.__ip = req.headers['fly-client-ip'] ||
+            (xff ? xff.split(',')[0].trim() : null) ||
+            req.socket?.remoteAddress ||
+            null;
+  ws.__ua = req.headers['user-agent'] || null;
+
   const api = makeApi(ws);
   const state = makeInitialState();
   ws.__ctx = { state };
@@ -4998,6 +5052,7 @@ wss.on('connection', (ws, req) => {
           AUTH_TOKENS.delete(msg.token);
           const userRow = getUserByName.get(record.username);
           if (userRow) {
+            if (autoBanIfNoFingerprint(ws, userRow)) return;
             authenticateWsFromUserRow(ws, api, state, userRow);
             routeGo(api, state, 'menu');
             return;
@@ -5013,6 +5068,7 @@ wss.on('connection', (ws, req) => {
           if (payload) {
             const userRow = getUserByName.get(payload.u);
             if (userRow) {
+              if (autoBanIfNoFingerprint(ws, userRow)) return;
               authenticateWsFromUserRow(ws, api, state, userRow);
               routeGo(api, state, 'menu');
               return;
