@@ -71,10 +71,60 @@ const notifications = createNotificationService({
   hub: hubApi,
   timeUtils,
 });
-const chrome = createChromeService({ db, nowEpoch: timeUtils.nowEpoch, ymdFromEpoch: timeUtils.ymdFromEpoch });
+const chrome = createChromeService({ db, nowEpoch: timeUtils.nowEpoch, ymdFromEpoch: timeUtils.ymdFromEpoch, hub: hubApi.hub, sendOps: hubApi.sendOps });
 
 function fmtCr(n) {
   return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+/* ======================= Box-drawing frame helper =======================
+   Real ╔═╗/║ ║/╚═╝ box-drawing characters as literal text (not CSS borders),
+   for a fixed-width titled frame. Reusable by any future feature that wants
+   this look — see renderMenu's "MAIN MENU" frame for a usage example.
+
+   title: plain text, wrapped in "[ ]" automatically.
+   rows: array of rows; each row is an array of {text, cls} segments, where
+     cls is an optional CSS class to color that segment (padding is applied
+     to each segment's own text before joining, so column alignment survives
+     per-segment coloring). Overlong rows are truncated with "…" rather than
+     breaking the frame.
+   totalWidth: fixed outer width in characters, including the border chars. */
+function renderFrameRow(segments, innerWidth) {
+  let used = 0;
+  let html = '';
+  for (const seg of segments) {
+    if (used >= innerWidth) break;
+    const remaining = innerWidth - used;
+    let text = seg.text;
+    if (text.length > remaining) {
+      text = remaining > 1 ? text.slice(0, remaining - 1) + '…' : '';
+      text = text.slice(0, remaining);
+    }
+    if (text.length) {
+      html += seg.cls ? `<span class="${escapeHTML(seg.cls)}">${escapeHTML(text)}</span>` : escapeHTML(text);
+      used += text.length;
+    }
+  }
+  if (used < innerWidth) html += ' '.repeat(innerWidth - used);
+  return html;
+}
+function renderBoxFrame(title, rows, totalWidth) {
+  const innerWidth = totalWidth - 4; // 2 border chars + 1 padding space each side
+  const titleTxt = `[ ${title} ]`;
+  const available = totalWidth - 2 - titleTxt.length;
+  const sideLen = Math.max(2, Math.floor(available / 2));
+  const remainder = Math.max(0, available - sideLen * 2);
+  // Absorb any odd leftover into the title's own trailing padding so the
+  // two ═ runs stay exactly equal in length either side.
+  const paddedTitle = remainder > 0 ? titleTxt + ' '.repeat(remainder) : titleTxt;
+  const topRule = `<span class="frame-char">╔${'═'.repeat(sideLen)}${escapeHTML(paddedTitle)}${'═'.repeat(sideLen)}╗</span>`;
+  const bottomRule = `<span class="frame-char">╚${'═'.repeat(totalWidth - 2)}╝</span>`;
+  let html = `<div class="line frame-line">${topRule}</div>`;
+  for (const segs of rows) {
+    html += `<div class="line frame-line"><span class="frame-char">║</span> ${renderFrameRow(segs, innerWidth)} <span class="frame-char">║</span></div>`;
+  }
+  html += `<div class="line frame-line">${bottomRule}</div>`;
+  return html;
 }
 
 
@@ -300,6 +350,7 @@ const {
   insertAnnouncement,
   listAnnouncements,
   deleteAnnouncementById,
+  getActiveAnnouncementById,
   sweepExpiredAnnouncements,
   insertPoll,
   listActivePolls,
@@ -916,6 +967,7 @@ function cmdHelp(api, state){
     api.print('  /adminchat   Admin live room (private)', 'cyan');
     api.print('  /announce <text>             Post a new announcement', 'cyan');
     api.print('  /removeannounce <id>         Remove an announcement', 'cyan');
+    api.print('  /pinannounce <id>            Pin an announcement to /main (or /pinannounce clear)', 'cyan');
     api.print('  /newusers [n]                Most recent registrations with ban-list match check (default 20, max 50)', 'cyan');
     api.print('  /rejections                  Last 20 blocked registration attempts (no valid IP + incomplete fingerprint)', 'cyan');
     api.print('  /ban <username>              Ban user (deletes content, blocks IP + fingerprint)', 'cyan');
@@ -1563,7 +1615,7 @@ function renderMenu(api, state){
   api.batch(b=>{
     b.clear();
     b.setInputLimit(null);
-    b.printHTML('<div class="banner"><div class="line"><span class="cyan">▄▄▄</span><span class="magenta"> Dead Internet Society </span><span class="cyan">▄▄▄</span></div><div class="line dim">type a /command to launch something.</div></div>');
+    b.printHTML('<div class="banner"><div class="line term-titlebar-text">DEADNET</div><div class="line dim">(C) 1997-∞ DEAD INTERNET SOCIETY</div><div class="line dim">type a /command to launch something.</div></div>');
     if (unreadCount > 0) {
       const label = unreadCount === 1 ? 'message' : 'messages';
       b.printHTML(`<span style="color:#ff6b6b;font-weight:bold;">📬 NEW DIRECT MESSAGES: ${unreadCount} unread ${label}.</span>`);
@@ -1581,31 +1633,67 @@ function renderMenu(api, state){
       if (newItems.newArt)     b.print(`  ${pl(newItems.newArt,     'new pixel art')}`, 'cyan');
       if (newItems.unreadDMs)  b.print(`  ${pl(newItems.unreadDMs,  'unread direct message')}`, 'yellow');
     }
-    b.print('Programs:', 'yellow');
-    b.print('  /chat            Commons Chat — talk to everyone', 'cyan');
-    b.print('  /messages        Direct messages', 'cyan');
-    b.print('  /feed [user]     Latest updates from the community', 'cyan');
-    b.print('', 'dim');
-    b.print('  /board           Bulletin board — long-form threads', 'cyan');
-    b.print('  /links           Link share — stuff worth seeing', 'cyan');
-    b.print('  /polls           Poll booth', 'cyan');
-    b.print('  /art             Pixel art library — browse and create', 'cyan');
-    b.print('  /graffiti        Shared graffiti wall', 'cyan');
-    b.print('', 'dim');
-    b.print('  /games           Launch a game', 'cyan');
-    b.print('', 'dim');
-    b.print('  /chrome          Your chrome balance and transaction history', 'cyan');
-    b.print('  /mining          Dig for resources in today\'s shared grid', 'cyan');
-    b.print('  /market          Browse resource prices and your inventory', 'cyan');
-    b.print('', 'dim');
-    b.print('  /activity        Recent activity across DIS', 'cyan');
-    b.print('  /profile         Your profile (or /profile <user>)', 'cyan');
-    b.print('  /announcements   Announcements from the sysop', 'cyan');
-    b.print('  /suggestions     Report bugs and suggest new features!', 'cyan');
-    b.print('  /about           About DIS', 'cyan');
-    b.hr();
+    {
+      const progLeft = [
+        ['/chat', 'Commons Chat'],
+        ['/messages', 'Direct messages'],
+        ['/feed [user]', 'Community updates'],
+        ['/board', 'Bulletin board'],
+        ['/links', 'Link share'],
+        ['/polls', 'Poll booth'],
+        ['/art', 'Pixel art library'],
+        ['/graffiti', 'Shared graffiti wall'],
+        ['/games', 'Launch a game'],
+      ];
+      const progRight = [
+        ['/chrome', 'Balance & transactions'],
+        ['/mining', 'Dig for resources'],
+        ['/market', 'Prices & inventory'],
+        ['/activity', 'Site activity'],
+        ['/profile', 'Your profile'],
+        ['/announcements', 'Sysop announcements'],
+        ['/suggestions', 'Bugs & feature ideas'],
+        ['/about', 'About DIS'],
+      ];
+      const CMD_W1 = 15, DESC_W1 = 22, CMD_W2 = 17;
+      const padTo = (s, n) => s + ' '.repeat(Math.max(1, n - s.length));
+      const rows = [];
+      for (let i = 0; i < progLeft.length; i++) {
+        const [lc, ld] = progLeft[i];
+        const right = progRight[i];
+        const segs = [
+          { text: padTo(lc, CMD_W1), cls: 'menu-cmd' },
+          { text: padTo(ld, DESC_W1), cls: 'menu-desc' },
+        ];
+        if (right) {
+          segs.push({ text: padTo(right[0], CMD_W2), cls: 'menu-cmd' });
+          segs.push({ text: right[1], cls: 'menu-desc' });
+        }
+        rows.push(segs);
+      }
+      b.printHTML(renderBoxFrame('MAIN MENU', rows, 80));
+    }
+    //b.hr();
     b.print('/command works from anywhere. /main to come home. /help for everything.', 'dim');
-    b.print('DIS runs on community support  •  /donate for info', 'white');
+    {
+      // Important-announcement slot: only the single pinned announcement
+      // (via the existing generic settings table — no schema change), if
+      // one is set and still active. Renders nothing at all otherwise.
+      try {
+        const pinnedRow = getSetting.get('pinned_announcement_id');
+        const pinnedId = pinnedRow && pinnedRow.value ? parseInt(pinnedRow.value, 10) : null;
+        if (pinnedId) {
+          const announcement = getActiveAnnouncementById.get(pinnedId);
+          if (announcement) {
+            const text = stripDISFormatting(announcement.body).slice(0, 140);
+            b.printHTML(`<span class="main-alert">!! ${escapeHTML(text)} — /announcements !!</span>`);
+          }
+        }
+      } catch (e) {
+        console.error('[renderMenu] pinned announcement lookup failed:', e && e.message);
+      }
+    }
+    b.printHTML('<div id="main-flavor"></div>');
   });
 }
 function menuHandleRaw(text, api){ api.print('Type a /command to launch something. Try /chat, /board, /games or /help.', 'dim'); return true; }
@@ -1694,6 +1782,29 @@ function cmdRemoveAnnouncement(api, state, args){
     console.error('Failed to remove announcement:', e && e.message ? e.message : e);
     api.print('Failed to remove announcement.', 'red');
   }
+}
+
+function cmdPinAnnouncement(api, state, args){
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin){ api.print('Unknown command.', 'red'); return; }
+
+  const arg = args && args[0];
+  if (!arg){ api.print('Usage: /pinannounce <id#>  (or /pinannounce clear)', 'yellow'); return; }
+
+  if (arg === 'clear'){
+    setSetting.run('pinned_announcement_id', '');
+    api.print('Pinned announcement cleared.', 'green');
+    return;
+  }
+
+  const id = parseInt(arg, 10);
+  if (!id){ api.print('Usage: /pinannounce <id#>  (or /pinannounce clear)', 'yellow'); return; }
+
+  const row = getActiveAnnouncementById.get(id);
+  if (!row){ api.print('Announcement not found (or expired).', 'red'); return; }
+
+  setSetting.run('pinned_announcement_id', String(id));
+  api.print(`Announcement #${id} pinned to /main.`, 'green');
 }
 
 /* ======================= Polls ======================= */
@@ -2165,6 +2276,11 @@ function renderAbout(api, state){
     b.print('Dont be a badger-sized dickhole.', 'white');
     b.print('No racism/bigotry.', 'white');
     b.print('No explicit conversation or content.', 'white');
+    b.print(' ', 'white');
+    b.print('== SYSTEM ==', 'magenta');
+    b.print(' ', 'white');
+    b.print('Running DEADNET UNIFIED ACCESS SYSTEM v0.13 on a node nobody quite remembers building.', 'dim');
+    b.print('Display font: Web IBM VGA 8x16, from the Ultimate Oldschool PC Font Pack by VileR (CC BY-SA 4.0) — int10h.org/oldschool-pc-fonts', 'dim');
     b.print(' ', 'white');
     b.hr(); b.print('Navigation: /main', 'dim');
   });
@@ -4923,6 +5039,7 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'announcements': cmdAnnouncements(api, state); return true;
     case 'announce':      cmdAnnounce(api, state, args); return true;
     case 'removeannounce': cmdRemoveAnnouncement(api, state, args); return true;
+    case 'pinannounce':   cmdPinAnnouncement(api, state, args); return true;
 
     /* Misc */
     case 'whoami':       api.print(`You are ${state.username}${state.isAdmin ? ' (admin)' : ''}`); return true;
@@ -4979,6 +5096,7 @@ function authenticateWsFromUserRow(ws, api, state, userRow) {
   HUB.socketsByUser.get(state.username).add(ws);
   broadcastSystem(`${state.username} joined`);
   setLastLogin.run(nowEpoch(), state.userId);
+  sendOps(ws, [{ op: 'status', chrome: chrome.getBalance(state.username) }]);
 
   // Update fingerprint on every login so IP/UA stays current
   try {

@@ -1,6 +1,6 @@
 'use strict';
 
-function createChromeService({ db, nowEpoch, ymdFromEpoch }) {
+function createChromeService({ db, nowEpoch, ymdFromEpoch, hub, sendOps }) {
   const stmtGetRow     = db.prepare('SELECT balance, last_daily_at, last_stipend_at FROM chrome_balances WHERE username = ?');
   const stmtEnsureRow  = db.prepare('INSERT INTO chrome_balances (username, balance, created_at) VALUES (?, 0, ?) ON CONFLICT(username) DO NOTHING');
   const stmtAddBalance = db.prepare('UPDATE chrome_balances SET balance = balance + ? WHERE username = ?');
@@ -21,11 +21,24 @@ function createChromeService({ db, nowEpoch, ymdFromEpoch }) {
     return row ? row.balance : 0;
   }
 
+  // Status-strip op (Phase 3 of the phosphor redesign): broadcast the new
+  // balance to every active socket for this user. Hooked in here, at the
+  // service's own mutation points, rather than at each of the many call
+  // sites across server.js that call award/spend.
+  function broadcastChromeStatus(username, balance) {
+    if (!hub || !sendOps) return;
+    const sockets = hub.socketsByUser.get(username);
+    if (!sockets) return;
+    sockets.forEach(ws => sendOps(ws, [{ op: 'status', chrome: balance }]));
+  }
+
   function award(username, amount, reason) {
     ensureRow(username);
     stmtAddBalance.run(amount, username);
     stmtInsertTx.run(username, amount, reason, nowEpoch());
-    return getBalance(username);
+    const newBalance = getBalance(username);
+    broadcastChromeStatus(username, newBalance);
+    return newBalance;
   }
 
   function spend(username, amount, reason) {
@@ -34,7 +47,9 @@ function createChromeService({ db, nowEpoch, ymdFromEpoch }) {
     if (bal < amount) return { success: false, newBalance: bal };
     stmtSubBalance.run(amount, username);
     stmtInsertTx.run(username, -amount, reason, nowEpoch());
-    return { success: true, newBalance: bal - amount };
+    const newBalance = bal - amount;
+    broadcastChromeStatus(username, newBalance);
+    return { success: true, newBalance };
   }
 
   function getDailyBonus(username) {

@@ -469,6 +469,11 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
      LIMIT ?
   `);
   const deleteAnnouncementById = db.prepare('DELETE FROM announcements WHERE id = ?');
+  const getActiveAnnouncementById = db.prepare(`
+    SELECT a.id, a.body, a.created_at
+      FROM announcements a
+     WHERE a.id = ? AND (a.expires_at IS NULL OR a.expires_at > strftime('%s','now'))
+  `);
   const sweepExpiredAnnouncements = db.prepare(`
     DELETE FROM announcements
      WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')
@@ -977,6 +982,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
     insertAnnouncement,
     listAnnouncements,
     deleteAnnouncementById,
+    getActiveAnnouncementById,
     sweepExpiredAnnouncements,
     insertPoll,
     listActivePolls,
