@@ -517,14 +517,25 @@ function extractClientIp(req) {
 
 function buildFingerprintHash(fields) {
   const str = [
-    fields.ip || '',
     fields.userAgent || '',
     fields.acceptLanguage || '',
     fields.screenResolution || '',
     fields.timezone || '',
   ].join('|');
-  if (str === '||||') return null; // No data at all — don't produce a matchable hash
+  if (str === '|||') return null; // No data at all — don't produce a matchable hash
   return crypto.createHash('sha256').update(str).digest('hex');
+}
+
+// Checks a connection's IP and fingerprint against the ban list; only a positive
+// match on a present value can deny — missing data always passes through.
+function checkBanForConnection(ip, fingerprintHash) {
+  if (ip && checkBanByIp.get(ip)) return 'ip';
+  if (fingerprintHash && checkBanByFingerprint.get(fingerprintHash)) return 'fingerprint';
+  return null;
+}
+
+function logBanEnforcementDenial(username, ip, check) {
+  console.log('[ban-enforcement] denied', { username: username || null, ip: ip || null, check });
 }
 
 function collectFingerprintFromReq(req, body) {
@@ -533,7 +544,7 @@ function collectFingerprintFromReq(req, body) {
   const acceptLanguage = (req.headers['accept-language'] || '').slice(0, 128);
   const screenRes      = typeof body.screenResolution === 'string' ? body.screenResolution.slice(0, 32)  : null;
   const timezone       = typeof body.timezone         === 'string' ? body.timezone.slice(0, 64)          : null;
-  const fpHash         = buildFingerprintHash({ ip, userAgent, acceptLanguage, screenResolution: screenRes, timezone });
+  const fpHash         = buildFingerprintHash({ userAgent, acceptLanguage, screenResolution: screenRes, timezone });
   return { ip, userAgent, acceptLanguage, screenResolution: screenRes, timezone, fpHash };
 }
 
@@ -4656,6 +4667,9 @@ function cmdBan(api, state, args) {
     db.prepare('DELETE FROM dots_turns   WHERE username   = ?').run(target.username);
 
     insertBan.run(now, state.username, target.username, target.registration_ip || null, target.fingerprint_hash || null, null);
+    if (target.last_login_ip && target.last_login_ip !== target.registration_ip) {
+      insertBan.run(now, state.username, target.username, target.last_login_ip, null, null);
+    }
     BANNED_USERNAMES.add(target.username.toLowerCase());
 
     db.prepare('INSERT INTO ban_log (created_at, banned_by, username, chat_msgs, board_topics, board_comments, link_posts, link_comments, poll_votes, polls_created, status_posts, dm_sent, pixel_art) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
@@ -5040,6 +5054,13 @@ wss.on('connection', (ws, req) => {
               try { ws.close(4003, 'banned'); } catch {}
               return;
             }
+            const banHit = checkBanForConnection(ws.__ip, userRow.fingerprint_hash);
+            if (banHit) {
+              logBanEnforcementDenial(userRow.username, ws.__ip, banHit);
+              sendOps(ws, [{ op: 'error', message: 'This account has been suspended.' }]);
+              try { ws.close(4003, 'banned'); } catch {}
+              return;
+            }
             authenticateWsFromUserRow(ws, api, state, userRow);
             routeGo(api, state, 'menu');
             return;
@@ -5057,6 +5078,13 @@ wss.on('connection', (ws, req) => {
             if (userRow) {
               // Check if user is banned before authenticating
               if (BANNED_USERNAMES.has(userRow.username.toLowerCase())) {
+                sendOps(ws, [{ op: 'error', message: 'This account has been suspended.' }]);
+                try { ws.close(4003, 'banned'); } catch {}
+                return;
+              }
+              const banHit = checkBanForConnection(ws.__ip, userRow.fingerprint_hash);
+              if (banHit) {
+                logBanEnforcementDenial(userRow.username, ws.__ip, banHit);
                 sendOps(ws, [{ op: 'error', message: 'This account has been suspended.' }]);
                 try { ws.close(4003, 'banned'); } catch {}
                 return;
@@ -5528,6 +5556,13 @@ app.post('/api/login', (req, res) => {
   }
 
   const fp = collectFingerprintFromReq(req, req.body || {});
+
+  const banHit = checkBanForConnection(fp.ip, fp.fpHash);
+  if (banHit) {
+    logBanEnforcementDenial(user.username, fp.ip, banHit);
+    return res.status(401).json({ ok: false, error: 'Invalid username or password.' });
+  }
+
   try {
     updateUserFingerprint.run(fp.ip, fp.ip, fp.userAgent, fp.acceptLanguage, fp.fpHash, user.id);
   } catch (e) {

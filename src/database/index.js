@@ -616,7 +616,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
            last_login_ip    = ?,
            user_agent       = ?,
            accept_language  = ?,
-           fingerprint_hash = ?
+           fingerprint_hash = COALESCE(?, fingerprint_hash)
      WHERE id = ?
   `);
   const updateUserFingerprintOnRegister = db.prepare(`
