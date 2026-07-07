@@ -40,8 +40,8 @@ test('broadcastChatFrom delivers messages to chat clients with day separators', 
   assert.deepStrictEqual(aliceFirst, {
     type: 'ops',
     ops: [
-      { op: 'printHTML', html: '<span class="dim">── Day 0 ──</span>' },
-      { op: 'printHTML', html: '<b>hi</b>', cls: 'me' },
+      { op: 'printHTML', html: '<span class="dim">── Day 0 ──</span>', cls: 'chat-day' },
+      { op: 'printHTML', html: '<b>hi</b>', cls: 'chat-msg me' },
     ],
   });
 
@@ -49,18 +49,18 @@ test('broadcastChatFrom delivers messages to chat clients with day separators', 
   assert.deepStrictEqual(bobFirst, {
     type: 'ops',
     ops: [
-      { op: 'printHTML', html: '<span class="dim">── Day 0 ──</span>' },
-      { op: 'printHTML', html: '<b>hi</b>' },
+      { op: 'printHTML', html: '<span class="dim">── Day 0 ──</span>', cls: 'chat-day' },
+      { op: 'printHTML', html: '<b>hi</b>', cls: 'chat-msg' },
     ],
   });
 
   const aliceSecondOps = sent.get(alice)[1].ops;
   assert.strictEqual(aliceSecondOps.length, 1);
-  assert.deepStrictEqual(aliceSecondOps[0], { op: 'printHTML', html: '<b>hello</b>' });
+  assert.deepStrictEqual(aliceSecondOps[0], { op: 'printHTML', html: '<b>hello</b>', cls: 'chat-msg' });
 
   const aliceThird = sent.get(alice)[2];
-  assert.deepStrictEqual(aliceThird.ops[0], { op: 'printHTML', html: '<span class="dim">── Day 2 ──</span>' });
-  assert.deepStrictEqual(aliceThird.ops[1], { op: 'printHTML', html: '<b>new day</b>' });
+  assert.deepStrictEqual(aliceThird.ops[0], { op: 'printHTML', html: '<span class="dim">── Day 2 ──</span>', cls: 'chat-day' });
+  assert.deepStrictEqual(aliceThird.ops[1], { op: 'printHTML', html: '<b>new day</b>', cls: 'chat-msg' });
 
   const spectatorRecords = sent.get(spectator);
   assert.strictEqual(spectatorRecords.length, 0, 'non-chat client should not receive messages');

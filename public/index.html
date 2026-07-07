@@ -1964,14 +1964,123 @@ body[data-crt="full"] .prompt::after{
     return (el.scrollHeight - el.scrollTop - el.clientHeight) < threshold; }
   function scrollToBottom(el){ el.scrollTop = el.scrollHeight; }
 
+  // ===== Chat live-prune (keeps the visible .chat-msg count capped while
+  // staying on /chat; entry history is already capped server-side) =====
+  var chatCapN = null;           // null = not currently watching /chat
+  var chatPruneNeeded = false;   // set when over-cap but scrolled up; consumed on return to bottom
+  var chatScrollHandler = null;  // at most one live at a time — see teardownChatWatch
+
+  // Invisible marker the server places (via the additive 'chatAnchor' op)
+  // between the /chat entry's history and its closing rule+hint block.
+  // Live messages insertBefore this so they land above that pinned
+  // footer instead of appending after it. Kept separate from
+  // teardownChatWatch()/chatCapN below: the entry sequence is
+  // clear -> history -> chatAnchor -> footer -> chatCap, so the anchor
+  // element must survive from its creation until chatCap arrives (which
+  // is when insertion actually starts redirecting — see appendChatAware)
+  // without an intervening defensive teardown wiping it out.
+  var chatAnchorEl = null;
+
+  function teardownChatWatch(){
+    if (chatScrollHandler) {
+      term.removeEventListener('scroll', chatScrollHandler);
+      chatScrollHandler = null;
+    }
+    chatCapN = null;
+    chatPruneNeeded = false;
+  }
+
+  function op_chatAnchor(){
+    var el = document.createElement('div');
+    el.id = 'chat-anchor';
+    el.setAttribute('aria-hidden', 'true');
+    el.style.cssText = 'height:0;margin:0;padding:0;border:0;overflow:hidden;';
+    term.appendChild(el);
+    chatAnchorEl = el;
+  }
+
+  // Live messages (and anything else printed once chat is fully live —
+  // see the chatCapN gate) insert above the pinned footer instead of
+  // appending after it. Before chat is "live" (chatCapN still null: the
+  // entry render's own footer is still being sent) this falls through to
+  // a plain append, which is what lets that same footer land in the
+  // right place immediately after the anchor is created.
+  function appendChatAware(d){
+    if (chatCapN != null && chatAnchorEl && chatAnchorEl.parentNode === term) {
+      term.insertBefore(d, chatAnchorEl);
+    } else {
+      term.appendChild(d);
+    }
+  }
+
+  function handleChatCap(n){
+    teardownChatWatch(); // defensive — never stack listeners across chat re-entries
+    var cap = parseInt(n, 10);
+    if (!Number.isFinite(cap) || cap < 1) return; // bogus value: leave pruning off rather than guess
+    chatCapN = cap;
+    chatScrollHandler = function(){
+      if (chatPruneNeeded && isNearBottom(term)) {
+        chatPruneNeeded = false;
+        pruneChatMessages();
+      }
+    };
+    term.addEventListener('scroll', chatScrollHandler);
+  }
+
+  // Removes any .chat-day divider left with no .chat-msg between it and
+  // the next .chat-day (or the end of the scrollback) — i.e. every message
+  // under that day got pruned. Never touches non chat-msg/chat-day lines.
+  function pruneOrphanedChatDayDividers(){
+    var children = Array.prototype.slice.call(term.children);
+    var pendingDivider = null;
+    var pendingHasMsg = false;
+    for (var i = 0; i < children.length; i++) {
+      var el = children[i];
+      if (el.classList.contains('chat-day')) {
+        if (pendingDivider && !pendingHasMsg && pendingDivider.parentNode) {
+          pendingDivider.parentNode.removeChild(pendingDivider);
+        }
+        pendingDivider = el;
+        pendingHasMsg = false;
+      } else if (el.classList.contains('chat-msg')) {
+        if (pendingDivider) pendingHasMsg = true;
+      }
+    }
+    if (pendingDivider && !pendingHasMsg && pendingDivider.parentNode) {
+      pendingDivider.parentNode.removeChild(pendingDivider);
+    }
+  }
+
+  function pruneChatMessages(){
+    if (chatCapN == null) return;
+    var msgs = Array.prototype.slice.call(term.querySelectorAll('.chat-msg'));
+    var overflow = msgs.length - chatCapN;
+    if (overflow <= 0) return;
+    for (var i = 0; i < overflow; i++) {
+      var el = msgs[i];
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+    }
+    pruneOrphanedChatDayDividers();
+  }
+
+  // Called right after a .chat-msg line is appended. `wasAtBottom` is the
+  // scroll position *before* this line was appended (same signal the
+  // existing autoscroll-stick check uses) — silent prune if so, otherwise
+  // defer until the user scrolls back down themselves.
+  function maybePruneChatMessages(wasAtBottom){
+    if (chatCapN == null) return;
+    if (wasAtBottom) pruneChatMessages();
+    else chatPruneNeeded = true;
+  }
+
   // ===== Render ops =====
-  function op_clear(){ term.innerHTML = ''; }
+  function op_clear(){ teardownChatWatch(); chatAnchorEl = null; term.innerHTML = ''; }
   function op_print(text, cls){
     var stick = isNearBottom(term);
     var d = document.createElement('div');
     d.className = 'line' + (cls ? ' ' + cls : '');
     d.textContent = text || '';
-    term.appendChild(d);
+    appendChatAware(d);
     if (stick) scrollToBottom(term);
   }
   function op_printHTML(html, cls){
@@ -1980,8 +2089,9 @@ body[data-crt="full"] .prompt::after{
     d.className = 'line' + (cls ? ' ' + cls : '');
     d.innerHTML = html || '';
     d.querySelectorAll('canvas.pxa-thumb').forEach(function(c){ renderPixelThumb(c); });
-    term.appendChild(d);
+    appendChatAware(d);
     if (stick) scrollToBottom(term);
+    if (d.classList.contains('chat-msg')) maybePruneChatMessages(stick);
   }
 
   function renderPixelThumb(canvas){
@@ -2356,6 +2466,8 @@ body[data-crt="full"] .prompt::after{
           else if (op.op === 'beep') op_beep(op.kind);
           else if (op.op === 'auth') op_auth(op.token);
           else if (op.op === 'status') { if (typeof op.chrome !== 'undefined') updateStatusChrome(op.chrome); }
+          else if (op.op === 'chatCap') handleChatCap(op.n);
+          else if (op.op === 'chatAnchor') op_chatAnchor();
           else if (op.op === 'openUrl') op_openUrl(op.url);
           else if (op.op === 'openPixelEditor') openPixelEditor(op.id || null, op.name || null, op.pixel_data || null);
           else if (op.op === 'openWordle') openWordle(op.state || {});

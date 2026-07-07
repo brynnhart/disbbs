@@ -623,9 +623,9 @@ function sanitizeAndFormatDIS(text){
   return _sanitizeAndFormatDIS(text, pixelArtEmojiLookup);
 }
 
-function printDayDivider(batchApi, epochSec){
+function printDayDivider(batchApi, epochSec, cls){
   const label = dayHeadingET(epochSec * 1000);
-  batchApi.printHTML(`<span class="dim">── ${escapeHTML(label)} ──</span>`);
+  batchApi.printHTML(`<span class="dim">── ${escapeHTML(label)} ──</span>`, cls);
 }
 
 function makeAuthToken() {
@@ -2231,6 +2231,7 @@ function cmdPost(api, state, args){
 function renderChat(api, state){
   if (!requireAuth(api, state)) return;
   const chatMaxLen = +(getSetting.get('chat_max_len')?.value || 400);
+  const historyShown = +(getSetting.get('chat_history_shown')?.value || 20);
   api.batch(b=>{
     b.clear();
     b.setInputLimit(chatMaxLen);
@@ -2240,7 +2241,6 @@ function renderChat(api, state){
     b.print(here.length ? `Here now (${here.length}): ${here.join(', ')}` : 'Nobody is here yet — say hi!', 'cyan');
     b.hr();
 
-    const historyShown = +(getSetting.get('chat_history_shown')?.value || 20);
     const rows = recentMessages.all(historyShown).reverse();
     if (rows.length === 0) {
       b.print('No messages yet. Type to chat. /leave to return.', 'dim');
@@ -2249,7 +2249,7 @@ function renderChat(api, state){
       rows.forEach(r => {
         const thisYmd = dayKeyET(r.created_at * 1000);
         if (thisYmd !== lastYmd) {
-          printDayDivider(b, r.created_at);
+          printDayDivider(b, r.created_at, 'chat-day');
           lastYmd = thisYmd;
         }
         const ts = formatTimeET(r.created_at * 1000);
@@ -2261,15 +2261,30 @@ function renderChat(api, state){
         const bodyWithColor = color ? `<span style="color:${color}">${safeBody}</span>` : safeBody;
         const html = `[${ts}] &lt;${sanitizeAndFormatDIS(disp)}&gt; ${bodyWithColor}`;
         const mine = state.username && r.username && state.username.toLowerCase() === r.username.toLowerCase();
-        b.printHTML(html, mine ? 'me' : undefined);
+        b.printHTML(html, mine ? 'chat-msg me' : 'chat-msg');
       });
       // Remember the last printed day for this socket so live updates can insert dividers accurately
       if (api.ws && api.ws.__ctx) api.ws.__ctx.lastChatDay = lastYmd;
     }
+  });
 
+  // Additive marker op: the client drops an invisible zero-height anchor
+  // element here, between the history (above) and the closing rule+hint
+  // (below, sent next). Live messages insertBefore this anchor so they
+  // land above the pinned footer instead of appending after it. Sent as
+  // its own frame — the batch DSL has no generic "raw op" hook, and frame
+  // boundaries don't affect client-side rendering order (ops are always
+  // processed in arrival order over the one WS connection).
+  sendOps(api.ws, [{ op: 'chatAnchor' }]);
+
+  api.batch(b=>{
     b.hr();
     b.print('Type to chat. /leave exits. Try **bold**, _italics_, __underline__, [cyan]color[/cyan].', 'dim');
   });
+  // Sent after both batches (which started with clear()) so the client's
+  // own clear-triggered teardown of any stale prior chat watcher happens
+  // first, and this establishes the fresh one — never both racing.
+  sendOps(api.ws, [{ op: 'chatCap', n: historyShown }]);
 }
 function chatHandleCommand(cmd, api, state){
   if (!requireAuth(api, state)) return true;

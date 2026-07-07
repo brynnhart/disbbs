@@ -88,12 +88,12 @@ function createHub({ timeUtils, formatting }){
         const msgYmd = dayKeyET(createdAtSec * 1000);
         if (client.__ctx.lastChatDay !== msgYmd) {
           const label = dayHeadingET(createdAtSec * 1000);
-          ops.push({ op:'printHTML', html:`<span class="dim">── ${escapeHTML(label)} ──</span>` });
+          ops.push({ op:'printHTML', html:`<span class="dim">── ${escapeHTML(label)} ──</span>`, cls: 'chat-day' });
           client.__ctx.lastChatDay = msgYmd;
         }
       }
 
-      ops.push({ op:'printHTML', html: htmlLine, cls: isMine ? 'me' : undefined });
+      ops.push({ op:'printHTML', html: htmlLine, cls: isMine ? 'chat-msg me' : 'chat-msg' });
       sendOps(client, ops);
     });
   }
