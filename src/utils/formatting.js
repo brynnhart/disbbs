@@ -150,9 +150,13 @@ function disDim(s){
 }
 
 function disColors(s){
+  // User-facing tag output only — namespaced "uc-" (user color) so it never
+  // collides with the system's remapped phosphor classes (see formatting.js
+  // callers in server.js b.print/api.print, which still emit bare class
+  // names like 'cyan' for system chrome).
   return ALLOWED_COLORS.reduce((acc, c) => {
     const re = new RegExp(`\\[${c}\\]([\\s\\S]*?)\\[\/${c}\\]`, 'gi');
-    return acc.replace(re, `<span class="${c}">$1</span>`);
+    return acc.replace(re, `<span class="uc-${c}">$1</span>`);
   }, s);
 }
 

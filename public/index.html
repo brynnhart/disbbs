@@ -65,6 +65,13 @@
   .dim{color:var(--phos-dim);opacity:1;text-shadow:none}
   .red{color:var(--red)} .green{color:var(--green)} .yellow{color:var(--yellow)}
   .blue{color:var(--blue)} .magenta{color:var(--magenta)} .cyan{color:var(--cyan)} .white{color:var(--white)}
+  /* User-facing [color] tag output (see disColors in src/utils/formatting.js).
+     Namespaced "uc-" so it never collides with the system phosphor classes
+     above — those two families used to share names and the phosphor remap
+     silently pulled user tags into near-identical purple tiers. Saturated
+     neon, no text-shadow (chat glow-per-line would jank scroll). */
+  .uc-red{color:#ff4f6e;text-shadow:none} .uc-green{color:#3ee66b;text-shadow:none} .uc-yellow{color:#ffd75e;text-shadow:none}
+  .uc-blue{color:#5e8bff;text-shadow:none} .uc-magenta{color:#ff5ee1;text-shadow:none} .uc-cyan{color:#3ce6f0;text-shadow:none} .uc-white{color:#f2ecff;text-shadow:none}
   .u{text-decoration:underline}
   img.emoji{display:inline-block;height:1.35em;width:auto;vertical-align:middle;image-rendering:pixelated}
   /* Character rule: ─────◆───── (or ──[ TITLE ]───── for hrTitled). Text

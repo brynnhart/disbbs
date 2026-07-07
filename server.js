@@ -2085,7 +2085,7 @@ function getStatusFeedLimit(){
   return Math.max(1, Math.min(STATUS_FEED_LIMIT_CAP, parsed));
 }
 
-const STATUS_NAME_COLOR_CLASS_RE = new RegExp(`class\\s*=\\s*"(?:${ALLOWED_COLORS.join('|')})"`, 'i');
+const STATUS_NAME_COLOR_CLASS_RE = new RegExp(`class\\s*=\\s*"(?:${ALLOWED_COLORS.map(c => 'uc-' + c).join('|')})"`, 'i');
 const STATUS_NAME_COLOR_STYLE_RE = /style\s*=\s*"[^"]*color\s*:/i;
 
 function statusDisplayHasExplicitColor(html){
@@ -2356,8 +2356,10 @@ function cmdHere(api, state){
 }
 
 function cmdColors(api){
-  api.print('█ RED','red'); api.print('█ GREEN','green'); api.print('█ YELLOW','yellow');
-  api.print('█ BLUE','blue'); api.print('█ MAGENTA','magenta'); api.print('█ CYAN','cyan'); api.print('█ WHITE','white');
+  // Previews the [color] chat tags (uc- classes), not system print colors —
+  // these are the swatches available via [red]...[/red] etc in DIS-Markdown.
+  api.print('█ RED','uc-red'); api.print('█ GREEN','uc-green'); api.print('█ YELLOW','uc-yellow');
+  api.print('█ BLUE','uc-blue'); api.print('█ MAGENTA','uc-magenta'); api.print('█ CYAN','uc-cyan'); api.print('█ WHITE','uc-white');
 }
 
 function cmdFormat(api){
