@@ -158,7 +158,9 @@ function createRockoService({
   function buildChatContext(limit = 12) {
     if (!recentMessages?.all) return '';
     try {
-      const rows = recentMessages.all();
+      // Fetch a wider pool than `limit` (its own default of 12) — the
+      // slice below picks the most recent `limit` of them.
+      const rows = recentMessages.all(200);
       if (!Array.isArray(rows) || rows.length === 0) return '';
       const trimmed = rows.slice(0, limit).reverse();
       return trimmed.map((row) => {

@@ -348,7 +348,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
       LEFT JOIN users u ON u.id = m.user_id
      WHERE (m.expires_at IS NULL OR m.expires_at > strftime('%s','now'))
      ORDER BY m.created_at DESC
-     LIMIT 200
+     LIMIT ?
   `);
   const sweepExpiredMessages = db.prepare(`
     DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')
@@ -822,6 +822,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
 
   // defaults
   defSetting('chat_retention_days', 7);
+  defSetting('chat_history_shown', 20);
   defSetting('dm_retention_days', 14);
   defSetting('dm_max_len', 160);
   defSetting('suggestion_retention_days', 0);

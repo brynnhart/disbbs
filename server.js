@@ -2235,13 +2235,13 @@ function renderChat(api, state){
     b.clear();
     b.setInputLimit(chatMaxLen);
     b.hrTitled('The Commons Chat');
-    b.print('Topic: One big room to hang out — be kind, be weird.', 'dim'); b.hr();
 
     const here = usersCurrentlyInChat();
     b.print(here.length ? `Here now (${here.length}): ${here.join(', ')}` : 'Nobody is here yet — say hi!', 'cyan');
     b.hr();
 
-    const rows = recentMessages.all().reverse();
+    const historyShown = +(getSetting.get('chat_history_shown')?.value || 20);
+    const rows = recentMessages.all(historyShown).reverse();
     if (rows.length === 0) {
       b.print('No messages yet. Type to chat. /leave to return.', 'dim');
     } else {
