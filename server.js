@@ -49,11 +49,23 @@ const app = express();
 app.set('trust proxy', true);
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
-app.use(express.static(path.join(__dirname, 'public')));
+// index.html holds all inline CSS/JS for the client (no separate bundle),
+// so a stale cached copy means stale styling site-wide. Force it to always
+// revalidate; other static assets (fonts, sounds, images) keep normal caching.
+const staticOpts = {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    }
+  }
+};
+app.use(express.static(path.join(__dirname, 'public'), staticOpts));
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/ws' });
 
-app.use('/static', express.static(path.join(__dirname, 'public')));
+app.use('/static', express.static(path.join(__dirname, 'public'), staticOpts));
 
 const database = createDatabase({ dbPath: DB_PATH });
 const { db, statements, helpers } = database;
@@ -1006,8 +1018,7 @@ function cmdArt(api, state, args){
   api.batch(b => {
     b.clear();
     b.setInputLimit(null);
-    b.print('== Pixel Art Library ==', 'magenta');
-    b.hr();
+    b.hrTitled('Pixel Art Library');
     if (!rows.length){
       b.print('No pixel art yet. Use /draw to create some.', 'dim');
     } else {
@@ -1618,7 +1629,7 @@ function renderMenu(api, state){
     b.printHTML('<div class="banner"><div class="line term-titlebar-text">DEADNET</div><div class="line dim">(C) 1997-∞ DEAD INTERNET SOCIETY</div><div class="line dim">type a /command to launch something.</div></div>');
     if (unreadCount > 0) {
       const label = unreadCount === 1 ? 'message' : 'messages';
-      b.printHTML(`<span style="color:#ff6b6b;font-weight:bold;">📬 NEW DIRECT MESSAGES: ${unreadCount} unread ${label}.</span>`);
+      b.printHTML(`<span class="main-alert">!! NEW DIRECT MESSAGES: ${unreadCount} unread ${label}. !!</span>`);
     }
     if (chromeDailyMsg) b.print(chromeDailyMsg, 'yellow');
     if (chromeStiMsg)   b.print(chromeStiMsg, 'yellow');
@@ -1707,8 +1718,7 @@ function fetchActiveAnnouncements(){
 function printAnnouncements(api, rows){
   api.batch(b => {
     b.hr();
-    b.print('== Announcements ==', 'magenta');
-    b.hr();
+    b.hrTitled('Announcements');
 
     if (!rows.length){
       b.print('No announcements at this time.', 'dim');
@@ -1827,7 +1837,7 @@ function renderPolls(api, state){
   api.batch(b => {
     b.clear();
     b.setInputLimit(null);
-    b.print('== Polls ==', 'magenta'); b.hr();
+    b.hrTitled('Polls');
 
     if (!activePolls.length){
       b.print('No active polls. Create one with /newpoll <question> | <opt1> | <opt2> ...', 'dim');
@@ -1848,7 +1858,7 @@ function renderPolls(api, state){
     }
 
     b.hr();
-    b.print('== Ended Polls ==', 'magenta'); b.hr();
+    b.hrTitled('Ended Polls');
 
     if (!endedPolls.length){
       b.print('No polls have ended yet.', 'dim');
@@ -2067,8 +2077,7 @@ function printStatusFeed(api, rows, opts = {}){
   api.batch(b => {
     b.clear();
     b.hr();
-    b.print(`== ${headingText} ==`, 'magenta');
-    b.hr();
+    b.hrTitled(headingText);
 
     if (!rows.length){
       b.print(emptyMessage, 'dim');
@@ -2185,7 +2194,7 @@ function renderChat(api, state){
   api.batch(b=>{
     b.clear();
     b.setInputLimit(chatMaxLen);
-    b.print('== The Commons Chat ==', 'magenta');
+    b.hrTitled('The Commons Chat');
     b.print('Topic: One big room to hang out — be kind, be weird.', 'dim'); b.hr();
 
     const here = usersCurrentlyInChat();
@@ -2265,19 +2274,19 @@ function renderAbout(api, state){
   api.batch(b=>{
     b.clear();
     b.setInputLimit(null);
-    b.print('== About Dead Internet Society ==', 'magenta'); b.hr();
+    b.hrTitled('About Dead Internet Society');
     b.print('The internet has largely become the bane of modern human existence.  What was once supposed to be a repository of knowledge and unlimited human connection has become a swirling cesspool of algorithm-driven content gluttony, consumerism, competitive idiocy, and bots emotionally abusing bots.  The internet as it once was, and what was once promised to us, is dead.  So we built something else... smaller... ours.', 'white');
     b.print(' ', 'white');
     b.print('-- PunkyRoo, sysop', 'dim');
     b.print(' ', 'white');
     b.print(' ', 'white');
-    b.print('== RULES ==', 'magenta');
+    b.hrTitled('RULES');
     b.print(' ', 'white');
     b.print('Dont be a badger-sized dickhole.', 'white');
     b.print('No racism/bigotry.', 'white');
     b.print('No explicit conversation or content.', 'white');
     b.print(' ', 'white');
-    b.print('== SYSTEM ==', 'magenta');
+    b.hrTitled('SYSTEM');
     b.print(' ', 'white');
     b.print('Running DEADNET UNIFIED ACCESS SYSTEM v0.13 on a node nobody quite remembers building.', 'dim');
     b.print('Display font: Web IBM VGA 8x16, from the Ultimate Oldschool PC Font Pack by VileR (CC BY-SA 4.0) — int10h.org/oldschool-pc-fonts', 'dim');
@@ -2290,7 +2299,7 @@ function renderRules(api, state){
   api.batch(b=>{
     b.clear();
     b.setInputLimit(null);
-    b.print('== Rules ==', 'magenta'); b.hr();
+    b.hrTitled('Rules');
     b.print('One rule that covers everything: be a person worth being around.', 'white');
     b.print('No bigotry. No harassment. We moderate for safety, not virality.', 'white');
     b.hr(); b.print('Navigation: /main', 'dim');
@@ -2336,7 +2345,7 @@ function renderBoard(api, state){
   api.batch(b=>{
     b.clear();
     b.setInputLimit(null);
-    b.print('== Message Board ==', 'magenta'); b.hr();
+    b.hrTitled('Message Board');
     if (rows.length === 0){
       b.print('No topics yet. Start one with /newtopic <title>.', 'dim');
     } else {
@@ -2483,7 +2492,7 @@ function renderNewsList(api, state){
   api.batch(b=>{
     b.clear();
     b.setInputLimit(null);
-    b.print('== Link Share ==', 'magenta'); b.hr();
+    b.hrTitled('Link Share');
     if (!rows.length){
       b.print('No links yet. Add one with /addlink <headline> <url>.', 'dim');
     } else {
@@ -2671,8 +2680,7 @@ function renderGames(api, state){
   api.batch(b=>{
     b.clear();
     b.setInputLimit(null);
-    b.print('== Games ==', 'magenta');
-    b.hr();
+    b.hrTitled('Games');
     const wordleStatus = playedToday
       ? (resultRow.solved ? `✓ played today (solved in ${resultRow.guesses})` : '✓ played today')
       : `your streak: ${streak} day${streak !== 1 ? 's' : ''}  •  /wordle stats for leaderboard`;
@@ -2745,8 +2753,7 @@ function renderActivity(api, state) {
   api.batch(b => {
     b.clear();
     b.setInputLimit(null);
-    b.print('== Activity ==', 'magenta');
-    b.hr();
+    b.hrTitled('Activity');
     if (!rows.length) {
       b.print('no activity yet.', 'dim');
     } else {
@@ -2771,8 +2778,7 @@ function renderChrome(api, state) {
   api.batch(b => {
     b.clear();
     b.setInputLimit(null);
-    b.print('== Chrome ==', 'magenta');
-    b.hr();
+    b.hrTitled('Chrome');
     b.print(`  your balance:  ${fmtCr(balance)} ₢`, 'cyan');
     b.hr();
     b.print('── your recent transactions ──', 'dim');
@@ -2814,8 +2820,7 @@ function cmdWallet(api, state, args) {
   api.batch(b => {
     b.clear();
     b.setInputLimit(null);
-    b.print(`== Wallet: ${row.username} ==`, 'magenta');
-    b.hr();
+    b.hrTitled(`Wallet: ${row.username}`);
     b.print(`  balance:  ${fmtCr(row.balance)} ₢`, 'cyan');
     b.print(`  rank:     #${rank} of ${total} users`, 'cyan');
     b.hr();
@@ -3632,8 +3637,7 @@ function renderMarket(api, state, flash) {
   api.batch(b => {
     b.clear();
     b.setInputLimit(null);
-    b.print('== Market ==', 'magenta');
-    b.hr();
+    b.hrTitled('Market');
     if (flash) { b.printHTML(flash); b.hr(); }
     for (const key of Object.keys(RESOURCES)) {
       const r   = RESOURCES[key];
@@ -4202,8 +4206,7 @@ function cmdProfile(api, state, args){
   const created = row.created_at ? new Date(row.created_at*1000).toLocaleString() : '—';
   const last    = row.last_login_at ? new Date(row.last_login_at*1000).toLocaleString() : '—';
 
-  api.hr();
-  api.printHTML(`== Profile: &lt;${sanitizeAndFormatDIS(row.username)}&gt; ==`, 'magenta');
+  api.hrTitled(`Profile: <${row.username}>`);
   api.printHTML(`Display: ${sanitizeAndFormatDIS(display)}`);
   api.printHTML(`Joined: <span class="dim">${escapeHTML(created)}</span>`);
   api.printHTML(`Last seen: <span class="dim">${escapeHTML(last)}</span>`);
@@ -4446,7 +4449,7 @@ function cmdMessages(api, state){
   const rows = listDMsForUser.all(state.userId, 200);
   markAllDMsRead.run(state.userId);
   api.batch(b=>{
-    b.clear(); b.print('== Direct Messages ==','magenta'); b.hr();
+    b.clear(); b.hrTitled('Direct Messages');
     if (!rows.length){ b.print('No messages.', 'dim'); }
     else rows.forEach(r=>{
       const ts = new Date(r.created_at*1000).toLocaleString();
@@ -4474,7 +4477,7 @@ function cmdSuggestions(api, state){
   if (!requireAuth(api, state)) return;
   const rows = listSuggestions.all();
   api.batch(b=>{
-    b.clear(); b.print('== Suggestions ==','magenta'); b.hr();
+    b.clear(); b.hrTitled('Suggestions');
     if (!rows.length){ b.print('No suggestions yet.', 'dim'); }
     else rows.forEach(r=>{
       const ts = new Date(r.created_at*1000).toLocaleString();

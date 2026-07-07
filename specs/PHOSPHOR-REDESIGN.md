@@ -256,6 +256,62 @@ later from the GvG CRT work; leave a seam, don't build it).
 - `/about` gains the font attribution and a line of lore.
 - Gate: final full walkthrough, all screens, both CRT soft and off.
 
+## Phase 7 — Rule + header primitives
+
+1. RULE RESTYLE (client-side only). Reimplement the op_hr handler / .rule
+   rendering: instead of the gradient div, emit a character rule —
+   ─ repeated with a single centered ornament glyph:
+     ─────────────────◆─────────────────
+   - Run characters: --phos-dim, no glow. Ornament: --venom, no glow.
+   - Same text reset as the frame helper: letter-spacing:0; line-height:1.
+   - Generate the string generously long and clip via overflow:hidden on the
+     line (authentic terminal behavior; no resize listeners needed).
+   - Keep the ornament glyph in one named constant (RULE_ORNAMENT = '◆') so
+     it can be swapped later. Verify ◆ has a glyph in the VGA webfont; if
+     not, fall back to '×'.
+   - This upgrades every existing b.hr()/api.hr() site-wide with ZERO server
+     changes. Do not touch server hr call sites.
+
+2. TITLED RULE (shared helper, client-rendered, server-triggered). Add a
+   'hrTitled' op + api helper (api.hrTitled('POLLS')) rendering:
+     ──[ POLLS ]─────────────────────────
+   - Left-anchored. Title: --phos-bright with standard glow. Runs: --phos-dim.
+   - Additive protocol change only: new op, new api method, nothing existing
+     modified.
+
+3. While in the /main render path, fix the unread-DM alert line: remove the
+   hardcoded color:#ff6b6b inline style and the 📬 emoji. Use the .main-alert
+   (--spite) treatment: !! NEW DIRECT MESSAGES: <n> !!
+
+Gate: screenshot /main and /announcements (which already uses hr heavily).
+Stop for review.
+
+## Phase 8 — View migration (run in batches, one batch per session)
+
+Convert every terminal view's section headers from the legacy pattern
+  b.print('== Title ==', 'magenta'); b.hr();
+to a single api.hrTitled('TITLE') call. Rules that merely separate content
+stay as plain hr (already restyled by Phase 7).
+
+Conventions for all views:
+- Full box frames (renderBoxFrame) are reserved for menus and menu-like
+  screens ONLY (/main, /help, /games list). Everything else uses titled
+  rules — do not frame ordinary content views.
+- Column/tabular output (e.g. /market prices) aligns with padTo like the
+  main menu; audit for hardcoded hex colors and emoji in view output and
+  migrate to palette classes / text glyphs. Report anything ambiguous
+  rather than guessing.
+- Never modify the CONTENT of what views print — headers, rules, colors,
+  and alignment only.
+
+Batch A: /help, /about, /rules, /announcements, /profile
+Batch B: /board, /links, /polls, /feed
+Batch C: /chat, /messages, /market, /chrome, /activity, /games list
+
+Gate per batch: screenshot every view in the batch, desktop + narrow
+mobile, and stop. /chat additionally requires a live message send/receive
+check and confirmation that user preferred_color spans are unchanged.
+
 ---
 
 ## Testing checklist (every phase)
@@ -264,3 +320,5 @@ later from the GvG CRT work; leave a seam, don't build it).
 - User `preferred_color` spans render unchanged in `/chat`.
 - No console errors; WebSocket flows (chat send, a game open/close) still work.
 - `prefers-reduced-motion` produces the `off` experience.
+
+

@@ -67,7 +67,18 @@
   .blue{color:var(--blue)} .magenta{color:var(--magenta)} .cyan{color:var(--cyan)} .white{color:var(--white)}
   .u{text-decoration:underline}
   img.emoji{display:inline-block;height:1.35em;width:auto;vertical-align:middle;image-rendering:pixelated}
-  .rule{height:1px;background:linear-gradient(90deg,transparent,var(--accent),transparent);margin:8px 0}
+  /* Character rule: ─────◆───── (or ──[ TITLE ]───── for hrTitled). Text
+     reset matches the box-frame helper (letter-spacing/line-height break
+     unbroken ─ runs the same way they break ═/║). The centered variant is
+     a flex row with two independently-clipping run spans either side of
+     the ornament — plain overflow:hidden on the whole (generously long)
+     string would clip only from the right edge, leaving the ornament
+     wherever that ratio happens to fall instead of at true center. */
+  .line.rule{white-space:nowrap;overflow:hidden;letter-spacing:0;line-height:1;font-variant-ligatures:none;margin:8px 0;color:var(--phos-dim)}
+  .line.rule.rule-centered{display:flex;align-items:baseline}
+  .rule-run{flex:1 1 0;overflow:hidden;white-space:nowrap}
+  .rule-ornament{flex:0 0 auto;color:var(--venom)}
+  .hr-titled-text{color:var(--phos-bright);text-shadow:var(--crt-glow)}
   .banner{text-align:left;margin-bottom:10px}
   .menu-cmd{color:var(--phos-bright)}
   .menu-desc{color:var(--phos-dim);text-transform:uppercase}
@@ -1946,9 +1957,42 @@ body[data-crt="full"] .prompt::after{
       ctx.fillRect(px * scale, py * scale, scale, scale);
     }
   }
+  // ◆ (U+25C6) and × (U+00D7) — the spec's primary glyph and its own
+  // suggested fallback — are both absent from the Web IBM VGA webfont
+  // (verified against the font's cmap). ♦ (U+2666) is the font's actual
+  // CP437 diamond glyph (codepoint 0x04) and reads the same as the
+  // intended ornament, so it's used here instead of either spec option.
+  var RULE_ORNAMENT = '♦';
   function op_hr(){
     var stick = isNearBottom(term);
-    var d = document.createElement('div'); d.className = 'rule';
+    var d = document.createElement('div');
+    d.className = 'line rule rule-centered';
+    var run = '─'.repeat(100);
+    var leftSpan = document.createElement('span');
+    leftSpan.className = 'rule-run';
+    leftSpan.textContent = run;
+    var ornamentSpan = document.createElement('span');
+    ornamentSpan.className = 'rule-ornament';
+    ornamentSpan.textContent = RULE_ORNAMENT;
+    var rightSpan = document.createElement('span');
+    rightSpan.className = 'rule-run';
+    rightSpan.textContent = run;
+    d.appendChild(leftSpan);
+    d.appendChild(ornamentSpan);
+    d.appendChild(rightSpan);
+    term.appendChild(d);
+    if (stick) scrollToBottom(term);
+  }
+  function op_hrTitled(title){
+    var stick = isNearBottom(term);
+    var d = document.createElement('div');
+    d.className = 'line rule hr-titled';
+    var titleSpan = document.createElement('span');
+    titleSpan.className = 'hr-titled-text';
+    titleSpan.textContent = String(title || '');
+    d.appendChild(document.createTextNode('──[ '));
+    d.appendChild(titleSpan);
+    d.appendChild(document.createTextNode(' ]' + '─'.repeat(150)));
     term.appendChild(d);
     if (stick) scrollToBottom(term);
   }
@@ -2198,6 +2242,7 @@ body[data-crt="full"] .prompt::after{
           else if (op.op === 'print') op_print(op.text, op.cls);
           else if (op.op === 'printHTML') op_printHTML(op.html, op.cls);
           else if (op.op === 'hr') op_hr();
+          else if (op.op === 'hrTitled') op_hrTitled(op.title);
           else if (op.op === 'setInput') op_setInput(op.inputType, op.placeholder);
           else if (op.op === 'setPrompt') op_setPrompt(op.prefix);
           else if (op.op === 'setInputLimit') setInputLimit(op.limit);

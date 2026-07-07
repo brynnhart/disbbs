@@ -28,6 +28,7 @@ function createHub({ timeUtils, formatting }){
         _send([op]);
       },
       hr(){ _send([{ op:'hr' }]); },
+      hrTitled(title){ _send([{ op:'hrTitled', title:String(title||'') }]); },
       openUrl(url){ _send([{ op:'openUrl', url:String(url||'') }]); },
       setInputType(type, placeholder){ _send([{ op:'setInput', inputType:type, placeholder }]); },
       setInputLimit(limit){
@@ -50,6 +51,7 @@ function createHub({ timeUtils, formatting }){
             ops.push(op);
           },
           hr(){ ops.push({ op:'hr' }); },
+          hrTitled(title){ ops.push({ op:'hrTitled', title:String(title||'') }); },
           openUrl(url){ ops.push({ op:'openUrl', url:String(url||'') }); },
           setInputType(type, placeholder){ ops.push({ op:'setInput', inputType:type, placeholder }); },
           setInputLimit(limit){
