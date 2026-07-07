@@ -752,6 +752,19 @@ function splashSVG(){
 }
 
 /* ======================= State / Router ======================= */
+// NAWS-style column negotiation: legacy clients (and the brief window before
+// a client's first naws/init cols arrives) never send cols, so 80 stays the
+// universal default and existing behavior is unchanged.
+const DEFAULT_COLS = 80;
+const MIN_COLS = 28;
+const MAX_COLS = 200;
+const MENU_TWO_COL_THRESHOLD = 78;
+function clampCols(v){
+  const n = typeof v === 'number' ? v : parseInt(v, 10);
+  if (!Number.isInteger(n)) return null;
+  return Math.max(MIN_COLS, Math.min(MAX_COLS, n));
+}
+
 function makeInitialState(){
   return {
     authenticated:false,
@@ -764,15 +777,18 @@ function makeInitialState(){
     userColor:null,
     displayName:null,
     currentTopicId:null,
-    currentNewsId:null
+    currentNewsId:null,
+    cols:DEFAULT_COLS
   };
 }
 
 function resetState(state){
   if (!state) return;
+  const cols = state.cols;
   const fresh = makeInitialState();
   for (const key of Object.keys(state)) delete state[key];
   Object.assign(state, fresh);
+  if (typeof cols === 'number') state.cols = cols;
 }
 
 function removeUserPresence(api, state, { broadcast = true } = {}){
@@ -1666,23 +1682,43 @@ function renderMenu(api, state){
         ['/suggestions', 'Bugs & feature ideas'],
         ['/about', 'About DIS'],
       ];
-      const CMD_W1 = 15, DESC_W1 = 22, CMD_W2 = 17;
       const padTo = (s, n) => s + ' '.repeat(Math.max(1, n - s.length));
+      const cols = clampCols(state.cols) || DEFAULT_COLS;
       const rows = [];
-      for (let i = 0; i < progLeft.length; i++) {
-        const [lc, ld] = progLeft[i];
-        const right = progRight[i];
-        const segs = [
-          { text: padTo(lc, CMD_W1), cls: 'menu-cmd' },
-          { text: padTo(ld, DESC_W1), cls: 'menu-desc' },
-        ];
-        if (right) {
-          segs.push({ text: padTo(right[0], CMD_W2), cls: 'menu-cmd' });
-          segs.push({ text: right[1], cls: 'menu-desc' });
+      let boxWidth;
+      if (cols >= MENU_TWO_COL_THRESHOLD) {
+        // Enough columns for the classic two-pair layout — keep it at its
+        // designed width of 80 even if cols is a couple chars short (78-79);
+        // .frame-line's overflow-x:auto is the fallback for that sliver.
+        const CMD_W1 = 15, DESC_W1 = 22, CMD_W2 = 17;
+        boxWidth = 80;
+        for (let i = 0; i < progLeft.length; i++) {
+          const [lc, ld] = progLeft[i];
+          const right = progRight[i];
+          const segs = [
+            { text: padTo(lc, CMD_W1), cls: 'menu-cmd' },
+            { text: padTo(ld, DESC_W1), cls: 'menu-desc' },
+          ];
+          if (right) {
+            segs.push({ text: padTo(right[0], CMD_W2), cls: 'menu-cmd' });
+            segs.push({ text: right[1], cls: 'menu-desc' });
+          }
+          rows.push(segs);
         }
-        rows.push(segs);
+      } else {
+        // Narrow viewport: one [command, description] pair per row, sized
+        // to the actual negotiated width instead of the fixed 80.
+        boxWidth = Math.min(80, cols);
+        const allProgs = progLeft.concat(progRight);
+        const cmdW = Math.max(...allProgs.map(([c]) => c.length)) + 2;
+        for (const [c, d] of allProgs) {
+          rows.push([
+            { text: padTo(c, cmdW), cls: 'menu-cmd' },
+            { text: d, cls: 'menu-desc' },
+          ]);
+        }
       }
-      b.printHTML(renderBoxFrame('MAIN MENU', rows, 80));
+      b.printHTML(renderBoxFrame('MAIN MENU', rows, boxWidth));
     }
     //b.hr();
     b.print('/command works from anywhere. /main to come home. /help for everything.', 'dim');
@@ -5160,8 +5196,26 @@ wss.on('connection', (ws, req) => {
     let msg; try { msg = JSON.parse(String(data)); } catch { return; }
     if (!msg || typeof msg !== 'object') return;
 
+    // NAWS-style column negotiation. Additive: legacy clients that never
+    // send this keep state.cols at its DEFAULT_COLS default from
+    // makeInitialState, so nothing changes for them.
+    if (msg.type === 'naws') {
+      const cols = clampCols(msg.cols);
+      if (cols != null) {
+        const wasNarrow = state.cols < MENU_TWO_COL_THRESHOLD;
+        const isNarrow = cols < MENU_TWO_COL_THRESHOLD;
+        state.cols = cols;
+        if (wasNarrow !== isNarrow && state.currentScreen === 'menu') {
+          renderMenu(api, state);
+        }
+      }
+      return;
+    }
+
     // Handshake
     if (msg.type === 'init') {
+      const initCols = clampCols(msg.cols);
+      if (initCols != null) state.cols = initCols;
       // Path 1: web-login token sent in the init message
       if (typeof msg.token === 'string' && msg.token) {
         const record = AUTH_TOKENS.get(msg.token);
