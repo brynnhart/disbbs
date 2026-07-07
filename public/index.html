@@ -607,7 +607,7 @@ body[data-crt="full"] .prompt::after{
         <button class="btn" type="submit">[SEND]</button>
       </form>
     </div>
-    <div id="status-strip" aria-hidden="true">USR: <span id="statusUser">guest</span> &middot; NODE 01 &middot; <span id="statusScreen">MAIN</span><span id="statusChromeWrap" hidden> &middot; CHR <span id="statusChrome">0</span></span> &middot; <span id="statusClock">00:00:00</span><span id="statusUptimeWrap"> &middot; UP <span id="statusUptime">00:00:00</span></span></div>
+    <div id="status-strip" aria-hidden="true">USR: <span id="statusUser">guest</span> &middot; NODE 01 &middot; <span id="statusScreen">MAIN</span><span id="statusChromeWrap" hidden> &middot; CHR <span id="statusChrome">0</span></span> &middot; <span id="statusClock">00:00:00</span> ET<span id="statusUptimeWrap"> &middot; UP <span id="statusUptime">00:00:00</span></span></div>
   </div>
 
 <script>
@@ -667,16 +667,56 @@ body[data-crt="full"] .prompt::after{
     function pad(n){ return n < 10 ? '0' + n : String(n); }
     return pad(h) + ':' + pad(m) + ':' + pad(s);
   }
-  function tickStatusClock(){
-    if (statusClockEl) {
-      var d = new Date();
-      function pad(n){ return n < 10 ? '0' + n : String(n); }
-      statusClockEl.textContent = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  // Board time (America/New_York) — mirrors formatClockET in
+  // src/utils/time.js. Never the viewer's browser-local clock: this is a
+  // shared BBS-wide notion of "what time it is", not a personal one.
+  var BOARD_TIME_ZONE = 'America/New_York';
+  var boardClockFormatter = null;
+  try {
+    boardClockFormatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: BOARD_TIME_ZONE, hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+    });
+  } catch (e) { boardClockFormatter = null; }
+  function formatClockET(){
+    function pad(n){ return n < 10 ? '0' + n : String(n); }
+    var now = new Date();
+    if (boardClockFormatter) {
+      try {
+        var parts = boardClockFormatter.formatToParts(now);
+        var get = function(type){
+          for (var i = 0; i < parts.length; i++) { if (parts[i].type === type) return parts[i].value; }
+          return '00';
+        };
+        var h = get('hour'); if (h === '24') h = '00'; // known Intl hour-cycle quirk in some engines
+        return h + ':' + get('minute') + ':' + get('second');
+      } catch (e) {}
     }
+    // Fallback (shouldn't happen in any modern browser): browser-local time
+    // is wrong for board time, but a clock that never crashes beats none.
+    return pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds());
+  }
+  function tickStatusClock(){
+    if (statusClockEl) statusClockEl.textContent = formatClockET();
     if (statusUptimeEl) statusUptimeEl.textContent = formatUptime(Date.now() - pageLoadEpochMs);
   }
   tickStatusClock();
   setInterval(tickStatusClock, 1000);
+
+  // Board-time (America/New_York) date display, e.g. "7/14/2026" — used
+  // wherever a future/past date is shown (e.g. the Dots "board resets"
+  // label). Same timezone as formatClockET above, just date-only.
+  var boardDateFormatter = null;
+  try {
+    boardDateFormatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: BOARD_TIME_ZONE, month: 'numeric', day: 'numeric', year: 'numeric',
+    });
+  } catch (e) { boardDateFormatter = null; }
+  function formatDateET(date){
+    if (boardDateFormatter) {
+      try { return boardDateFormatter.format(date); } catch (e) {}
+    }
+    return date.toLocaleDateString();
+  }
 
   // ===== /main flavor line: server prints an empty #main-flavor anchor;
   // client picks one line at random per render. Punky will rewrite this
@@ -3123,7 +3163,10 @@ body[data-crt="full"] .prompt::after{
         resultMsg.style.color = 'var(--red)';
       }
       var grid = buildWlShareGrid(prevGuesses);
-      var today = new Date().toISOString().slice(0, 10);
+      // Board-time day key from the server (see server.js's openWordle op) —
+      // not computed locally, so it can't drift a day from the actual
+      // puzzle date around either midnight.
+      var today = data.dayKey || new Date().toISOString().slice(0, 10);
       shareText.textContent = 'DIS Wordle ' + today + '\n' + prevGuesses.length + '/6\n' + grid;
       shareText.addEventListener('click', function() {
         try { navigator.clipboard.writeText(shareText.textContent); copyHint.textContent = 'copied!'; }
@@ -4334,7 +4377,7 @@ body[data-crt="full"] .prompt::after{
     var statusEl = document.getElementById('dots-status');
     if (statusEl) {
       var endsDate = new Date(dotsEndsAt * 1000);
-      statusEl.textContent = 'board resets ' + endsDate.toLocaleDateString() + ' or when all lines are drawn';
+      statusEl.textContent = 'board resets ' + formatDateET(endsDate) + ' or when all lines are drawn';
     }
     var svg = document.getElementById('dots-svg');
     if (svg) dotsRenderGrid(svg);
@@ -4392,7 +4435,7 @@ body[data-crt="full"] .prompt::after{
       var statusEl = document.getElementById('dots-status');
       if (statusEl) {
         var endsDate = new Date(dotsEndsAt * 1000);
-        statusEl.textContent = 'board resets ' + endsDate.toLocaleDateString() + ' or when all lines are drawn';
+        statusEl.textContent = 'board resets ' + formatDateET(endsDate) + ' or when all lines are drawn';
       }
       var svg = document.getElementById('dots-svg');
       if (svg) dotsRenderGrid(svg);

@@ -83,7 +83,7 @@ const notifications = createNotificationService({
   hub: hubApi,
   timeUtils,
 });
-const chrome = createChromeService({ db, nowEpoch: timeUtils.nowEpoch, ymdFromEpoch: timeUtils.ymdFromEpoch, hub: hubApi.hub, sendOps: hubApi.sendOps });
+const chrome = createChromeService({ db, nowEpoch: timeUtils.nowEpoch, dayKeyET: timeUtils.dayKeyET, hub: hubApi.hub, sendOps: hubApi.sendOps });
 
 function fmtCr(n) {
   return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
@@ -161,8 +161,13 @@ const {
 
 const {
   nowEpoch,
-  ymdFromEpoch,
-  dayHeadingFromEpoch,
+  dayKeyET,
+  dayKeyAddDays,
+  formatClockET,
+  formatTimeET,
+  formatStampET,
+  dayHeadingET,
+  msUntilNextMidnightET,
 } = timeUtils;
 
 const {
@@ -450,8 +455,7 @@ const {
   insertDonationLink,
   getDonationLinkByKofi,
   deleteDonationLink,
-  getMonthDonations,
-  getMonthTopDonors,
+  listDonationsForMonthCalc,
   checkUserIsDonor,
 } = statements;
 
@@ -620,7 +624,7 @@ function sanitizeAndFormatDIS(text){
 }
 
 function printDayDivider(batchApi, epochSec){
-  const label = dayHeadingFromEpoch(epochSec);
+  const label = dayHeadingET(epochSec * 1000);
   batchApi.printHTML(`<span class="dim">── ${escapeHTML(label)} ──</span>`);
 }
 
@@ -968,7 +972,7 @@ function cmdHelp(api, state){
   api.print('  /editsong <name or id>    Edit your own song', 'cyan');
   api.print('  /deletesong <name or id>  Delete a song (yours; admins can delete any)', 'cyan');
   api.print('  /games        Games menu', 'cyan');
-  api.print('  /wordle       Daily word puzzle — same word for everyone, resets at midnight UTC', 'cyan');
+  api.print('  /wordle       Daily word puzzle — same word for everyone, resets at midnight ET', 'cyan');
   api.print('  /wordle stats Leaderboard and today\'s results', 'cyan');
   api.print('  /slots        Nickel slots — 5 ₢ per spin', 'cyan');
   api.print('  /slots stats  Your slots statistics', 'cyan');
@@ -1760,7 +1764,7 @@ function printAnnouncements(api, rows){
       b.print('No announcements at this time.', 'dim');
     } else {
       rows.forEach(r => {
-        const when = r.created_at ? new Date(r.created_at * 1000).toLocaleString() : '';
+        const when = r.created_at ? formatStampET(r.created_at * 1000) : '';
         const whoRaw = (r.display_name && r.display_name.trim()) ? r.display_name : (r.username || 'system');
         const safeBody = sanitizeAndFormatDIS(r.body || '');
         const header = `<span class="yellow">[#${escapeHTML(String(r.id))}]</span>` +
@@ -2120,13 +2124,13 @@ function printStatusFeed(api, rows, opts = {}){
     } else {
       let lastYmd = null;
       rows.forEach(r => {
-        const thisYmd = ymdFromEpoch(r.created_at);
+        const thisYmd = dayKeyET(r.created_at * 1000);
         if (thisYmd !== lastYmd) {
           printDayDivider(b, r.created_at);
           lastYmd = thisYmd;
         }
 
-        const timeLabel = new Date(r.created_at * 1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+        const timeLabel = formatTimeET(r.created_at * 1000);
         const safeDisp = formatStatusDisplayName(r);
         const safeBody = sanitizeAndFormatDIS(r.body || '');
         const coloredBody = r.color ? `<span style="color:${r.color}">${safeBody}</span>` : safeBody;
@@ -2243,12 +2247,12 @@ function renderChat(api, state){
     } else {
         let lastYmd = null;
       rows.forEach(r => {
-        const thisYmd = ymdFromEpoch(r.created_at);
+        const thisYmd = dayKeyET(r.created_at * 1000);
         if (thisYmd !== lastYmd) {
           printDayDivider(b, r.created_at);
           lastYmd = thisYmd;
         }
-        const ts = new Date(r.created_at*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+        const ts = formatTimeET(r.created_at * 1000);
         const usernameRaw = typeof r.username === 'string' ? r.username : '';
         const displaySource = r.display_name && typeof r.display_name === 'string' ? r.display_name.trim() : '';
         const disp = displaySource || usernameRaw || 'anon';
@@ -2288,7 +2292,7 @@ function chatHandleRaw(text, api, state){
 
   insertMessage.run(uid, msgText, created, expires); // your existing prepared INSERT
 
-  const ts = new Date(created*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+  const ts = formatTimeET(created * 1000);
   const disp = state.displayName || state.username || 'anon';
   const safeBody = sanitizeAndFormatDIS(msgText);
   const bodyWithColor = state.userColor ? `<span style="color:${state.userColor}">${safeBody}</span>` : safeBody;
@@ -2326,6 +2330,7 @@ function renderAbout(api, state){
     b.print(' ', 'white');
     b.print('Running DEADNET UNIFIED ACCESS SYSTEM v0.13 on a node nobody quite remembers building.', 'dim');
     b.print('Display font: Web IBM VGA 8x16, from the Ultimate Oldschool PC Font Pack by VileR (CC BY-SA 4.0) — int10h.org/oldschool-pc-fonts', 'dim');
+    b.print('All times board time (US Eastern).', 'dim');
     b.print(' ', 'white');
     b.hr(); b.print('Navigation: /main', 'dim');
   });
@@ -2389,7 +2394,7 @@ function renderBoard(api, state){
     } else {
       b.print('Topics (most recently active first):', 'yellow');
       rows.forEach(r=>{
-        const when = new Date(r.last_commented_at*1000).toLocaleString();
+        const when = formatStampET(r.last_commented_at * 1000);
         const safeTitle = sanitizeAndFormatDIS(r.title);
         b.printHTML(`${r.id}. ${safeTitle}  <span class="dim">(${r.comments} repl${r.comments === 1 ? 'y' : 'ies'}, active ${escapeHTML(when)})</span>`);
       });
@@ -2422,7 +2427,7 @@ function openTopic(api, state, topicId){
       b.print('No replies yet. Type to reply.', 'dim');
     } else {
       comments.forEach(c=>{
-        const ts = new Date(c.created_at*1000).toLocaleString();
+        const ts = formatStampET(c.created_at * 1000);
         const authorRaw = (c.display_name && c.display_name.trim()) ? c.display_name : (c.username || 'anon');
         const author = sanitizeAndFormatDIS(authorRaw);
         const body = sanitizeAndFormatDIS(c.body);
@@ -2573,7 +2578,7 @@ function openNewsItem(api, state, id){
       b.print('No comments yet. Type to comment.', 'dim');
     } else {
       comments.forEach(c=>{
-        const ts = new Date(c.created_at*1000).toLocaleString();
+        const ts = formatStampET(c.created_at * 1000);
         const authorRaw = (c.display_name && c.display_name.trim()) ? c.display_name : (c.username || 'anon');
         const author = sanitizeAndFormatDIS(authorRaw);
         const body = sanitizeAndFormatDIS(c.body);
@@ -2658,14 +2663,15 @@ function cmdRemoveNews(api, state, args){
 }
 
 /* ======================= Wordle helpers ======================= */
+// Also the shared day-key for /hack (see getDailyHack, which is handed
+// this same string by every one of its callers). Board time
+// (America/New_York), not UTC — the puzzle now resets at board midnight.
 function getWordleDate() {
-  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD UTC
+  return dayKeyET();
 }
 
 function getYesterday() {
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() - 1);
-  return d.toISOString().slice(0, 10);
+  return dayKeyAddDays(dayKeyET(), -1);
 }
 
 function getDailyWord() {
@@ -2923,6 +2929,12 @@ function cmdWordle(api, state, args){
       streak:     streakRow ? streakRow.current_streak : 0,
       bestStreak: streakRow ? streakRow.best_streak : 0,
       fromScreen: state.currentScreen,
+      // Board-time (America/New_York) day key for the client's share-text —
+      // additive field, existing clients that ignore it are unaffected.
+      // Without this the client fell back to computing its own date via
+      // `new Date().toISOString()`, which could drift a day from the
+      // server's actual puzzle date right around either midnight.
+      dayKey: today,
     },
   }]);
 }
@@ -3162,7 +3174,7 @@ const DIRS8 = [
 let _gridDateCached = null;
 
 function ensureGridForToday() {
-  const today = ymdFromEpoch(nowEpoch());
+  const today = dayKeyET(); // board time (America/New_York) — see src/utils/time.js
   if (_gridDateCached === today) return;
   const existing = stmtCheckGridExists.get(today);
   if (existing && existing.n > 0) { _gridDateCached = today; return; }
@@ -3219,7 +3231,7 @@ function handleMiningGetState(api, state) {
   if (!requireAuth(api, state)) return;
   applyDailyMarketDrift();
   const username = state.username;
-  const today = ymdFromEpoch(nowEpoch());
+  const today = dayKeyET(); // board time (America/New_York) — see src/utils/time.js
   ensureGridForToday();
   const gridRows = stmtGetMiningGrid.all(today);
   const clickRow = stmtGetMiningClicks.get(username, today);
@@ -3248,7 +3260,7 @@ function handleMiningClick(msg, api, state) {
   if (cellIndex < 0 || cellIndex > 799) {
     sendOps(api.ws, [{ op: 'error', message: 'invalid cell.' }]); return;
   }
-  const today = ymdFromEpoch(nowEpoch());
+  const today = dayKeyET(); // board time (America/New_York) — see src/utils/time.js
   ensureGridForToday();
   const cell = stmtGetMiningCell.get(today, cellIndex);
   if (!cell || cell.revealed_by !== null) {
@@ -3635,7 +3647,7 @@ function cmdDots(api, state) {
 
 /* ======================= Market ======================= */
 function applyDailyMarketDrift() {
-  const today = ymdFromEpoch(nowEpoch());
+  const today = dayKeyET(); // board time (America/New_York) — see src/utils/time.js
   const rows  = stmtGetAllMarketPrices.all();
   for (const row of rows) {
     if (row.last_drift_date === today) continue;
@@ -4080,11 +4092,32 @@ function cmdBlackjack(api, state, args) {
 }
 
 /* ======================= Donations (/donate, /donations, /linkdonor) ======================= */
+// "This month" is a board-time (America/New_York) boundary. SQLite's
+// strftime('now') is UTC-only and can't apply DST rules, so the month
+// match happens here in JS via dayKeyET instead of in the query.
+function computeMonthDonationSummary() {
+  const monthKey = dayKeyET().slice(0, 7); // 'YYYY-MM', board time
+  const rows = listDonationsForMonthCalc.all()
+    .filter(r => dayKeyET(r.created_at * 1000).slice(0, 7) === monthKey);
+
+  const totalAmount = rows.reduce((sum, r) => sum + r.amount, 0);
+  const totalCount = new Set(rows.map(r => r.kofi_transaction_id)).size;
+
+  const byDonor = new Map();
+  for (const r of rows) {
+    if (!r.dis_username) continue;
+    byDonor.set(r.dis_username, (byDonor.get(r.dis_username) || 0) + r.amount);
+  }
+  const topDonors = Array.from(byDonor, ([dis_username, total]) => ({ dis_username, total }))
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 5);
+
+  return { totalAmount, totalCount, topDonors };
+}
+
 function cmdDonate(api, state) {
   if (!requireAuth(api, state)) return;
-  const totals = getMonthDonations.get();
-  const totalAmount = totals ? totals.total_amount : 0;
-  const topDonors = getMonthTopDonors.all();
+  const { totalAmount, topDonors } = computeMonthDonationSummary();
 
   const pct = KOFI_MONTHLY_GOAL > 0 ? (totalAmount / KOFI_MONTHLY_GOAL) * 100 : 0;
   const filled = Math.min(20, Math.round((Math.min(100, pct) / 100) * 20));
@@ -4139,7 +4172,7 @@ function cmdDonations(api, state) {
       b.print('No donations yet.', 'dim');
     } else {
       for (const r of rows) {
-        const date = new Date(r.created_at * 1000).toISOString().slice(0, 10);
+        const date = dayKeyET(r.created_at * 1000);
         const who = r.dis_username || '(unlinked)';
         const cr = r.chrome_awarded > 0 ? `+${fmtCr(r.chrome_awarded)} ₢` : '—';
         b.printHTML(`<span class="dim">${escapeHTML(date)}</span>  <span class="yellow">${escapeHTML(r.kofi_name)}</span> → <span class="cyan">${escapeHTML(who)}</span>  $${escapeHTML(r.amount.toFixed(2))}  ${escapeHTML(cr)}`);
@@ -4241,8 +4274,8 @@ function cmdProfile(api, state, args){
   const color = colorRow ? colorRow.preferred_color : null;
   const aboutRow = getUserAboutById.get(row.id);
   const aboutRaw = aboutRow ? aboutRow.about : null;
-  const created = row.created_at ? new Date(row.created_at*1000).toLocaleString() : '—';
-  const last    = row.last_login_at ? new Date(row.last_login_at*1000).toLocaleString() : '—';
+  const created = row.created_at ? formatStampET(row.created_at * 1000) : '—';
+  const last    = row.last_login_at ? formatStampET(row.last_login_at * 1000) : '—';
 
   api.hrTitled(`Profile: <${row.username}>`);
   api.printHTML(`Display: ${sanitizeAndFormatDIS(display)}`);
@@ -4490,7 +4523,7 @@ function cmdMessages(api, state){
     b.clear(); b.hrTitled('Direct Messages');
     if (!rows.length){ b.print('No messages.', 'dim'); }
     else rows.forEach(r=>{
-      const ts = new Date(r.created_at*1000).toLocaleString();
+      const ts = formatStampET(r.created_at * 1000);
       const disp = (r.display_name && r.display_name.trim()) ? r.display_name : (r.sender || 'anon');
       const body = sanitizeAndFormatDIS(r.body);
       const colored = r.preferred_color ? `<span style="color:${r.preferred_color}">${body}</span>` : body;
@@ -4518,7 +4551,7 @@ function cmdSuggestions(api, state){
     b.clear(); b.hrTitled('Suggestions');
     if (!rows.length){ b.print('No suggestions yet.', 'dim'); }
     else rows.forEach(r=>{
-      const ts = new Date(r.created_at*1000).toLocaleString();
+      const ts = formatStampET(r.created_at * 1000);
       b.printHTML(`${r.id}. ${sanitizeAndFormatDIS(r.body)} <span class="dim">(${escapeHTML(ts)} by ${escapeHTML(r.username||'anon')})</span>`);
     });
     b.hr(); b.print('Admin: /removesuggestion <id>', 'dim');
@@ -4556,7 +4589,7 @@ function cmdUsers(api, state, args){
 
   rows.forEach(r => {
     const disp = r.display_name || r.username;
-    const last = r.last_login_at ? new Date(r.last_login_at*1000).toLocaleString() : '—';
+    const last = r.last_login_at ? formatStampET(r.last_login_at * 1000) : '—';
     const isOnline = HUB.online.has(r.username); // your presence set
     const statusHTML = isOnline ? '<span style="color:#2fd44f">online</span>'
                                 : '<span class="dim">offline</span>';
@@ -4593,7 +4626,7 @@ function cmdNotifications(api, state, args){
       b.print('No notifications yet. Mention someone with @username in Chat/Boards/Links.', 'dim');
     } else {
       rows.forEach(n=>{
-        const when = new Date(n.created_at*1000).toLocaleString();
+        const when = formatStampET(n.created_at * 1000);
         const whoRaw = (n.from_display && n.from_display.trim()) ? n.from_display : (n.from_username || 'system');
         const ctxLabel = humanizeContext(n.context);
         const body = sanitizeAndFormatDIS(n.body);
@@ -4719,6 +4752,8 @@ function cmdNewUsers(api, state, args) {
 
   for (const r of rows) {
     const dt    = new Date(r.created_at * 1000);
+    // Forensic timestamp stays UTC intentionally (host log correlation) —
+    // do not migrate to board time.
     const stamp = dt.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
     const ua    = r.user_agent ? r.user_agent.slice(0, 60) + (r.user_agent.length > 60 ? '…' : '') : '—';
     const ip    = r.registration_ip || '—';
@@ -4761,6 +4796,8 @@ function cmdRejections(api, state) {
       b.print('No rejections logged.', 'dim');
     } else {
       for (const r of rows) {
+        // Forensic timestamp stays UTC intentionally (host log correlation) —
+        // do not migrate to board time.
         const stamp = new Date(r.created_at * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
         const ua    = (r.user_agent || '').slice(0, 80);
         b.print(`${stamp}  ${r.username || '(none)'}`, 'cyan');
@@ -4892,7 +4929,7 @@ function cmdBanList(api, state) {
   api.print('== Ban List ==', 'magenta');
   api.hr();
   for (const r of rows) {
-    const date = new Date(r.created_at * 1000).toISOString().slice(0, 10);
+    const date = dayKeyET(r.created_at * 1000);
     const fp   = r.fingerprint_hash ? r.fingerprint_hash.slice(0, 12) + '…' : '—';
     const ip   = r.ip || '—';
     const note = r.notes ? `  note: ${r.notes}` : '';
@@ -5436,8 +5473,8 @@ wss.on('connection', (ws, req) => {
       }
       HUB.clients.forEach(ws => sendOps(ws, [{ op: 'graffiti_painted', strokes: valid, by: state.username }]));
       const lastLog = stmtGraffitiLastLog.get(state.username);
-      const todayYmd = ymdFromEpoch(now);
-      if (!lastLog || ymdFromEpoch(lastLog.last_logged) !== todayYmd) {
+      const todayYmd = dayKeyET(now * 1000); // board time (America/New_York)
+      if (!lastLog || dayKeyET(lastLog.last_logged * 1000) !== todayYmd) {
         stmtGraffitiUpsertLog.run(state.username, now);
         addActivityEvent('community', 'graffiti', `🎨 ${state.username} tagged the graffiti wall`);
       }
@@ -5570,12 +5607,12 @@ function renderAdminChat(api, state){
     } else {
       let lastYmd = null;
       rows.forEach(r=>{
-        const thisYmd = ymdFromEpoch(r.created_at);
+        const thisYmd = dayKeyET(r.created_at * 1000);
         if (thisYmd !== lastYmd) {
           printDayDivider(b, r.created_at);
           lastYmd = thisYmd;
         }
-        const ts = new Date(r.created_at*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+        const ts = formatTimeET(r.created_at * 1000);
         const disp = r.display_name || r.username || 'anon';
         const safeBody = sanitizeAndFormatDIS(r.body);
         const bodyWithColor = r.color ? `<span style="color:${r.color}">${safeBody}</span>` : safeBody;
@@ -5611,7 +5648,7 @@ function adminChatHandleRaw(text, api, state){
   const ttl = retentionSecondsAdmin(); const expires = ttl > 0 ? (created + ttl) : null;
   insertAdminMessage.run(uid, msgText, created, expires);
 
-  const ts = new Date(created*1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+  const ts = formatTimeET(created * 1000);
   const disp = state.displayName || state.username || 'anon';
   const safeBody = sanitizeAndFormatDIS(msgText);
   const bodyWithColor = state.userColor ? `<span style="color:${state.userColor}">${safeBody}</span>` : safeBody;
@@ -6163,4 +6200,14 @@ app.post('/api/kofi/webhook', (req, res) => {
 /* ======================= Start ======================= */
 server.listen(PORT, ()=> {
   console.log(`DIS BBS listening on http://localhost:${PORT}`);
+
+  // Sanity check for the board-time (America/New_York) migration: makes it
+  // obvious at a glance in server logs whether reset scheduling is landing
+  // where it should, regardless of what timezone this host itself reports.
+  const bootMs = Date.now();
+  const utcNow = new Date(bootMs).toISOString();
+  const boardNow = formatStampET(bootMs) + ' ET';
+  const msToMidnight = msUntilNextMidnightET(bootMs);
+  const hoursToMidnight = (msToMidnight / 3600000).toFixed(2);
+  console.log(`[time] UTC now: ${utcNow}  |  board time now: ${boardNow}  |  next board midnight in ${hoursToMidnight}h (${msToMidnight}ms)`);
 });

@@ -783,20 +783,13 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
   `);
   const getDonationLinkByKofi      = db.prepare('SELECT dis_username FROM donation_links WHERE LOWER(kofi_name) = LOWER(?)');
   const deleteDonationLink         = db.prepare('DELETE FROM donation_links WHERE LOWER(kofi_name) = LOWER(?)');
-  const getMonthDonations          = db.prepare(`
-    SELECT COALESCE(SUM(amount), 0) AS total_amount,
-           COUNT(DISTINCT kofi_transaction_id) AS total_count
-      FROM donations
-     WHERE strftime('%Y-%m', datetime(created_at, 'unixepoch')) = strftime('%Y-%m', 'now')
-  `);
-  const getMonthTopDonors          = db.prepare(`
-    SELECT dis_username, SUM(amount) AS total
-      FROM donations
-     WHERE dis_username IS NOT NULL
-       AND strftime('%Y-%m', datetime(created_at, 'unixepoch')) = strftime('%Y-%m', 'now')
-     GROUP BY dis_username
-     ORDER BY total DESC
-     LIMIT 5
+  // "This month" is board time (America/New_York), and SQLite's strftime()
+  // only understands UTC or fixed offsets — it can't apply IANA DST rules,
+  // so it can't compute an ET month boundary correctly. Fetch the raw rows
+  // instead and let the caller (server.js's computeMonthDonationSummary,
+  // via src/utils/time.js's dayKeyET) do the month-matching in JS.
+  const listDonationsForMonthCalc  = db.prepare(`
+    SELECT kofi_transaction_id, dis_username, amount, created_at FROM donations
   `);
   const checkUserIsDonor           = db.prepare('SELECT 1 AS found FROM donations WHERE LOWER(dis_username) = LOWER(?) LIMIT 1');
 
@@ -1054,8 +1047,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
     insertDonationLink,
     getDonationLinkByKofi,
     deleteDonationLink,
-    getMonthDonations,
-    getMonthTopDonors,
+    listDonationsForMonthCalc,
     checkUserIsDonor,
     insertPixelArt,
     listPixelArt,

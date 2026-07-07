@@ -1,7 +1,7 @@
 'use strict';
 
 function createHub({ timeUtils, formatting }){
-  const { dayHeadingFromEpoch, ymdFromEpoch } = timeUtils;
+  const { dayHeadingET, dayKeyET } = timeUtils;
   const { escapeHTML } = formatting;
 
   const hub = {
@@ -85,9 +85,9 @@ function createHub({ timeUtils, formatting }){
       const ops = [];
 
       if (createdAtSec && client.__ctx) {
-        const msgYmd = ymdFromEpoch(createdAtSec);
+        const msgYmd = dayKeyET(createdAtSec * 1000);
         if (client.__ctx.lastChatDay !== msgYmd) {
-          const label = dayHeadingFromEpoch(createdAtSec);
+          const label = dayHeadingET(createdAtSec * 1000);
           ops.push({ op:'printHTML', html:`<span class="dim">── ${escapeHTML(label)} ──</span>` });
           client.__ctx.lastChatDay = msgYmd;
         }
@@ -109,9 +109,9 @@ function createHub({ timeUtils, formatting }){
       const ops = [];
 
       if (createdAtSec && client.__ctx) {
-        const msgYmd = ymdFromEpoch(createdAtSec);
+        const msgYmd = dayKeyET(createdAtSec * 1000);
         if (client.__ctx.lastAdminChatDay !== msgYmd) {
-          const label = dayHeadingFromEpoch(createdAtSec);
+          const label = dayHeadingET(createdAtSec * 1000);
           ops.push({ op:'printHTML', html:`<span class="dim">── ${escapeHTML(label)} ──</span>` });
           client.__ctx.lastAdminChatDay = msgYmd;
         }

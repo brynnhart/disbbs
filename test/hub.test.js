@@ -6,8 +6,8 @@ const { createHub } = require('../src/hub');
 test('broadcastChatFrom delivers messages to chat clients with day separators', () => {
   const hubApi = createHub({
     timeUtils: {
-      dayHeadingFromEpoch: (sec) => `Day ${Math.floor(sec / 86400)}`,
-      ymdFromEpoch: (sec) => `day-${Math.floor(sec / 86400)}`,
+      dayHeadingET: (ms) => `Day ${Math.floor(ms / 86400000)}`,
+      dayKeyET: (ms) => `day-${Math.floor(ms / 86400000)}`,
     },
     formatting: { escapeHTML: (val) => String(val) },
   });
@@ -69,8 +69,8 @@ test('broadcastChatFrom delivers messages to chat clients with day separators', 
 test('usersCurrentlyInChat lists sorted usernames', () => {
   const hubApi = createHub({
     timeUtils: {
-      dayHeadingFromEpoch: () => 'Day',
-      ymdFromEpoch: () => 'day',
+      dayHeadingET: () => 'Day',
+      dayKeyET: () => 'day',
     },
     formatting: { escapeHTML: (val) => String(val) },
   });

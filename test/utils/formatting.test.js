@@ -18,7 +18,7 @@ test('escapeHTML escapes special characters', () => {
 test('sanitizeAndFormatDIS applies markup and emoji rendering', () => {
   const input = 'Hello __under__ **bold** _ital_ [dim]dim[/dim] [red]red[/red] :happy:';
   const expected =
-    'Hello <span class="u">under</span> <strong>bold</strong> <em>ital</em> <span class="dim">dim</span> <span class="red">red</span> ' +
+    'Hello <span class="u">under</span> <strong>bold</strong> <em>ital</em> <span class="dim">dim</span> <span class="uc-red">red</span> ' +
     '<img class="emoji" src="/static/emoji/happy.svg" alt=":happy:" title="Happy face">';
   assert.strictEqual(sanitizeAndFormatDIS(input), expected);
 });

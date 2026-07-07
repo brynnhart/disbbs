@@ -1,6 +1,6 @@
 'use strict';
 
-function createChromeService({ db, nowEpoch, ymdFromEpoch, hub, sendOps }) {
+function createChromeService({ db, nowEpoch, dayKeyET, hub, sendOps }) {
   const stmtGetRow     = db.prepare('SELECT balance, last_daily_at, last_stipend_at FROM chrome_balances WHERE username = ?');
   const stmtEnsureRow  = db.prepare('INSERT INTO chrome_balances (username, balance, created_at) VALUES (?, 0, ?) ON CONFLICT(username) DO NOTHING');
   const stmtAddBalance = db.prepare('UPDATE chrome_balances SET balance = balance + ? WHERE username = ?');
@@ -53,7 +53,7 @@ function createChromeService({ db, nowEpoch, ymdFromEpoch, hub, sendOps }) {
   }
 
   function getDailyBonus(username) {
-    const today = ymdFromEpoch(nowEpoch());
+    const today = dayKeyET(); // board time (America/New_York) — see src/utils/time.js
     ensureRow(username);
     const row = stmtGetRow.get(username);
     if (row.last_daily_at === today) return { awarded: false, amount: 0, newBalance: row.balance };
@@ -63,7 +63,7 @@ function createChromeService({ db, nowEpoch, ymdFromEpoch, hub, sendOps }) {
   }
 
   function checkStipend(username) {
-    const today = ymdFromEpoch(nowEpoch());
+    const today = dayKeyET(); // board time (America/New_York) — see src/utils/time.js
     ensureRow(username);
     const row = stmtGetRow.get(username);
     if (row.last_stipend_at === today || row.balance > 0) {

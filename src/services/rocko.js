@@ -34,7 +34,7 @@ function createRockoService({
 
   const { createUser } = helpers;
   const { sanitizeAndFormatDIS, stripDISFormatting } = formatting;
-  const { nowEpoch } = timeUtils;
+  const { nowEpoch, formatTimeET } = timeUtils;
   const { notifyMentions, extractMentionsFromText } = notifications;
   const { broadcastChatFrom, sendOps, hub: hubState } = hub;
 
@@ -247,7 +247,7 @@ function createRockoService({
       return;
     }
 
-    const timeLabel = new Date(created * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const timeLabel = formatTimeET(created * 1000);
     const safeBody = sanitizeAndFormatDIS(trimmed);
     const chatColor = rockoColor;
     const bodyWithColor = chatColor ? `<span style="color:${chatColor}">${safeBody}</span>` : safeBody;
