@@ -835,16 +835,18 @@ function routeGo(api, state, name){
     case 'about':  renderAbout(api, state); break;
     case 'rules':  renderRules(api, state); break;
     case 'polls':   renderPolls(api, state); break;
+    case 'games':  renderGames(api, state); break;
     default:       api.print('Unknown screen: '+name, 'red'); return;
   }
-  sendOps(api.ws, [ buildPanelOp(name) ]);
+  sendOps(api.ws, [ buildPanelOp(name, state) ]);
 }
-// Sidebar panel op (SIDEBAR.md Phase 1): routeGo is the single choke point
-// where screens change, so it's the single place the panel op is emitted.
-// Per-place builders (panelForChat, future panelForGames/panelForMenu) live
+// Sidebar panel op (SIDEBAR.md): routeGo is the single choke point where
+// screens change, so it's the single place the panel op is emitted.
+// Per-place builders (panelForChat, panelForGames, future panelForMenu) live
 // beside their render functions; everything else gets title + filler only.
-function buildPanelOp(name){
+function buildPanelOp(name, state){
   if (name === 'chat') return { op:'panel', title:'CHAT', sections: panelForChat() };
+  if (name === 'games') return { op:'panel', title:'GAMES', sections: panelForGames(state) };
   return { op:'panel', title: name === 'menu' ? 'DEADNET' : name.toUpperCase(), sections: [] };
 }
 function requireAuth(api, state){
@@ -2776,42 +2778,96 @@ function renderGames(api, state){
   const streak     = streakRow ? streakRow.current_streak : 0;
   const playedToday = !!resultRow;
   const hackRow    = stmtHackGetLog.get(state.username, today);
+  const playerBalance = chrome.getBalance(state.username);
 
   let jackpot = 500;
   try { jackpot = chrome.getJackpot(); } catch {}
+
+  const dotsGame = stmtDotsActiveGame.get();
+  const dotsCount = dotsGame ? stmtDotsLineCount.get(dotsGame.id).n : 0;
+  const dotsScores = dotsGame ? stmtDotsScores.all(dotsGame.id) : [];
+  const dotsLeader = dotsScores.length ? dotsScores[0] : null;
+
+  const wordleStatus = playedToday
+    ? (resultRow.solved ? `✓ played today (solved in ${resultRow.guesses})` : '✓ played today')
+    : `your streak: ${streak} day${streak !== 1 ? 's' : ''}  •  /wordle stats for leaderboard`;
 
   api.batch(b=>{
     b.clear();
     b.setInputLimit(null);
     b.hrTitled('Games');
-    const wordleStatus = playedToday
-      ? (resultRow.solved ? `✓ played today (solved in ${resultRow.guesses})` : '✓ played today')
-      : `your streak: ${streak} day${streak !== 1 ? 's' : ''}  •  /wordle stats for leaderboard`;
-    b.print('  /wordle      daily word puzzle — new word every day, same for everyone', 'cyan');
-    b.print(`             ${wordleStatus}`, playedToday ? 'green' : 'dim');
-    b.print('  /slots      nickel slots — 5 ₢ per spin', 'cyan');
-    b.printHTML(`             <span class="yellow">jackpot: ${escapeHTML(fmtCr(jackpot))} ₢ 💀</span>`);
-    const playerBalance = chrome.getBalance(state.username);
-    b.print('  /blackjack     simplified blackjack', 'cyan');
-    b.printHTML(`             <span class="yellow">your balance: ${escapeHTML(fmtCr(playerBalance))} ₢</span>`);
-    
-    b.print('  /mining      Dig for resources in today\'s shared grid', 'cyan');
-    b.print('  /hack        daily terminal crack — new terminal every day', 'cyan');
-    if (hackRow) {
-      if (hackRow.solved) {
-        b.print(`             ✓ cracked today (attempt ${hackRow.attempts}, +${hackRow.chrome_won} ₢)`, 'green');
-      } else {
-        b.print('             ✗ locked out today', 'red');
+
+    const cols = clampCols(state.cols) || DEFAULT_COLS;
+    if (cols >= MENU_TWO_COL_THRESHOLD) {
+      // Wide: dual-column index (SIDEBAR.md Phase 2), same box-frame
+      // language as /main. The per-game stat lines (wordle streak/balance/
+      // hack status) collapse into one compact summary line instead of a
+      // line per game — the sidebar's "your stats" section has the full
+      // version, but this terminal copy can't be dropped: the char-column
+      // width used for this layout and the sidebar's own pixel-width
+      // breakpoint are two different signals (a ~700-1099px window can be
+      // "wide" by char-cols with no sidebar visible at all), so anything
+      // shown only in the margin can go missing here (invariant 2).
+      // Descriptions are short, fixed strings — like /main's, they have to
+      // fit the box's fixed columns. Dynamic shared state (jackpot, dots
+      // progress) can't be padded safely at variable length, so it prints
+      // as its own line below the box instead of inside a cell.
+      const gamesLeft = [
+        ['/wordle', 'Daily word puzzle'],
+        ['/slots', 'Nickel slots'],
+        ['/blackjack', 'Simplified blackjack'],
+      ];
+      const gamesRight = [
+        ['/mining', 'Dig for resources'],
+        ['/hack', 'Daily terminal crack'],
+        ['/dots', 'Community dots & boxes'],
+      ];
+      const padTo = (s, n) => s + ' '.repeat(Math.max(1, n - s.length));
+      const CMD_W1 = 15, DESC_W1 = 22, CMD_W2 = 17;
+      const rows = [];
+      for (let i = 0; i < gamesLeft.length; i++) {
+        const [lc, ld] = gamesLeft[i];
+        const right = gamesRight[i];
+        const segs = [
+          { text: padTo(lc, CMD_W1), cls: 'menu-cmd' },
+          { text: padTo(ld, DESC_W1), cls: 'menu-desc' },
+        ];
+        if (right) {
+          segs.push({ text: padTo(right[0], CMD_W2), cls: 'menu-cmd' });
+          segs.push({ text: right[1], cls: 'menu-desc' });
+        }
+        rows.push(segs);
+      }
+      b.printHTML(renderBoxFrame('GAMES', rows, 80));
+      const dotsBit = dotsGame ? `  •  dots: ${dotsCount}/${DOTS_TOTAL_LINES} lines${dotsLeader ? ' (leader: ' + dotsLeader.claimed_by + ')' : ''}` : '';
+      b.print(`jackpot: ${fmtCr(jackpot)} ₢${dotsBit}`, 'dim');
+      const wordleBit = playedToday ? (resultRow.solved ? 'solved today' : 'played today') : `${streak}-day streak`;
+      const hackBit = hackRow ? (hackRow.solved ? 'cracked today' : 'locked out today') : 'not attempted';
+      b.print(`your stats — wordle: ${wordleBit}  •  hack: ${hackBit}  •  balance: ${fmtCr(playerBalance)} ₢`, 'dim');
+    } else {
+      // Narrow: no margin to hold personal stats, so they stay inline,
+      // compact, exactly as before (invariants 2 & 3).
+      b.print('  /wordle      daily word puzzle — new word every day, same for everyone', 'cyan');
+      b.print(`             ${wordleStatus}`, playedToday ? 'green' : 'dim');
+      b.print('  /slots      nickel slots — 5 ₢ per spin', 'cyan');
+      b.printHTML(`             <span class="yellow">jackpot: ${escapeHTML(fmtCr(jackpot))} ₢ 💀</span>`);
+      b.print('  /blackjack     simplified blackjack', 'cyan');
+      b.printHTML(`             <span class="yellow">your balance: ${escapeHTML(fmtCr(playerBalance))} ₢</span>`);
+      b.print('  /mining      Dig for resources in today\'s shared grid', 'cyan');
+      b.print('  /hack        daily terminal crack — new terminal every day', 'cyan');
+      if (hackRow) {
+        if (hackRow.solved) {
+          b.print(`             ✓ cracked today (attempt ${hackRow.attempts}, +${hackRow.chrome_won} ₢)`, 'green');
+        } else {
+          b.print('             ✗ locked out today', 'red');
+        }
+      }
+      b.print('  /dots       community dots & boxes — claim squares, earn ₢', 'cyan');
+      if (dotsGame) {
+        b.print(`             ${dotsCount}/${DOTS_TOTAL_LINES} lines drawn${dotsLeader ? '  •  leader: ' + dotsLeader.claimed_by + ' (' + dotsLeader.squares + ' sq)' : ''}`, 'dim');
       }
     }
-    b.print('  /dots       community dots & boxes — claim squares, earn ₢', 'cyan');
-    const dotsGame = stmtDotsActiveGame.get();
-    if (dotsGame) {
-      const dotsCount = stmtDotsLineCount.get(dotsGame.id).n;
-      const dotsScores = stmtDotsScores.all(dotsGame.id);
-      const leader = dotsScores.length ? dotsScores[0] : null;
-      b.print(`             ${dotsCount}/${DOTS_TOTAL_LINES} lines drawn${leader ? '  •  leader: ' + leader.claimed_by + ' (' + leader.squares + ' sq)' : ''}`, 'dim');
-    }
+
     b.hr();
     if (feedRows.length) {
       b.print('── recent activity ──', 'dim');
@@ -2822,7 +2878,47 @@ function renderGames(api, state){
     }
     b.print('/leave to return to the main menu  •  /chrome for your balance', 'dim');
   });
-  state.currentScreen = 'games';
+}
+// Sidebar margin for /games (SIDEBAR.md Phase 2): chrome leaderboard, games
+// activity log (last 8 — same stmtGamesFeed used inline above), and the
+// viewer's own stats (the personal lines stripped from the wide dual-column
+// menu above).
+function panelForGames(state){
+  const leaders = chrome.getLeaderboard(5);
+  const leaderboardLines = leaders.length
+    ? leaders.map((r, i) => ({ html: `${escapeHTML(String(i + 1) + '.')} ${escapeHTML(r.username)} — ${escapeHTML(fmtCr(r.balance))} ₢` }))
+    : [{ html: 'no data yet.' }];
+
+  const feedRows = stmtGamesFeed.all();
+  const activityLines = feedRows.length
+    ? feedRows.map(f => ({ html: escapeHTML(f.message) }))
+    : [{ html: 'no recent activity.' }];
+
+  const today = getWordleDate();
+  const streakRow = wordleGetStreak.get(state.username);
+  const resultRow = wordleGetResult.get(state.username, today);
+  const streak = streakRow ? streakRow.current_streak : 0;
+  const playedToday = !!resultRow;
+  const wordleStatus = playedToday
+    ? (resultRow.solved ? `wordle: solved today (${resultRow.guesses} guesses)` : 'wordle: played today')
+    : `wordle streak: ${streak} day${streak !== 1 ? 's' : ''}`;
+  const hackRow = stmtHackGetLog.get(state.username, today);
+  const hackStatus = hackRow
+    ? (hackRow.solved ? `hack: cracked today (+${hackRow.chrome_won} ₢)` : 'hack: locked out today')
+    : 'hack: not attempted today';
+  const balance = chrome.getBalance(state.username);
+
+  const statsLines = [
+    { html: escapeHTML(`balance: ${fmtCr(balance)} ₢`) },
+    { html: escapeHTML(wordleStatus) },
+    { html: escapeHTML(hackStatus) },
+  ];
+
+  return [
+    { kind:'lines', heading:'LEADERBOARD', lines: leaderboardLines },
+    { kind:'lines', heading:'ACTIVITY', lines: activityLines },
+    { kind:'lines', heading:'YOUR STATS', lines: statsLines },
+  ];
 }
 
 function gamesHandleCommand(cmd, api, state){
@@ -5133,7 +5229,7 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'grind':    cmdGrind(api, state);             return true;
 
     /* Games */
-    case 'games':    renderGames(api, state); return true;
+    case 'games':    routeGo(api, state, 'games'); return true;
     case 'wordle':   cmdWordle(api, state, args[0]); return true;
     case 'slots':     cmdSlots(api, state, args); return true;
     case 'blackjack': cmdBlackjack(api, state, args); return true;
@@ -5306,6 +5402,9 @@ wss.on('connection', (ws, req) => {
         state.cols = cols;
         if (wasNarrow !== isNarrow && state.currentScreen === 'menu') {
           renderMenu(api, state);
+        }
+        if (wasNarrow !== isNarrow && state.currentScreen === 'games') {
+          renderGames(api, state);
         }
       }
       return;
