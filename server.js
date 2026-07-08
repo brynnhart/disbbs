@@ -763,6 +763,9 @@ const DEFAULT_COLS = 80;
 const MIN_COLS = 28;
 const MAX_COLS = 200;
 const MENU_TWO_COL_THRESHOLD = 78;
+// Sidebar occupants roster (SIDEBAR.md): time since last input before a
+// chat occupant renders dimmed as idle.
+const CHAT_IDLE_SECONDS = 600;
 function clampCols(v){
   const n = typeof v === 'number' ? v : parseInt(v, 10);
   if (!Number.isInteger(n)) return null;
@@ -782,7 +785,8 @@ function makeInitialState(){
     displayName:null,
     currentTopicId:null,
     currentNewsId:null,
-    cols:DEFAULT_COLS
+    cols:DEFAULT_COLS,
+    lastInputAt:null
   };
 }
 
@@ -825,14 +829,23 @@ function routeGo(api, state, name){
   state.currentScreen = name;
   if (api && api.ws) api.ws.__ctx = { state };
   switch(name){
-    case 'splash': return renderSplash(api, state);
-    case 'menu':   return renderMenu(api, state);
-    case 'chat':   return renderChat(api, state);
-    case 'about':  return renderAbout(api, state);
-    case 'rules':  return renderRules(api, state);
-    case 'polls':   return renderPolls(api, state);
-    default:       api.print('Unknown screen: '+name, 'red');
+    case 'splash': renderSplash(api, state); break;
+    case 'menu':   renderMenu(api, state); break;
+    case 'chat':   renderChat(api, state); break;
+    case 'about':  renderAbout(api, state); break;
+    case 'rules':  renderRules(api, state); break;
+    case 'polls':   renderPolls(api, state); break;
+    default:       api.print('Unknown screen: '+name, 'red'); return;
   }
+  sendOps(api.ws, [ buildPanelOp(name) ]);
+}
+// Sidebar panel op (SIDEBAR.md Phase 1): routeGo is the single choke point
+// where screens change, so it's the single place the panel op is emitted.
+// Per-place builders (panelForChat, future panelForGames/panelForMenu) live
+// beside their render functions; everything else gets title + filler only.
+function buildPanelOp(name){
+  if (name === 'chat') return { op:'panel', title:'THE COMMONS', sections: panelForChat() };
+  return { op:'panel', title: name === 'menu' ? 'DEADNET' : name.toUpperCase(), sections: [] };
 }
 function requireAuth(api, state){
   if (!state.authenticated){
@@ -902,6 +915,7 @@ function splashHandleRaw(text, api, state){
       if (!HUB.socketsByUser.has(state.username)) HUB.socketsByUser.set(state.username, new Set());
       HUB.socketsByUser.get(state.username).add(api.ws);
       broadcastSystem(`${state.username} joined`);
+      state.lastInputAt = nowEpoch();
 
       api.setInputType('text', 'Type here… try /help');
       api.setInputLimit(null);
@@ -1646,7 +1660,9 @@ function renderMenu(api, state){
   api.batch(b=>{
     b.clear();
     b.setInputLimit(null);
-    b.printHTML('<div class="banner"><div class="line term-titlebar-text">DEADNET</div><div class="line dim">(C) 1997-∞ DEAD INTERNET SOCIETY</div><div class="line dim">type a /command to launch something.</div></div>');
+    // Standing "DEADNET" title moved to the panel op (SIDEBAR.md Phase 1
+    // title relocation) — the client renders it in the sidebar or in-flow.
+    b.printHTML('<div class="banner"><div class="line dim">(C) 1997-∞ DEAD INTERNET SOCIETY</div><div class="line dim">type a /command to launch something.</div></div>');
     if (unreadCount > 0) {
       const label = unreadCount === 1 ? 'message' : 'messages';
       b.printHTML(`<span class="main-alert">!! NEW DIRECT MESSAGES: ${unreadCount} unread ${label}. !!</span>`);
@@ -2235,7 +2251,8 @@ function renderChat(api, state){
   api.batch(b=>{
     b.clear();
     b.setInputLimit(chatMaxLen);
-    b.hrTitled('The Commons Chat');
+    // Standing header moved to the panel op (SIDEBAR.md Phase 1 title
+    // relocation) — the client renders it in the sidebar or in-flow.
 
     const here = usersCurrentlyInChat();
     b.print(here.length ? `Here now (${here.length}): ${here.join(', ')}` : 'Nobody is here yet — say hi!', 'cyan');
@@ -2285,6 +2302,33 @@ function renderChat(api, state){
   // own clear-triggered teardown of any stale prior chat watcher happens
   // first, and this establishes the fresh one — never both racing.
   sendOps(api.ws, [{ op: 'chatCap', n: historyShown }]);
+}
+// Occupants roster for the sidebar (SIDEBAR.md panelForChat). Mirrors
+// usersCurrentlyInChat()'s iteration/sort so roster order matches /here.
+function panelForChat(){
+  const now = nowEpoch();
+  const users = [];
+  HUB.clients.forEach(ws => {
+    const st = ws.__ctx && ws.__ctx.state;
+    if (st && st.currentScreen === 'chat' && st.username) {
+      const idle = !!(st.lastInputAt && (now - st.lastInputAt) >= CHAT_IDLE_SECONDS);
+      const colorHtml = st.userColor
+        ? `<span style="color:${st.userColor}">${escapeHTML(st.username)}</span>`
+        : escapeHTML(st.username);
+      users.push({ name: st.username, colorHtml, away: null, idle });
+    }
+  });
+  users.sort((a, b) => a.name.localeCompare(b.name));
+  return [{ kind:'roster', heading:`HERE NOW (${users.length})`, users }];
+}
+// Re-broadcast to everyone currently in chat — same currentScreen filter as
+// broadcastChatFrom — so occupant joins/leaves/disconnects stay live.
+function broadcastChatPanel(){
+  const op = { op:'panel', title:'THE COMMONS', sections: panelForChat() };
+  HUB.clients.forEach(ws => {
+    const st = ws.__ctx && ws.__ctx.state;
+    if (st && st.currentScreen === 'chat') sendOps(ws, [op]);
+  });
 }
 function chatHandleCommand(cmd, api, state){
   if (!requireAuth(api, state)) return true;
@@ -5188,6 +5232,7 @@ function authenticateWsFromUserRow(ws, api, state, userRow) {
   if (!HUB.socketsByUser.has(state.username)) HUB.socketsByUser.set(state.username, new Set());
   HUB.socketsByUser.get(state.username).add(ws);
   broadcastSystem(`${state.username} joined`);
+  state.lastInputAt = nowEpoch();
   setLastLogin.run(nowEpoch(), state.userId);
   sendOps(ws, [{ op: 'status', chrome: chrome.getBalance(state.username) }]);
 
@@ -5515,28 +5560,36 @@ wss.on('connection', (ws, req) => {
     const raw = String(msg.raw || '').trim();
     if (!raw) return;
 
+    state.lastInputAt = nowEpoch();
+
     // Slash commands
     if (raw.startsWith('/')) {
       const [head, ...rest] = raw.slice(1).split(/\s+/);
       const cmd  = head.toLowerCase();
       const args = rest;
+      // Most nav commands change screen via a direct render call rather than
+      // routeGo, so entering/leaving chat isn't limited to /chat and /leave —
+      // catch every path here instead of hooking each one (SIDEBAR.md).
+      const wasChat = state.currentScreen === 'chat';
 
       // Global commands first (e.g., /chat, /links, /board, etc.)
-      if (handleGlobalCommand && handleGlobalCommand(cmd, api, state, args)) return;
+      let handled = !!(handleGlobalCommand && handleGlobalCommand(cmd, api, state, args));
 
       // Optional screen-local commands
-      const localHandled =
-           (state.currentScreen === 'splash'     && splashHandleCommand && splashHandleCommand(cmd, api, state, args))
-        || (state.currentScreen === 'chat'       && chatHandleCommand && chatHandleCommand(cmd, api, state, args))
-        || (state.currentScreen === 'adminchat'  && adminChatHandleCommand && adminChatHandleCommand(cmd, api, state, args))
-        || (state.currentScreen === 'topic'      && topicHandleCommand && topicHandleCommand(cmd, api, state, args))
-        || (state.currentScreen === 'news:list'  && newsListHandleCommand && newsListHandleCommand(cmd, api, state, args))
-        || (state.currentScreen === 'news:item'  && newsItemHandleCommand && newsItemHandleCommand(cmd, api, state, args))
-        || (state.currentScreen === 'games'      && gamesHandleCommand   && gamesHandleCommand(cmd, api, state))
-        || false;
+      if (!handled) {
+        handled = !!(
+             (state.currentScreen === 'splash'     && splashHandleCommand && splashHandleCommand(cmd, api, state, args))
+          || (state.currentScreen === 'chat'       && chatHandleCommand && chatHandleCommand(cmd, api, state, args))
+          || (state.currentScreen === 'adminchat'  && adminChatHandleCommand && adminChatHandleCommand(cmd, api, state, args))
+          || (state.currentScreen === 'topic'      && topicHandleCommand && topicHandleCommand(cmd, api, state, args))
+          || (state.currentScreen === 'news:list'  && newsListHandleCommand && newsListHandleCommand(cmd, api, state, args))
+          || (state.currentScreen === 'news:item'  && newsItemHandleCommand && newsItemHandleCommand(cmd, api, state, args))
+          || (state.currentScreen === 'games'      && gamesHandleCommand   && gamesHandleCommand(cmd, api, state))
+        );
+      }
 
-      if (localHandled) return;
-      api.print(`Unknown command: /${cmd}`, 'red');
+      if (!handled) api.print(`Unknown command: /${cmd}`, 'red');
+      if (wasChat !== (state.currentScreen === 'chat')) broadcastChatPanel();
       return;
     }
 
@@ -5556,8 +5609,10 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
+    const wasChat = state.currentScreen === 'chat';
     HUB.clients.delete(ws);
     removeUserPresence(api, state);
+    if (wasChat) broadcastChatPanel();
   });
 
   ws.on('error', (err) => console.error('WS error:', err));

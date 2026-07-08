@@ -42,6 +42,13 @@ deployed on Fly.io. Single server process, single database file. No build step.
   connection state (e.g. `state.currentScreen === 'chat'`), never blast
   everyone unless it's genuinely global.
 
+## Screen taxonomy
+
+Every screen answers "is this a place?" first (see `specs/SIDEBAR.md`):
+- **Places** — screens with live presence and a sidebar margin (e.g. /chat).
+- **Readouts** — information-only screens; sidebar shows title + filler only.
+- **Programs** — modals; the sidebar dims behind the overlay, unaffected.
+
 ## Terminal commands
 
 - Added as `case '<name>':` in the command switch in server.js, handler named

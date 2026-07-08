@@ -53,6 +53,27 @@
   body{margin:0;color:var(--fg);font:16px/1.35 'Web IBM VGA','VT323',ui-monospace,Menlo,Consolas,monospace;letter-spacing:.2px}
   .app{height:100vh;display:flex;flex-direction:column;background:var(--bg)}
   @supports (height:100dvh){.app{height:100dvh}}
+  /* Sidebar skeleton (specs/SIDEBAR.md Phase 1). .app-row holds the terminal
+     column and the sidebar side by side; #status-strip stays outside the row
+     so it spans the full width beneath both panes. */
+  .app-row{flex:1 1 auto;display:flex;flex-direction:row;min-height:0}
+  .term-col{flex:1 1 auto;display:flex;flex-direction:column;min-width:0;min-height:0}
+  /* In-flow title fallback for screens whose standing header moved into the
+     panel op (currently /chat and /main only) — hidden by JS on screens that
+     still print their own header, and always hidden at/above the breakpoint
+     since the sidebar shows the title there instead. */
+  #inflow-title{flex:0 0 auto;padding:10px 14px 0;color:var(--phos-bright);text-shadow:var(--crt-glow);text-transform:uppercase;letter-spacing:1px;font-weight:bold}
+  #sidebar{display:none;flex-direction:column;flex:0 0 clamp(280px,24vw,340px);width:clamp(280px,24vw,340px);box-sizing:border-box;min-height:0;overflow:hidden;padding:14px 16px;border-left:1px solid var(--panel-edge);background:var(--void)}
+  #sidebar-title{flex:0 0 auto;margin-bottom:12px;color:var(--phos-bright);text-shadow:var(--crt-glow);text-transform:uppercase;letter-spacing:1px;font-weight:bold}
+  #sidebar-sections{flex:0 1 auto;display:flex;flex-direction:column;gap:14px;overflow:hidden;min-height:0}
+  .sidebar-heading{color:var(--phos-dim);text-transform:uppercase;font-size:12px;letter-spacing:.5px;margin-bottom:6px}
+  .sidebar-roster-line{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.5}
+  .sidebar-lines-line{color:var(--phos);line-height:1.4;white-space:pre-wrap;word-wrap:break-word}
+  #sidebar-filler{flex:1 1 auto;margin-top:14px;overflow:hidden;color:var(--phos-faint);white-space:pre-wrap;line-height:1.4;-webkit-mask-image:linear-gradient(to bottom,#000 60%,transparent 100%);mask-image:linear-gradient(to bottom,#000 60%,transparent 100%)}
+  @media (min-width:1100px){
+    #inflow-title{display:none !important}
+    #sidebar{display:flex}
+  }
   #terminal{flex:1 1 auto;padding:12px 14px 18px;box-sizing:border-box;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable both-edges;scrollbar-width:thin;scrollbar-color:var(--scroll-thumb) var(--scroll-track);border-bottom:1px solid #0e0e0e}
   #terminal::-webkit-scrollbar{width:8px}
   #terminal::-webkit-scrollbar-track{background:var(--scroll-track)}
@@ -590,22 +611,32 @@ body[data-crt="full"] .prompt::after{
   </div>
 
   <div class="app">
-    <div id="terminal" aria-live="polite" aria-atomic="false">
-      <div class="line dim">connecting…</div>
-    </div>
-    <div id="inputbar">
-      <div class="prompt">DIS&gt;</div>
-      <button type="button" id="inputToggle" class="input-toggle" aria-pressed="false">
-        <span class="input-toggle-icon" aria-hidden="true">[⤢]</span>
-        <span class="input-toggle-label sr-only">Expand input</span>
-      </button>
-      <form id="cmdForm" autocomplete="off">
-        <div class="input-shell">
-          <input id="cmdInput" type="text" placeholder="Type here…" spellcheck="false" autofocus>
-          <textarea id="cmdTextarea" placeholder="Type here…" spellcheck="false" hidden></textarea>
+    <div class="app-row">
+      <div class="term-col">
+        <div id="inflow-title" hidden aria-live="polite"></div>
+        <div id="terminal" aria-live="polite" aria-atomic="false">
+          <div class="line dim">connecting…</div>
         </div>
-        <button class="btn" type="submit">[SEND]</button>
-      </form>
+        <div id="inputbar">
+          <div class="prompt">DIS&gt;</div>
+          <button type="button" id="inputToggle" class="input-toggle" aria-pressed="false">
+            <span class="input-toggle-icon" aria-hidden="true">[⤢]</span>
+            <span class="input-toggle-label sr-only">Expand input</span>
+          </button>
+          <form id="cmdForm" autocomplete="off">
+            <div class="input-shell">
+              <input id="cmdInput" type="text" placeholder="Type here…" spellcheck="false" autofocus>
+              <textarea id="cmdTextarea" placeholder="Type here…" spellcheck="false" hidden></textarea>
+            </div>
+            <button class="btn" type="submit">[SEND]</button>
+          </form>
+        </div>
+      </div>
+      <div id="sidebar">
+        <div id="sidebar-title"></div>
+        <div id="sidebar-sections"></div>
+        <div id="sidebar-filler" aria-hidden="true"></div>
+      </div>
     </div>
     <div id="status-strip" aria-hidden="true">USR: <span id="statusUser">guest</span> &middot; NODE 01 &middot; <span id="statusScreen">MAIN</span><span id="statusChromeWrap" hidden> &middot; CHR <span id="statusChrome">0</span></span> &middot; <span id="statusClock">00:00:00</span> ET<span id="statusUptimeWrap"> &middot; UP <span id="statusUptime">00:00:00</span></span></div>
   </div>
@@ -1999,6 +2030,97 @@ body[data-crt="full"] .prompt::after{
     chatAnchorEl = el;
   }
 
+  // ===== Sidebar panel (specs/SIDEBAR.md Phase 1) =====
+  // The sidebar renders whatever the panel op says, for every screen. The
+  // in-flow title fallback (#inflow-title, shown only below the 1100px
+  // breakpoint) is narrower: it only ever shows a title for screens whose
+  // server-side standing header has actually been removed this phase, so it
+  // never duplicates a header a screen is still printing into the terminal
+  // itself. Punky: add a screen's title here only when its server-side
+  // header is migrated in the same change.
+  var INFLOW_FALLBACK_TITLES = { 'THE COMMONS': true, 'DEADNET': true };
+
+  // Static, haunted, unmistakably-fictional diagnostics — never real errors.
+  // One is chosen per panel render and left inert (SIDEBAR.md filler rules).
+  var SIDEBAR_FILLER_BLOCKS = [
+    'ectoplasm.sys ... loaded (unverified)\nséance_handler: listening on port 1993\nchecksum mismatch: expected 0x1997, got 0xDEAD\nRETRYING... RETRYING... (gave up, it\'s fine)',
+    'mounting /dev/null/soul\nfsck: 3 ghosts found, 0 repaired\nkernel: table flip detected, resuming anyway\nlast séance: never (this is normal)',
+    'BIOS: no keyboard detected, haunting anyway\nloading ouija.dll ... 100%\nwarning: séance_handler leaked 4 memories\nplanchette.exe has stopped responding',
+    'scanning for signs of life... none found, continuing\nnode uptime: since before you were born\ntemp sensor: -40°C (feels like 1997)\nerror 666: task failed successfully',
+    'defragmenting the void ... 0% (this may take forever)\nretrying handshake with the dead ...\nséance_handler: connection to beyond timed out, reconnecting\ncache hit: memory of a Tuesday that never happened',
+    'ARP request for MAC ADDRESS OF THE DAMNED ... no reply\ninit: summoning daemon (the good kind)\nwatchdog: nothing barked, all clear\nsystem clock drifted 29 years, unadjusted'
+  ];
+
+  var sidebarTitleEl = document.getElementById('sidebar-title');
+  var sidebarSectionsEl = document.getElementById('sidebar-sections');
+  var sidebarFillerEl = document.getElementById('sidebar-filler');
+  var inflowTitleEl = document.getElementById('inflow-title');
+
+  function buildRosterSection(section){
+    var wrap = document.createElement('div');
+    var heading = document.createElement('div');
+    heading.className = 'sidebar-heading';
+    heading.textContent = section.heading || '';
+    wrap.appendChild(heading);
+    (section.users || []).forEach(function(u){
+      var line = document.createElement('div');
+      line.className = 'sidebar-roster-line';
+      if (u.away || u.idle) {
+        // Human declaration (away) wins over machine observation (idle);
+        // away is always null in Phase 1, so only idle applies today.
+        var dim = document.createElement('span');
+        dim.className = 'dim';
+        dim.textContent = u.away ? (u.name + ' (' + u.away + ')') : u.name;
+        line.appendChild(dim);
+      } else {
+        line.innerHTML = u.colorHtml || '';
+      }
+      wrap.appendChild(line);
+    });
+    return wrap;
+  }
+
+  function buildLinesSection(section){
+    var wrap = document.createElement('div');
+    var heading = document.createElement('div');
+    heading.className = 'sidebar-heading';
+    heading.textContent = section.heading || '';
+    wrap.appendChild(heading);
+    (section.lines || []).forEach(function(l){
+      var line = document.createElement('div');
+      line.className = 'sidebar-lines-line';
+      line.innerHTML = (l && l.html) || '';
+      wrap.appendChild(line);
+    });
+    return wrap;
+  }
+
+  function op_panel(op){
+    var title = String((op && op.title) || '');
+
+    if (sidebarTitleEl) sidebarTitleEl.textContent = title;
+    if (sidebarSectionsEl) {
+      sidebarSectionsEl.innerHTML = '';
+      (op && op.sections || []).forEach(function(section){
+        if (!section) return;
+        if (section.kind === 'roster') sidebarSectionsEl.appendChild(buildRosterSection(section));
+        else if (section.kind === 'lines') sidebarSectionsEl.appendChild(buildLinesSection(section));
+      });
+    }
+    if (sidebarFillerEl) {
+      sidebarFillerEl.textContent = SIDEBAR_FILLER_BLOCKS[Math.floor(Math.random() * SIDEBAR_FILLER_BLOCKS.length)];
+    }
+    if (inflowTitleEl) {
+      if (INFLOW_FALLBACK_TITLES[title]) {
+        inflowTitleEl.textContent = title;
+        inflowTitleEl.hidden = false;
+      } else {
+        inflowTitleEl.textContent = '';
+        inflowTitleEl.hidden = true;
+      }
+    }
+  }
+
   // Live messages (and anything else printed once chat is fully live —
   // see the chatCapN gate) insert above the pinned footer instead of
   // appending after it. Before chat is "live" (chatCapN still null: the
@@ -2468,6 +2590,7 @@ body[data-crt="full"] .prompt::after{
           else if (op.op === 'status') { if (typeof op.chrome !== 'undefined') updateStatusChrome(op.chrome); }
           else if (op.op === 'chatCap') handleChatCap(op.n);
           else if (op.op === 'chatAnchor') op_chatAnchor();
+          else if (op.op === 'panel') op_panel(op);
           else if (op.op === 'openUrl') op_openUrl(op.url);
           else if (op.op === 'openPixelEditor') openPixelEditor(op.id || null, op.name || null, op.pixel_data || null);
           else if (op.op === 'openWordle') openWordle(op.state || {});
