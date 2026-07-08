@@ -2038,7 +2038,14 @@ body[data-crt="full"] .prompt::after{
   // never duplicates a header a screen is still printing into the terminal
   // itself. Punky: add a screen's title here only when its server-side
   // header is migrated in the same change.
-  var INFLOW_FALLBACK_TITLES = { 'THE COMMONS': true, 'DEADNET': true };
+  var INFLOW_FALLBACK_TITLES = { 'CHAT': true, 'DEADNET': true };
+
+  // The three places this epic actually defines margin content for
+  // (SIDEBAR.md scope: /chat, /main, /games) never show filler, even in
+  // phases before their real content lands — filler is only for screens
+  // nobody has designed a margin for yet. Punky: remove a title here the
+  // same change its margin content ships.
+  var NO_FILLER_TITLES = { 'CHAT': true, 'DEADNET': true, 'GAMES': true };
 
   // Static, haunted, unmistakably-fictional diagnostics — never real errors.
   // One is chosen per panel render and left inert (SIDEBAR.md filler rules).
@@ -2108,7 +2115,9 @@ body[data-crt="full"] .prompt::after{
       });
     }
     if (sidebarFillerEl) {
-      sidebarFillerEl.textContent = SIDEBAR_FILLER_BLOCKS[Math.floor(Math.random() * SIDEBAR_FILLER_BLOCKS.length)];
+      sidebarFillerEl.textContent = NO_FILLER_TITLES[title]
+        ? ''
+        : SIDEBAR_FILLER_BLOCKS[Math.floor(Math.random() * SIDEBAR_FILLER_BLOCKS.length)];
     }
     if (inflowTitleEl) {
       if (INFLOW_FALLBACK_TITLES[title]) {

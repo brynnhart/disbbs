@@ -844,7 +844,7 @@ function routeGo(api, state, name){
 // Per-place builders (panelForChat, future panelForGames/panelForMenu) live
 // beside their render functions; everything else gets title + filler only.
 function buildPanelOp(name){
-  if (name === 'chat') return { op:'panel', title:'THE COMMONS', sections: panelForChat() };
+  if (name === 'chat') return { op:'panel', title:'CHAT', sections: panelForChat() };
   return { op:'panel', title: name === 'menu' ? 'DEADNET' : name.toUpperCase(), sections: [] };
 }
 function requireAuth(api, state){
@@ -2324,7 +2324,7 @@ function panelForChat(){
 // Re-broadcast to everyone currently in chat — same currentScreen filter as
 // broadcastChatFrom — so occupant joins/leaves/disconnects stay live.
 function broadcastChatPanel(){
-  const op = { op:'panel', title:'THE COMMONS', sections: panelForChat() };
+  const op = { op:'panel', title:'CHAT', sections: panelForChat() };
   HUB.clients.forEach(ws => {
     const st = ws.__ctx && ws.__ctx.state;
     if (st && st.currentScreen === 'chat') sendOps(ws, [op]);
