@@ -49,6 +49,26 @@ Every screen answers "is this a place?" first (see `specs/SIDEBAR.md`):
 - **Readouts** — information-only screens; sidebar shows title + filler only.
 - **Programs** — modals; the sidebar dims behind the overlay, unaffected.
 
+## Message routing taxonomy (specs/PLACES.md)
+
+> **Content belongs to places. Directed human signals reach the person
+> anywhere. Ambient system events go to the feed, the margins, and the
+> logs.**
+>
+> - Content (chat lines, board posts, room activity) renders only in its
+>   room. No feed follows a user between rooms.
+> - Signals (a DM, a mention, a sysop page) are one human reaching for one
+>   human: one dim line dropped into whatever room the recipient occupies
+>   at the moment of arrival, plus persistent state in the footer until
+>   handled. No algorithmic source may generate a signal.
+> - Ambient events (logins, jackpots, milestones) never interrupt anyone.
+>   They live in the activity feed (if celebration- or invitation-worthy),
+>   in sidebar margins, or in logs.
+
+**Activity feed editorial policy: celebration and invitation, not
+logging.** A login is a log line. A first-ever registration, a jackpot, a
+new creation is feed-worthy.
+
 ## Terminal commands
 
 - Added as `case '<name>':` in the command switch in server.js, handler named

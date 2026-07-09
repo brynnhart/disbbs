@@ -35,8 +35,8 @@ function createRockoService({
   const { createUser } = helpers;
   const { sanitizeAndFormatDIS, stripDISFormatting } = formatting;
   const { nowEpoch, formatTimeET } = timeUtils;
-  const { notifyMentions, extractMentionsFromText } = notifications;
-  const { broadcastChatFrom, sendOps, hub: hubState } = hub;
+  const { notifyMentions, notifyDM, extractMentionsFromText } = notifications;
+  const { broadcastChatFrom } = hub;
 
   const username = 'Rocko';
   const usernameLower = username.toLowerCase();
@@ -214,26 +214,6 @@ function createRockoService({
     }
   }
 
-  function notifyOnlineRecipient(username, fromName) {
-    if (!hubState?.socketsByUser || !sendOps) return;
-    const sockets = hubState.socketsByUser.get(username);
-    if (!sockets || !sockets.size) return;
-    const notice = `📬 DM from ${sanitizeAndFormatDIS(fromName)}.`;
-    sockets.forEach((ws) => {
-      const now = Date.now();
-      if (!ws.__ctx) ws.__ctx = {};
-      if (!ws.__ctx._lastMentionSound || now - ws.__ctx._lastMentionSound > 400) {
-        ws.__ctx._lastMentionSound = now;
-        sendOps(ws, [
-          { op: 'audio', src: '/static/sounds/mention.wav', volume: 0.8 },
-          { op: 'print', text: notice, cls: 'cyan' },
-        ]);
-      } else {
-        sendOps(ws, [{ op: 'print', text: notice, cls: 'cyan' }]);
-      }
-    });
-  }
-
   function sendChatMessage(text) {
     if (!enabled || !insertMessage?.run) return;
     const trimmed = trimToLimit(text, chatMaxLength());
@@ -280,7 +260,7 @@ function createRockoService({
       return;
     }
 
-    notifyOnlineRecipient(toUser.username, rockoDisplayName);
+    notifyDM(toUser, rockoDisplayName);
     state.lastResponseAt = Date.now();
   }
 

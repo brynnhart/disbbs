@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 
 const { createNotificationService } = require('../../src/services/notifications');
+const formatting = require('../../src/utils/formatting');
 
 test('extractMentionsFromText finds unique handles with punctuation', () => {
   const service = createNotificationService({
@@ -13,6 +14,7 @@ test('extractMentionsFromText finds unique handles with punctuation', () => {
     helpers: { resolveUserHandle: () => null },
     hub: { sendOps() {}, hub: { socketsByUser: new Map() } },
     timeUtils: { nowEpoch: () => 0 },
+    formatting,
   });
 
   const raw = "Hey @Alice! Talk to @bob, and maybe @alice again.";
@@ -29,6 +31,7 @@ test('humanizeContext names known locations', () => {
     helpers: { resolveUserHandle: () => null },
     hub: { sendOps() {}, hub: { socketsByUser: new Map() } },
     timeUtils: { nowEpoch: () => 0 },
+    formatting,
   });
 
   assert.strictEqual(service.humanizeContext('chat'), 'Chat');
@@ -65,6 +68,7 @@ test('notifyMentions creates notifications and alerts connected users', () => {
       hub: { socketsByUser },
     },
     timeUtils: { nowEpoch: () => 1234 },
+    formatting,
   });
 
   service.notifyMentions('Hello @Target and @target again', { id: 1, username: 'Alice' }, 'chat');
@@ -78,7 +82,76 @@ test('notifyMentions creates notifications and alerts connected users', () => {
   assert.strictEqual(notice.ws, fakeSocket);
   assert.deepStrictEqual(notice.ops, [
     { op: 'beep' },
-    { op: 'print', text: '🔔 Alice mentioned you in Chat.', cls: 'cyan' },
+    { op: 'printHTML', html: '* Alice mentioned you in Chat — /notifications to read', cls: 'dim' },
+  ]);
+});
+
+test('notifyDM renders DIS-Markdown tags in the sender name and pushes unread status', () => {
+  const sentOps = [];
+  const socketsByUser = new Map();
+  const fakeSocket = { id: 'socket-1' };
+  socketsByUser.set('punkyroo', new Set([fakeSocket]));
+
+  const service = createNotificationService({
+    statements: {
+      insertNotification: { run() {} },
+      listNotificationsForUser: { all: () => [] },
+      markAllNotificationsSeen: { run() {} },
+      countUnreadDMs: { get: () => ({ count: 3 }) },
+    },
+    helpers: { resolveUserHandle: () => null },
+    hub: { sendOps: (ws, ops) => sentOps.push({ ws, ops }), hub: { socketsByUser } },
+    timeUtils: { nowEpoch: () => 0 },
+    formatting,
+  });
+
+  service.notifyDM({ id: 9, username: 'punkyroo' }, '[magenta]punkyroo[/magenta]');
+
+  assert.strictEqual(sentOps.length, 1);
+  const { ws, ops } = sentOps[0];
+  assert.strictEqual(ws, fakeSocket);
+  assert.deepStrictEqual(ops[1], {
+    op: 'printHTML',
+    html: '* incoming from <span class="uc-magenta">punkyroo</span> — /messages to read',
+    cls: 'dim',
+  });
+  assert.deepStrictEqual(ops[2], { op: 'status', unread: 3 });
+});
+
+test('notifyMentions sends an away auto-reply to the sender once per away-session', () => {
+  const sentOps = [];
+  const socketsByUser = new Map();
+  const targetSocket = { id: 'target-socket' };
+  const senderSocket = { id: 'sender-socket' };
+  socketsByUser.set('Target', new Set([targetSocket]));
+  socketsByUser.set('Alice', new Set([senderSocket]));
+  const away = new Map();
+  away.set('target', { message: 'gardening', notified: new Set() });
+
+  const service = createNotificationService({
+    statements: {
+      insertNotification: { run() {} },
+      listNotificationsForUser: { all: () => [] },
+      markAllNotificationsSeen: { run() {} },
+    },
+    helpers: {
+      resolveUserHandle: (handle) => (handle === 'target' ? { row: { id: 2, username: 'Target' } } : null),
+    },
+    hub: {
+      sendOps: (ws, ops) => sentOps.push({ ws, ops }),
+      hub: { socketsByUser, away },
+    },
+    timeUtils: { nowEpoch: () => 1234 },
+    formatting,
+  });
+
+  service.notifyMentions('Hello @Target', { id: 1, username: 'Alice' }, 'chat');
+  service.notifyMentions('Hello again @Target', { id: 1, username: 'Alice' }, 'chat');
+
+  const senderNotices = sentOps.filter(({ ws }) => ws === senderSocket);
+  assert.strictEqual(senderNotices.length, 1, 'auto-reply should fire once per sender per away-session');
+  assert.deepStrictEqual(senderNotices[0].ops, [
+    { op: 'print', text: '* Target is away: gardening', cls: 'dim' },
   ]);
 });
 
@@ -94,6 +167,7 @@ test('listMentionsForUser and markMentionsSeen proxy to statements', () => {
     helpers: { resolveUserHandle: () => null },
     hub: { sendOps() {}, hub: { socketsByUser: new Map() } },
     timeUtils: { nowEpoch: () => 0 },
+    formatting,
   });
 
   assert.deepStrictEqual(service.listMentionsForUser(5, 10), [5, 10, listed]);

@@ -82,6 +82,7 @@ const notifications = createNotificationService({
   helpers,
   hub: hubApi,
   timeUtils,
+  formatting,
 });
 const chrome = createChromeService({ db, nowEpoch: timeUtils.nowEpoch, dayKeyET: timeUtils.dayKeyET, hub: hubApi.hub, sendOps: hubApi.sendOps });
 
@@ -147,6 +148,7 @@ const {
   broadcastSystem,
   broadcastChatFrom,
   broadcastAdminChatFrom,
+  broadcastAdminChatSystem,
   usersCurrentlyInChat,
   usersCurrentlyInAdminChat,
 } = hubApi;
@@ -172,6 +174,7 @@ const {
 
 const {
   notifyMentions,
+  notifyDM,
   listMentionsForUser,
   markMentionsSeen,
   humanizeContext,
@@ -485,6 +488,10 @@ function checkLeaderChange() {
 const stmtActivityFeed = db.prepare(
   'SELECT category, event_type, message, created_at FROM activity_feed ORDER BY created_at DESC LIMIT 20'
 );
+// /main sidebar ambience tail (SIDEBAR.md Phase 3) — full feed stays at /activity.
+const stmtActivityFeedTail = db.prepare(
+  'SELECT message, created_at FROM activity_feed ORDER BY created_at DESC LIMIT 5'
+);
 const stmtGamesFeed = db.prepare(
   "SELECT message, created_at FROM activity_feed WHERE category = 'games' ORDER BY created_at DESC LIMIT 8"
 );
@@ -766,6 +773,9 @@ const MENU_TWO_COL_THRESHOLD = 78;
 // Sidebar occupants roster (SIDEBAR.md): time since last input before a
 // chat occupant renders dimmed as idle.
 const CHAT_IDLE_SECONDS = 600;
+// /away (specs/PLACES.md Phase 3): explicit human declaration, capped short
+// since it's rendered inline beside a name everywhere rosters appear.
+const AWAY_MAX_LEN = 60;
 function clampCols(v){
   const n = typeof v === 'number' ? v : parseInt(v, 10);
   if (!Number.isInteger(n)) return null;
@@ -819,7 +829,8 @@ function removeUserPresence(api, state, { broadcast = true } = {}){
 
   if (fullyRemoved) {
     HUB.online.delete(username);
-    if (broadcast) broadcastSystem(`${username} left`);
+    HUB.away.delete(username.toLowerCase()); // /away does not survive full logout (specs/PLACES.md)
+    if (broadcast) broadcastAdminChatSystem(`${username} left`, nowEpoch());
     return username;
   }
 
@@ -847,7 +858,8 @@ function routeGo(api, state, name){
 function buildPanelOp(name, state){
   if (name === 'chat') return { op:'panel', title:'CHAT', sections: panelForChat() };
   if (name === 'games') return { op:'panel', title:'GAMES', sections: panelForGames(state) };
-  return { op:'panel', title: name === 'menu' ? 'DEADNET' : name.toUpperCase(), sections: [] };
+  if (name === 'menu') return { op:'panel', title:'DEADNET', sections: panelForMenu() };
+  return { op:'panel', title: name.toUpperCase(), sections: [] };
 }
 function requireAuth(api, state){
   if (!state.authenticated){
@@ -916,8 +928,11 @@ function splashHandleRaw(text, api, state){
       HUB.online.add(state.username);
       if (!HUB.socketsByUser.has(state.username)) HUB.socketsByUser.set(state.username, new Set());
       HUB.socketsByUser.get(state.username).add(api.ws);
-      broadcastSystem(`${state.username} joined`);
+      broadcastAdminChatSystem(`${state.username} joined`, nowEpoch());
       state.lastInputAt = nowEpoch();
+
+      // ⚠ login path (specs/PLACES.md Phase 2) — manual review before deploy
+      sendOps(api.ws, [{ op: 'status', unread: countUnreadDMs.get(state.userId)?.count || 0 }]);
 
       api.setInputType('text', 'Type here… try /help');
       api.setInputLimit(null);
@@ -963,6 +978,7 @@ function cmdHelp(api, state){
   api.print('  /displayreset       Reset display name to your username', 'cyan');
   api.print('  /whoami    Show current user', 'cyan');
   api.print('  /who       List users currently online', 'cyan');
+  api.print('  /away [message]  Set your away status (blank clears it)', 'cyan');
   api.print('  /users [page]  List members (username, display, last login, online)', 'cyan');
 
 
@@ -1765,6 +1781,40 @@ function renderMenu(api, state){
     b.printHTML('<div id="main-flavor"></div>');
   });
 }
+// Sitewide roster + activity ambience for /main (SIDEBAR.md Phase 3).
+// coarseLocation/awayMessageFor/anyStateForUser are defined near
+// panelForChat below (shared with cmdWho/cmdHere) — hoisting makes them
+// reachable here regardless of file order.
+function panelForMenu(){
+  const now = nowEpoch();
+  const ROSTER_CAP = 20;
+  const names = Array.from(HUB.online).sort((a, b) => a.localeCompare(b));
+  const shown = names.slice(0, ROSTER_CAP);
+
+  const users = shown.map(name => {
+    const st = anyStateForUser(name);
+    const idle = !!(st && st.lastInputAt && (now - st.lastInputAt) >= CHAT_IDLE_SECONDS);
+    const location = coarseLocation(st ? st.currentScreen : null);
+    const colorHtml = st && st.userColor
+      ? `<span style="color:${st.userColor}">${escapeHTML(name)}</span>`
+      : escapeHTML(name);
+    return { name, colorHtml, away: awayMessageFor(name), idle, location };
+  });
+
+  const rosterSection = { kind:'roster', heading:`ONLINE (${names.length})`, users };
+  const overflow = names.length - shown.length;
+  if (overflow > 0) rosterSection.note = `+ ${overflow} more · /who for all`;
+
+  const feedRows = stmtActivityFeedTail.all();
+  const activityLines = feedRows.length
+    ? feedRows.map(f => ({ html: escapeHTML(f.message) }))
+    : [{ html: 'no recent activity.' }];
+
+  return [
+    rosterSection,
+    { kind:'lines', heading:'ACTIVITY', lines: activityLines },
+  ];
+}
 function menuHandleRaw(text, api){ api.print('Type a /command to launch something. Try /chat, /board, /games or /help.', 'dim'); return true; }
 
 /* ======================= Announcements ======================= */
@@ -2305,6 +2355,25 @@ function renderChat(api, state){
   // first, and this establishes the fresh one — never both racing.
   sendOps(api.ws, [{ op: 'chatCap', n: historyShown }]);
 }
+// Away lookup (specs/PLACES.md /away) — the one place a username's away
+// message is read out of HUB.away, so every roster/command stays in sync.
+function awayMessageFor(username){
+  if (!username) return null;
+  const entry = HUB.away.get(username.toLowerCase());
+  return entry ? entry.message : null;
+}
+
+// Coarse location mapping (specs/PLACES.md invariant 6): the one function
+// that maps currentScreen values to the roster-safe place tiers. Never a
+// topic title, never a specific game — unknown screens fall back to
+// 'browsing'.
+function coarseLocation(screenName){
+  if (screenName === 'chat') return 'in chat';
+  if (screenName === 'board' || screenName === 'topic') return 'on the board';
+  if (screenName === 'games') return 'in the arcade';
+  return 'browsing';
+}
+
 // Occupants roster for the sidebar (SIDEBAR.md panelForChat). Mirrors
 // usersCurrentlyInChat()'s iteration/sort so roster order matches /here.
 function panelForChat(){
@@ -2317,7 +2386,7 @@ function panelForChat(){
       const colorHtml = st.userColor
         ? `<span style="color:${st.userColor}">${escapeHTML(st.username)}</span>`
         : escapeHTML(st.username);
-      users.push({ name: st.username, colorHtml, away: null, idle });
+      users.push({ name: st.username, colorHtml, away: awayMessageFor(st.username), idle });
     }
   });
   users.sort((a, b) => a.name.localeCompare(b.name));
@@ -2335,7 +2404,7 @@ function broadcastChatPanel(){
 function chatHandleCommand(cmd, api, state){
   if (!requireAuth(api, state)) return true;
   if (cmd==='leave' || cmd==='menu' || cmd==='main'){ routeGo(api, state, 'menu'); return true; }
-  if (cmd==='here'){ api.print('Here: ' + usersCurrentlyInChat().join(', '), 'cyan'); return true; }
+  if (cmd==='here'){ cmdHere(api, state); return true; }
   return false;
 }
 function chatHandleRaw(text, api, state){
@@ -2410,15 +2479,70 @@ function renderRules(api, state){
 function aboutHandleCommand(cmd, api){ if (cmd==='menu'||cmd==='main'){ routeGo(api, {}, 'menu'); return true; } return false; }
 function rulesHandleCommand(cmd, api){ if (cmd==='menu'||cmd==='main'){ routeGo(api, {}, 'menu'); return true; } return false; }
 
+// Find any one live socket for a username, to read its currentScreen —
+// good enough for a coarse roster; a user with tabs on two screens picks
+// whichever socket iterates first.
+function anyStateForUser(username){
+  const sockets = HUB.socketsByUser.get(username);
+  if (!sockets) return null;
+  for (const ws of sockets) {
+    if (ws.__ctx && ws.__ctx.state) return ws.__ctx.state;
+  }
+  return null;
+}
+
+function anyScreenForUser(username){
+  const st = anyStateForUser(username);
+  return st ? (st.currentScreen || null) : null;
+}
+
 function cmdWho(api){
-  const list = Array.from(HUB.online);
-  api.print(list.length ? `Online: ${list.join(', ')}` : 'Nobody online', 'cyan');
+  const names = Array.from(HUB.online).sort((a, b) => a.localeCompare(b));
+  if (!names.length){ api.print('Nobody online', 'cyan'); return; }
+  api.print(`Online (${names.length}):`, 'cyan');
+  names.forEach(name => {
+    const loc = coarseLocation(anyScreenForUser(name));
+    const away = awayMessageFor(name);
+    const line = away ? `  ${name} — ${loc} — away: ${away}` : `  ${name} — ${loc}`;
+    api.print(line, away ? 'dim' : 'cyan');
+  });
 }
 
 function cmdHere(api, state){
   if (!requireAuth(api, state)) return;
   const here = usersCurrentlyInChat();
-  api.print(here.length ? `Here now (${here.length}): ${here.join(', ')}` : 'Nobody is in chat right now.', 'cyan');
+  if (!here.length){ api.print('Nobody is in chat right now.', 'cyan'); return; }
+  api.print(`Here now (${here.length}):`, 'cyan');
+  here.forEach(name => {
+    const away = awayMessageFor(name);
+    const line = away ? `  ${name} — away: ${away}` : `  ${name}`;
+    api.print(line, away ? 'dim' : 'cyan');
+  });
+}
+
+function cmdAway(api, state, args){
+  if (!requireAuth(api, state)) return;
+  const key = state.username.toLowerCase();
+  const raw = (args || []).join(' ').trim();
+
+  if (!raw) {
+    if (HUB.away.delete(key)) {
+      api.print('Welcome back.', 'green');
+      broadcastChatPanel();
+    } else {
+      api.print('You are not marked away.', 'dim');
+    }
+    return;
+  }
+
+  // Rendered plain, never as DIS-Markdown — an away message shows up beside
+  // a name in rosters everywhere, so it never carries its own colors/bold.
+  const message = stripDISFormatting(raw).replace(/\s+/g, ' ').trim().slice(0, AWAY_MAX_LEN);
+  if (!message) { api.print('Usage: /away <message>', 'yellow'); return; }
+
+  HUB.away.set(key, { message, notified: new Set() });
+  api.print(`You are now away: ${message}`, 'yellow');
+  broadcastChatPanel();
 }
 
 function cmdColors(api){
@@ -3236,7 +3360,6 @@ function handleSlotsSpin(msg, api, state) {
     newBalance    = claimed.newBalance;
     message       = `JACKPOT! you won ${fmtCr(jackpotAmount)} ₢! 💀`;
     const feedMsg = `🎰 ${username} hit the jackpot and won ${fmtCr(jackpotAmount)} ₢! 💀`;
-    broadcastSystem(feedMsg);
     try { gameFeedInsert.run(username, 'slots_jackpot', feedMsg, nowEpoch()); } catch {}
     addActivityEvent('games', 'slots_jackpot', feedMsg);
   } else if (outcome.payout > 0) {
@@ -4640,31 +4763,20 @@ function cmdDM(api, state, args){
 
   api.print('Sent.', 'green');
 
-  // --- live notify recipient if online ---
-  // socketsByUser is keyed by canonical username
-  const canonical = recipient.username;
-  const sockets = HUB.socketsByUser.get(canonical);
-  if (sockets && sockets.size){
-    const fromName = (state.displayName && state.displayName.trim())
-      ? state.displayName
-      : (state.username || 'someone');
-    const noticeHTML = `📬 DM from ${sanitizeAndFormatDIS(fromName)}.`;
+  // --- live notify recipient if online (specs/PLACES.md Signals) ---
+  const fromName = (state.displayName && state.displayName.trim())
+    ? state.displayName
+    : (state.username || 'someone');
+  notifyDM(recipient, fromName);
 
-
-    sockets.forEach(ws=>{
-      const now = Date.now();
-      if (!ws.__ctx) ws.__ctx = {};
-
-      if (!ws.__ctx._lastMentionSound || now - ws.__ctx._lastMentionSound > 400) {
-        ws.__ctx._lastMentionSound = now;
-        sendOps(ws, [
-          { op: 'audio', src: '/static/sounds/mention.wav', volume: 0.8 },
-          { op: 'print', text: notice, cls: 'cyan' }
-        ]);
-      } else {
-        sendOps(ws, [{ op: 'print', text: notice, cls: 'cyan' }]);
-      }
-    });
+  // --- away auto-reply (specs/PLACES.md /away), once per sender per away-session ---
+  const awayEntry = HUB.away.get(recipient.username.toLowerCase());
+  if (awayEntry) {
+    const senderKey = (state.username || '').toLowerCase();
+    if (!awayEntry.notified.has(senderKey)) {
+      awayEntry.notified.add(senderKey);
+      api.print(`* ${recipient.username} is away: ${awayEntry.message}`, 'dim');
+    }
   }
 }
 
@@ -4688,6 +4800,10 @@ function cmdMessages(api, state){
     });
     b.hr(); b.print('Use /dm <user> <message> to send. /main to leave.', 'dim');
   });
+
+  // read-clear: footer MSG count drops to 0 on every open socket (specs/PLACES.md)
+  const sockets = HUB.socketsByUser.get(state.username);
+  if (sockets) sockets.forEach(ws => sendOps(ws, [{ op: 'status', unread: 0 }]));
 }
 function cmdSuggest(api, state, args){
   if (!requireAuth(api, state)) return;
@@ -5041,6 +5157,7 @@ function cmdBan(api, state, args) {
     HUB.socketsByUser.delete(target.username);
   }
   HUB.online.delete(target.username);
+  HUB.away.delete(target.username.toLowerCase());
 
   // Invalidate any pending auth tokens for the banned user
   for (const [token, record] of AUTH_TOKENS.entries()) {
@@ -5053,7 +5170,7 @@ function cmdBan(api, state, args) {
   api.print(`  IP: ${target.registration_ip || '(none on record)'}`, 'dim');
   api.print(`  Fingerprint: ${target.fingerprint_hash ? target.fingerprint_hash.slice(0, 16) + '…' : '(none on record)'}`, 'dim');
   api.print(`  Deleted: ${summary.chatMsgs} chat msgs, ${summary.boardTopics} topics, ${summary.boardComments} board replies, ${summary.linkPosts} links, ${summary.linkComments} link comments, ${summary.pollVotes} votes, ${summary.pollsCreated} polls, ${summary.statusPosts} status posts, ${summary.dmSent} DMs sent, ${summary.pxArt} pixel art`, 'dim');
-  broadcastSystem(`${target.username} has been removed.`);
+  broadcastAdminChatSystem(`${target.username} has been removed.`, nowEpoch());
 }
 
 function cmdPurgeActivity(api, state, args) {
@@ -5279,6 +5396,7 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'who':          return (cmdWho(api, state), true);      // extra arg is fine if handler only expects one
     case 'format':       return (cmdFormat(api), true);
     case 'here':         return (cmdHere(api, state), true);
+    case 'away':         return (cmdAway(api, state, args), true);
     case 'logout':       doLogout(api, state); return true;
     case 'colors':       return (cmdColors(api), true);
     case 'help':         cmdHelp(api, state); return true;
@@ -5327,10 +5445,11 @@ function authenticateWsFromUserRow(ws, api, state, userRow) {
   HUB.online.add(state.username);
   if (!HUB.socketsByUser.has(state.username)) HUB.socketsByUser.set(state.username, new Set());
   HUB.socketsByUser.get(state.username).add(ws);
-  broadcastSystem(`${state.username} joined`);
+  broadcastAdminChatSystem(`${state.username} joined`, nowEpoch());
   state.lastInputAt = nowEpoch();
   setLastLogin.run(nowEpoch(), state.userId);
-  sendOps(ws, [{ op: 'status', chrome: chrome.getBalance(state.username) }]);
+  // ⚠ login path (specs/PLACES.md Phase 2) — manual review before deploy
+  sendOps(ws, [{ op: 'status', chrome: chrome.getBalance(state.username), unread: countUnreadDMs.get(state.userId)?.count || 0 }]);
 
   // Update fingerprint on every login so IP/UA stays current
   try {

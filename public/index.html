@@ -638,7 +638,7 @@ body[data-crt="full"] .prompt::after{
         <div id="sidebar-filler" aria-hidden="true"></div>
       </div>
     </div>
-    <div id="status-strip" aria-hidden="true">USR: <span id="statusUser">guest</span> &middot; NODE 01 &middot; <span id="statusScreen">MAIN</span><span id="statusChromeWrap" hidden> &middot; CHR <span id="statusChrome">0</span></span> &middot; <span id="statusClock">00:00:00</span> ET<span id="statusUptimeWrap"> &middot; UP <span id="statusUptime">00:00:00</span></span></div>
+    <div id="status-strip" aria-hidden="true">USR: <span id="statusUser">guest</span> &middot; NODE 01 &middot; <span id="statusScreen">MAIN</span><span id="statusMsgWrap" hidden> &middot; MSG <span id="statusMsg">0</span></span><span id="statusChromeWrap" hidden> &middot; CHR <span id="statusChrome">0</span></span> &middot; <span id="statusClock">00:00:00</span> ET<span id="statusUptimeWrap"> &middot; UP <span id="statusUptime">00:00:00</span></span></div>
   </div>
 
 <script>
@@ -664,6 +664,8 @@ body[data-crt="full"] .prompt::after{
   // ===== Status strip =====
   var statusUserEl = document.getElementById('statusUser');
   var statusScreenEl = document.getElementById('statusScreen');
+  var statusMsgWrapEl = document.getElementById('statusMsgWrap');
+  var statusMsgEl = document.getElementById('statusMsg');
   var statusChromeWrapEl = document.getElementById('statusChromeWrap');
   var statusChromeEl = document.getElementById('statusChrome');
   var statusClockEl = document.getElementById('statusClock');
@@ -687,6 +689,15 @@ body[data-crt="full"] .prompt::after{
     if (!statusChromeWrapEl || !statusChromeEl) return;
     statusChromeEl.textContent = String(amount);
     statusChromeWrapEl.hidden = false;
+  }
+
+  // Standing state, not an alert (specs/PLACES.md Signals): unread DM count,
+  // rendered in the same dim strip color as everything else — no color
+  // escalation, no blink.
+  function updateStatusMsg(count){
+    if (!statusMsgWrapEl || !statusMsgEl) return;
+    statusMsgEl.textContent = String(count);
+    statusMsgWrapEl.hidden = false;
   }
 
   var pageLoadEpochMs = Date.now();
@@ -2072,18 +2083,35 @@ body[data-crt="full"] .prompt::after{
     (section.users || []).forEach(function(u){
       var line = document.createElement('div');
       line.className = 'sidebar-roster-line';
+      // location is optional (SIDEBAR.md Phase 3, /main's sitewide roster);
+      // chat's roster omits it since occupants are already known to be "in
+      // chat" — coarse-location-only per PLACES.md invariant 6.
+      var loc = u.location ? ' — ' + u.location : '';
       if (u.away || u.idle) {
-        // Human declaration (away) wins over machine observation (idle);
-        // away is always null in Phase 1, so only idle applies today.
+        // Human declaration (away) wins over machine observation (idle).
         var dim = document.createElement('span');
         dim.className = 'dim';
-        dim.textContent = u.away ? (u.name + ' (' + u.away + ')') : u.name;
+        dim.textContent = u.away ? (u.name + loc + ' — away: ' + u.away) : (u.name + loc);
         line.appendChild(dim);
       } else {
-        line.innerHTML = u.colorHtml || '';
+        var nameSpan = document.createElement('span');
+        nameSpan.innerHTML = u.colorHtml || '';
+        line.appendChild(nameSpan);
+        if (loc) {
+          var locSpan = document.createElement('span');
+          locSpan.className = 'dim';
+          locSpan.textContent = loc;
+          line.appendChild(locSpan);
+        }
       }
       wrap.appendChild(line);
     });
+    if (section.note) {
+      var note = document.createElement('div');
+      note.className = 'sidebar-roster-line dim';
+      note.textContent = section.note;
+      wrap.appendChild(note);
+    }
     return wrap;
   }
 
@@ -2596,7 +2624,10 @@ body[data-crt="full"] .prompt::after{
           else if (op.op === 'audio') op_audio(op.src, op.volume);
           else if (op.op === 'beep') op_beep(op.kind);
           else if (op.op === 'auth') op_auth(op.token);
-          else if (op.op === 'status') { if (typeof op.chrome !== 'undefined') updateStatusChrome(op.chrome); }
+          else if (op.op === 'status') {
+            if (typeof op.chrome !== 'undefined') updateStatusChrome(op.chrome);
+            if (typeof op.unread !== 'undefined') updateStatusMsg(op.unread);
+          }
           else if (op.op === 'chatCap') handleChatCap(op.n);
           else if (op.op === 'chatAnchor') op_chatAnchor();
           else if (op.op === 'panel') op_panel(op);

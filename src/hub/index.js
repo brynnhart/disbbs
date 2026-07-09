@@ -8,6 +8,11 @@ function createHub({ timeUtils, formatting }){
     clients: new Set(),
     online: new Set(),
     socketsByUser: new Map(),
+    // /away state (specs/PLACES.md Phase 3): in-memory only, keyed by
+    // lowercased canonical username. Survives reconnects within a session
+    // (callers clear it when `online` drops the user). `notified` tracks
+    // which senders already got the away auto-reply this away-session.
+    away: new Map(),
   };
 
   function sendOps(ws, ops){
@@ -70,6 +75,11 @@ function createHub({ timeUtils, formatting }){
     };
   }
 
+  // Invariant (specs/PLACES.md #5): the only things allowed to print into a
+  // room from outside it are directed human signals and true system notices
+  // (e.g. imminent shutdown). Ambient events (join/leave/jackpot/etc.) must
+  // not call this — route them to adminchat (broadcastAdminChatSystem) or
+  // the activity feed instead.
   function broadcastSystem(line){
     hub.clients.forEach(ws => sendOps(ws, [{ op:'print', text:line, cls:'dim' }]));
   }
@@ -122,6 +132,13 @@ function createHub({ timeUtils, formatting }){
     });
   }
 
+  // Ambient events (join/leave/account removal) that are adminchat-only
+  // awareness, per specs/PLACES.md — reuses broadcastAdminChatFrom's filter
+  // and day-divider handling, styled dim since no one authored the line.
+  function broadcastAdminChatSystem(text, createdAtSec){
+    broadcastAdminChatFrom(`<span class="dim">${escapeHTML(text)}</span>`, '', createdAtSec);
+  }
+
   function usersCurrentlyInChat(){
     const arr = [];
     hub.clients.forEach(ws => {
@@ -147,6 +164,7 @@ function createHub({ timeUtils, formatting }){
     broadcastSystem,
     broadcastChatFrom,
     broadcastAdminChatFrom,
+    broadcastAdminChatSystem,
     usersCurrentlyInChat,
     usersCurrentlyInAdminChat,
   };

@@ -1,10 +1,11 @@
 'use strict';
 
-function createNotificationService({ statements, helpers, hub, timeUtils }){
-  const { insertNotification, listNotificationsForUser, markAllNotificationsSeen } = statements;
+function createNotificationService({ statements, helpers, hub, timeUtils, formatting }){
+  const { insertNotification, listNotificationsForUser, markAllNotificationsSeen, countUnreadDMs } = statements;
   const { resolveUserHandle } = helpers;
   const { sendOps, hub: hubState } = hub;
   const { nowEpoch } = timeUtils;
+  const { sanitizeAndFormatDIS } = formatting;
 
   function humanizeContext(ctx){
     if (!ctx) return 'somewhere';
@@ -51,15 +52,59 @@ function createNotificationService({ statements, helpers, hub, timeUtils }){
         const sockets = hubState.socketsByUser.get(target.username);
         if (sockets && sockets.size){
           const place = humanizeContext(context);
-          const notice = `🔔 ${fromName} mentioned you in ${place}.`;
+          // fromName may be a display name carrying DIS-Markdown (color/
+          // bold/italic/underline) tags — render them, don't print literally.
+          const noticeHTML = `* ${sanitizeAndFormatDIS(fromName)} mentioned you in ${place} — /notifications to read`;
           sockets.forEach(ws => {
-            sendOps(ws, [{ op:'beep' }, { op:'print', text: notice, cls:'cyan' }]);
+            sendOps(ws, [{ op:'beep' }, { op:'printHTML', html: noticeHTML, cls:'dim' }]);
           });
+        }
+
+        // away auto-reply (specs/PLACES.md /away), once per sender per away-session
+        const awayEntry = hubState.away && hubState.away.get(target.username.toLowerCase());
+        if (awayEntry && fromUserRow && fromUserRow.username) {
+          const senderKey = fromUserRow.username.toLowerCase();
+          if (!awayEntry.notified.has(senderKey)) {
+            awayEntry.notified.add(senderKey);
+            const senderSockets = hubState.socketsByUser.get(fromUserRow.username);
+            if (senderSockets && senderSockets.size) {
+              const line = `* ${target.username} is away: ${awayEntry.message}`;
+              senderSockets.forEach(ws => sendOps(ws, [{ op: 'print', text: line, cls: 'dim' }]));
+            }
+          }
         }
       });
     } catch (e) {
       // best effort
     }
+  }
+
+  // Shared DM arrival signal (specs/PLACES.md Signals): one dim line plus
+  // the footer's unread state, delivered to every open socket of the
+  // recipient. Used by both the /dm command and Rocko's DMs so the footer
+  // MSG count stays correct regardless of who sent it.
+  function notifyDM(recipientRow, fromName){
+    if (!recipientRow || !recipientRow.username) return;
+    const sockets = hubState.socketsByUser.get(recipientRow.username);
+    if (!sockets || !sockets.size) return;
+
+    const unread = countUnreadDMs.get(recipientRow.id)?.count || 0;
+    // fromName may be a display name carrying DIS-Markdown (color/bold/
+    // italic/underline) tags — render them, don't print literally.
+    const noticeHTML = `* incoming from ${sanitizeAndFormatDIS(fromName || 'someone')} — /messages to read`;
+
+    sockets.forEach(ws => {
+      if (!ws.__ctx) ws.__ctx = {};
+      const now = Date.now();
+      const ops = [];
+      if (!ws.__ctx._lastMentionSound || now - ws.__ctx._lastMentionSound > 400) {
+        ws.__ctx._lastMentionSound = now;
+        ops.push({ op: 'audio', src: '/static/sounds/mention.wav', volume: 0.8 });
+      }
+      ops.push({ op: 'printHTML', html: noticeHTML, cls: 'dim' });
+      ops.push({ op: 'status', unread });
+      sendOps(ws, ops);
+    });
   }
 
   function listMentionsForUser(userId, limit){
@@ -72,6 +117,7 @@ function createNotificationService({ statements, helpers, hub, timeUtils }){
 
   return {
     notifyMentions,
+    notifyDM,
     extractMentionsFromText,
     humanizeContext,
     listMentionsForUser,
