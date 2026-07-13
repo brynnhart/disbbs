@@ -18,6 +18,7 @@ const PORT = process.env.PORT || 3000;
 const SSO_SECRET = process.env.SSO_SECRET || null;
 const AUTH_TOKEN_TTL_MS = 60 * 1000;
 const AUTH_TOKENS = new Map();
+const USERNAME_RE = /^[a-zA-Z0-9_\-\.]{2,24}$/;
 
 const SMTP_HOST = process.env.SMTP_HOST || null;
 const SMTP_PORT = parseInt(process.env.SMTP_PORT || '587', 10);
@@ -75,6 +76,15 @@ module.exports.__db = db;
 const BANNED_USERNAMES = new Set(
   db.prepare('SELECT username FROM ban_list WHERE username IS NOT NULL').all().map(r => r.username.toLowerCase())
 );
+
+try {
+  const suspicious = db.prepare("SELECT username FROM users WHERE username GLOB '*[<>&\"'']*' OR username GLOB '*[ ]*'").all();
+  if (suspicious.length) {
+    console.warn('[security] usernames with suspicious characters:', suspicious.map(u => u.username));
+  }
+} catch (e) {
+  console.error('[security] startup username check failed:', e && e.message);
+}
 
 const hubApi = createHub({ timeUtils, formatting });
 const notifications = createNotificationService({
@@ -5084,14 +5094,14 @@ function cmdBan(api, state, args) {
   if (!requireAuth(api, state)) return;
   if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
 
-  const targetName = (args[0] || '').trim();
+  const targetName = (args || []).join(' ').trim();
   if (!targetName) { api.print('Usage: /ban <username>', 'yellow'); return; }
   if (targetName.toLowerCase() === state.username.toLowerCase()) {
     api.print('You cannot ban yourself.', 'red'); return;
   }
 
   const target = getUserByName.get(targetName);
-  if (!target) { api.print(`User not found: ${targetName}`, 'red'); return; }
+  if (!target) { api.print(`User not found: ${escapeHTML(targetName)}`, 'red'); return; }
   if (target.is_admin) { api.print('Cannot ban an admin account.', 'red'); return; }
 
   const userId = target.id;
@@ -5166,11 +5176,11 @@ function cmdBan(api, state, args) {
     }
   }
 
-  api.print(`Banned: ${target.username}`, 'red');
+  api.print(`Banned: ${escapeHTML(target.username)}`, 'red');
   api.print(`  IP: ${target.registration_ip || '(none on record)'}`, 'dim');
   api.print(`  Fingerprint: ${target.fingerprint_hash ? target.fingerprint_hash.slice(0, 16) + '…' : '(none on record)'}`, 'dim');
   api.print(`  Deleted: ${summary.chatMsgs} chat msgs, ${summary.boardTopics} topics, ${summary.boardComments} board replies, ${summary.linkPosts} links, ${summary.linkComments} link comments, ${summary.pollVotes} votes, ${summary.pollsCreated} polls, ${summary.statusPosts} status posts, ${summary.dmSent} DMs sent, ${summary.pxArt} pixel art`, 'dim');
-  broadcastAdminChatSystem(`${target.username} has been removed.`, nowEpoch());
+  broadcastAdminChatSystem(`${escapeHTML(target.username)} has been removed.`, nowEpoch());
 }
 
 function cmdPurgeActivity(api, state, args) {
@@ -6099,6 +6109,9 @@ app.post('/api/register', (req, res) => {
 
   if (!username || !password) {
     return res.status(400).json({ ok: false, error: 'Username and password are required.' });
+  }
+  if (!USERNAME_RE.test(username)) {
+    return res.status(400).json({ ok: false, error: 'Username must be 2-24 characters and can only contain letters, numbers, underscores, hyphens, and periods.' });
   }
   if (password.length < 6) {
     return res.status(400).json({ ok: false, error: 'Password must be at least 6 characters.' });
