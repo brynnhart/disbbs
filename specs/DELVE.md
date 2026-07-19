@@ -203,6 +203,14 @@ effective budget. That value is **added back** to the spendable budget —
 curses concentrate, they don't diminish. An item never curses the same
 stat it primarily rolls positive.
 
+**Budget terminology (ratified interpretation):** the curse-chance
+formula and the affix-count brackets both read the **raw** budget (the
+9–300 sum of offering points, pre-variance). Variance produces the
+*effective* budget, which is what gets spent; a curse's negative value
+is computed from the effective budget and converted to negative stat
+points through the same point-cost table, with that value added back to
+the spendable pool. Affix brackets use strict `<` semantics.
+
 ### Stat generation
 
 Convert budget to stats using **point costs**:
@@ -228,6 +236,11 @@ affordable point are dropped — the god keeps the change):
 
 (Weights select *which* affixes appear and how the budget splits; an
 affix that rolls 0 points after costing is dropped.)
+
+**Minimum roll:** if every affix floors to zero, the item instead
+receives +1 in its type's primary stat (weapon → ATK, armor → DEF,
+trinket → LCK). The god keeps the change, but never the whole gift —
+no real offering may produce a statless item.
 
 ### Naming grammar (deterministic from the roll)
 

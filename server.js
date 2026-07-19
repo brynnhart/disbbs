@@ -9,6 +9,7 @@ const { createDatabase } = require('./src/database');
 const { createHub } = require('./src/hub');
 const { createNotificationService } = require('./src/services/notifications');
 const { createChromeService } = require('./src/services/chrome');
+const { createDelveService } = require('./src/services/delve');
 const formatting = require('./src/utils/formatting');
 const timeUtils = require('./src/utils/time');
 
@@ -95,6 +96,7 @@ const notifications = createNotificationService({
   formatting,
 });
 const chrome = createChromeService({ db, nowEpoch: timeUtils.nowEpoch, dayKeyET: timeUtils.dayKeyET, hub: hubApi.hub, sendOps: hubApi.sendOps });
+const delve = createDelveService({ db, chrome, timeUtils, hub: hubApi.hub });
 
 function fmtCr(n) {
   return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
@@ -1033,6 +1035,10 @@ function cmdHelp(api, state){
   api.print('  /rob  [user] [resource]     Steal chrome using a mined resource as bait', 'cyan');
   api.print('  /grind   earn 1 ₢. it\'s not much, but it\'s honest work.', 'cyan');
   api.print('  /graffiti   The shared graffiti wall — draw anything', 'cyan');
+  api.print('  /gear     Your character sheet — stats, equipped gear, and inventory', 'cyan');
+  api.print('  /equip <id> <slot>    Equip an item into slot 1-4', 'cyan');
+  api.print('  /unequip <slot>       Unequip whatever is in a slot', 'cyan');
+  api.print('  /offer <mineral> <mineral> <mineral> <weapon|armor|trinket>   Offer 3 minerals to Bahamet for an item', 'cyan');
 
   if (state && state.isAdmin){
     api.hr(); api.print('Admin:', 'yellow');
@@ -4055,6 +4061,157 @@ function cmdMarketBuy(api, state, args) {
   renderMarket(api, state, flash);
 }
 
+/* ======================= Delve (character body: gear + offerings) =======================
+ * World-spine surfaces per specs/DELVE.md Session A — unbranded. No
+ * mention of the Delve, caves, depths, or fathoms belongs anywhere below;
+ * this is the DIS character sheet and the Statue of Bahamet, world
+ * features the Delve merely reads. State gating rejects in-fiction
+ * without naming what it's gating against.
+ */
+const DELVE_GATE_MESSAGES = {
+  offer:   'Your hands are full elsewhere. The altar will wait.',
+  equip:   'You cannot spare a hand for that right now.',
+  unequip: 'Whatever you are wearing, you are keeping on for now.',
+};
+
+function delveStatLine(stats) {
+  const order  = ['hp', 'atk', 'def', 'lck', 'grd'];
+  const labels = { hp: 'HP', atk: 'ATK', def: 'DEF', lck: 'LCK', grd: 'GRD' };
+  const parts = [];
+  for (const key of order) {
+    const v = stats[key];
+    if (!v) continue;
+    const text = `${v > 0 ? '+' : ''}${v} ${labels[key]}`;
+    parts.push(v < 0 ? `<span style="color:var(--spite)">${escapeHTML(text)}</span>` : escapeHTML(text));
+  }
+  return parts.length ? parts.join('  ') : '<span class="dim">no stats</span>';
+}
+
+function renderGear(api, state, flash) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  const inv = delve.getInventory(username);
+  api.batch(b => {
+    b.clear();
+    b.setInputLimit(null);
+    b.hrTitled('Character');
+    if (flash) { b.printHTML(flash); b.hr(); }
+    const eff = inv.effectiveStats;
+    b.printHTML(`  HP ${eff.hp}  ATK ${eff.atk}  DEF ${eff.def}  LCK ${eff.lck}  GRD ${eff.grd}`);
+    b.hr();
+    for (let slot = 1; slot <= 4; slot++) {
+      const item = inv.equipped[slot];
+      if (item) {
+        const curseTag = item.cursed ? ' <span style="color:var(--spite)">(cursed)</span>' : '';
+        b.printHTML(`  [${slot}] <span style="color:var(--gold)">${escapeHTML(item.name)}</span> (#${item.id})${curseTag}  ${delveStatLine(item.stats)}`);
+      } else {
+        b.printHTML(`  [${slot}] <span class="dim">(empty)</span>`);
+      }
+    }
+    b.hr();
+    if (inv.unequipped.length) {
+      b.print('Inventory:', 'cyan');
+      for (const item of inv.unequipped) {
+        const curseTag = item.cursed ? ' <span style="color:var(--spite)">(cursed)</span>' : '';
+        b.printHTML(`  #${item.id} <span style="color:var(--gold)">${escapeHTML(item.name)}</span>${curseTag}  ${delveStatLine(item.stats)}`);
+      }
+    } else {
+      b.print('Inventory: empty', 'dim');
+    }
+    b.hr();
+    b.print('— /equip <id> <slot>  •  /unequip <slot>  •  /offer <mineral> <mineral> <mineral> <weapon|armor|trinket> —', 'dim');
+  });
+}
+
+function cmdGear(api, state) {
+  renderGear(api, state);
+}
+
+function cmdOffer(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  if (delve.getActiveRun(username)) { api.print(DELVE_GATE_MESSAGES.offer, 'yellow'); return; }
+  if (!args || args.length !== 4) {
+    api.print('usage: /offer <mineral> <mineral> <mineral> <weapon|armor|trinket>', 'yellow'); return;
+  }
+
+  const minerals = args.slice(0, 3).map(a => String(a).toLowerCase().trim());
+  const itemType = String(args[3]).toLowerCase().trim();
+  const result = delve.createOffering({ username, minerals, itemType });
+
+  if (!result.ok) {
+    if (result.error === 'bad_type') {
+      api.print('Bahamet does not know that shape. Offer a weapon, armor, or trinket.', 'red'); return;
+    }
+    if (result.error === 'bad_mineral') {
+      api.print(`Bahamet does not recognize "${escapeHTML(result.mineral)}" as an offering.`, 'red'); return;
+    }
+    if (result.error === 'insufficient') {
+      const label = RESOURCES[result.mineral] ? RESOURCES[result.mineral].label : result.mineral;
+      api.print(`You don't have enough ${escapeHTML(label)} to make that offering.`, 'red'); return;
+    }
+    api.print('The offering fails.', 'red'); return;
+  }
+
+  const item = result.item;
+  api.batch(b => {
+    b.hr();
+    b.print('Bahamet regards your gift…', 'dim');
+    const curseTag = item.cursed ? ' <span style="color:var(--spite)">(cursed)</span>' : '';
+    b.printHTML(`  <span style="color:var(--gold)">${escapeHTML(item.name)}</span> (#${item.id})${curseTag}`);
+    b.printHTML(`  ${delveStatLine(item.stats)}`);
+    b.hr();
+    b.print('— /gear to view  •  /equip <id> <slot> —', 'dim');
+  });
+}
+
+function cmdEquip(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  if (delve.getActiveRun(username)) { api.print(DELVE_GATE_MESSAGES.equip, 'yellow'); return; }
+  if (!args || args.length !== 2) {
+    api.print('usage: /equip <id> <slot>   e.g. /equip 12 1', 'yellow'); return;
+  }
+
+  const itemId = parseInt(args[0], 10);
+  const slot   = parseInt(args[1], 10);
+  if (!Number.isInteger(itemId) || itemId < 1) { api.print('unknown item id.', 'red'); return; }
+  if (!Number.isInteger(slot) || slot < 1 || slot > 4) { api.print('slot must be 1-4.', 'red'); return; }
+
+  const result = delve.equipItem({ username, itemId, slot });
+  if (!result.ok) {
+    if (result.error === 'not_found') { api.print("you don't own that item.", 'red'); return; }
+    if (result.error === 'bad_slot')  { api.print('slot must be 1-4.', 'red'); return; }
+    api.print('cannot equip that right now.', 'red'); return;
+  }
+
+  const flash = result.evicted
+    ? `  equipped <span style="color:var(--gold)">${escapeHTML(result.item.name)}</span> to slot ${slot} — <span style="color:var(--gold)">${escapeHTML(result.evicted.name)}</span> returned to inventory.`
+    : `  equipped <span style="color:var(--gold)">${escapeHTML(result.item.name)}</span> to slot ${slot}.`;
+  renderGear(api, state, flash);
+}
+
+function cmdUnequip(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  if (delve.getActiveRun(username)) { api.print(DELVE_GATE_MESSAGES.unequip, 'yellow'); return; }
+  if (!args || args.length !== 1) {
+    api.print('usage: /unequip <slot>   e.g. /unequip 1', 'yellow'); return;
+  }
+
+  const slot = parseInt(args[0], 10);
+  if (!Number.isInteger(slot) || slot < 1 || slot > 4) { api.print('slot must be 1-4.', 'red'); return; }
+
+  const result = delve.unequipItem({ username, slot });
+  if (!result.ok) {
+    if (result.error === 'empty_slot') { api.print('nothing is equipped there.', 'red'); return; }
+    api.print('cannot unequip that right now.', 'red'); return;
+  }
+
+  const flash = `  unequipped <span style="color:var(--gold)">${escapeHTML(result.item.name)}</span> from slot ${slot}.`;
+  renderGear(api, state, flash);
+}
+
 /* ======================= Rob ======================= */
 const robCooldowns = new Map(); // 'attacker:target' → last attempt timestamp (ms)
 
@@ -5354,6 +5511,12 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'buy':      cmdMarketBuy(api, state, args);  return true;
     case 'rob':      cmdRob(api, state, args);        return true;
     case 'grind':    cmdGrind(api, state);             return true;
+
+    /* Character body (world spine — specs/DELVE.md Session A) */
+    case 'gear':     cmdGear(api, state);        return true;
+    case 'equip':    cmdEquip(api, state, args);   return true;
+    case 'unequip':  cmdUnequip(api, state, args); return true;
+    case 'offer':    cmdOffer(api, state, args);   return true;
 
     /* Games */
     case 'games':    routeGo(api, state, 'games'); return true;

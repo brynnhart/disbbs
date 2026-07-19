@@ -223,6 +223,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
   ensureGraffitiSchema(db);
   ensureHackSchema(db);
   ensureDotsSchema(db);
+  ensureDelveSchema(db);
 
   const alreadyMigrated = db.prepare('SELECT COUNT(1) AS n FROM activity_feed').get().n;
   if (alreadyMigrated === 0) {
@@ -1590,6 +1591,26 @@ function ensureHackSchema(db) {
       word_length INTEGER NOT NULL DEFAULT 5,
       PRIMARY KEY (username, play_date)
     );
+  `);
+}
+
+// Delve — Session A creates delve_items only. Grown additively per
+// session (see specs/DELVE.md): Session B adds delve_merchant_purchases,
+// Session C adds delve_runs / delve_daily / delve_log.
+function ensureDelveSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS delve_items (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      username      TEXT NOT NULL,
+      name          TEXT NOT NULL,
+      item_type     TEXT NOT NULL,     -- 'weapon' | 'armor' | 'trinket'
+      stats         TEXT NOT NULL,     -- JSON {hp,atk,def,lck,grd} (any subset, curses negative)
+      budget        INTEGER NOT NULL,
+      cursed        INTEGER NOT NULL DEFAULT 0,
+      equipped_slot INTEGER,           -- NULL or 1..4, UNIQUE per user per slot (enforce in code)
+      created_at    INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_delve_items_user ON delve_items(username);
   `);
 }
 
