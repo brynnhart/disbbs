@@ -48,7 +48,24 @@ token/frame system.
    the model here — Delve is a full domain.)
 8. **Tone rules are load-bearing** (see next section). Flavor text that
    violates them is a bug, not a style choice.
-9. **One phase per session.** Complete a phase, summarize, stop for
+9. **Commands are global, per the CLAUDE.md world model.** Delve adds
+   these global verbs and no others: `/delve` (the caves view — tableau,
+   status, command menu), `/descend`, `/offer`, `/gear`, `/equip`,
+   `/unequip`, `/sooth`, `/fathoms`. All work from anywhere on the BBS;
+   entrance-only functions are gated by *game state* (no active run
+   below the surface), never by screen, and rejections are in-fiction
+   ("You are fourteen fathoms deep. The altar is far above you.").
+   Naming discipline: no generic nouns — which is why records are
+   `/fathoms`, not `/records`. If a phase seems to need another verb,
+   stop and redesign.
+10. **Delve is invisible to presence.** `/delve` and its verbs are
+   terminal renders and the run modal — no new routed screen, no
+   `currentScreen` changes, so coarse locations are untouched by
+   construction. No roster, panel, or presence surface may ever show
+   that someone is delving, their depth, or their pocket. Depth
+   bragging happens only through published records: the boards, the
+   Memorial Wall, and the activity feed.
+11. **One phase per session.** Complete a phase, summarize, stop for
    review. Commit per phase. Do not start the next phase without approval.
 
 ---
@@ -94,6 +111,13 @@ is no "deposit" interaction).
 ---
 
 ## Player model
+
+**Branding note (per the CLAUDE.md world model):** stats and equipment
+are the shared **character body** — world spine, not Delve features.
+They ship first, unbranded, as the DIS character sheet; the Delve is
+their first reader, not their owner. `/gear`, `/equip`, `/unequip`, and
+`/offer` are announced as world features. Nothing in their views or
+copy may imply they exist only for the Delve.
 
 ### Stats
 
@@ -221,7 +245,9 @@ affix that rolls 0 points after costing is dropped.)
   - Weapon: Blade, Cleaver, Maul, Fang, Scourge, Pick
   - Armor: Shroud, Carapace, Vestment, Aegis, Pall, Cuirass
   - Trinket: Charm, Locket, Idol, Phylactery, Censer, Knucklebone
-- **Stat suffix** from the highest-point positive stat:
+- **Stat suffix** from the positive stat that received the greatest
+  **budget spend** (not the highest raw point total — HP's cheap point
+  cost would otherwise make "of Marrow" dominate everything):
   - ATK: of Rending, of the Red Rite, of Sharp Prayers
   - DEF: of the Bulwark, of Stone Patience, of the Sealed Door
   - HP: of Deep Roots, of Marrow, of the Long Vigil
@@ -315,22 +341,51 @@ Per-zone base stats × per-fathom growth. One constants table drives it all
 
 (Naked player comfortably handles fathoms 1–5; full common-tier gear
 clears Zone 1; the wall between zones is intentional and gear-gated.
-These numbers are starting guesses — Phase 1's gate includes a simulation
-script, see Phases.)
+These numbers are starting guesses — Session C includes a simulation
+script, see the Release plan.)
 
-### Enemy roster (name + flavor line each; stats come from the table)
+### Enemy roster (approved copy — written and tone-reviewed in an
+earlier build; use verbatim, stats come from the scaling table)
 
-- **Zone 1 — The Gravemouth:** Bone Mouse, Tallow Wisp, Grave Beetle,
-  Rag Wraith, Ossuary Rat, Candle Mite
-- **Zone 2 — The Sunken Chapels:** Drowned Ghoul, Censer Haunt, Vestry
-  Crawler, Choir of Teeth, Palsied Acolyte, Font Leech
-- **Zone 3 — The Old Workings:** Delver Who Stayed, Wrought Warden,
-  Gallery Stalker, Lantern-Eater, The Foreman's Echo, Chainswarm
-- **Zone 4 — The Nameless Deep:** Goo-Touched Mass, The Unshaped,
-  Fathomer, Alexandrite Angel, It That Tithes, The Third Shadow
+**Zone 1 — The Gravemouth:** Bone Mouse — "skitters from a crack in the
+wall, more joint than flesh." · Tallow Wisp — "drifts close, guttering,
+smelling of old candle-fat." · Grave Beetle — "clatters over loose
+stone, carapace stitched with old coin." · Rag Wraith — "unspools from a
+burial shroud, reaching with borrowed hands." · Ossuary Rat — "bares
+teeth grown long on marrow it wasn't owed." · Candle Mite (swarm) —
+"crowds the dark, each one a guttering ember."
 
-Zone 4 enemies should read as the Goo's territory or its cousins' — GvG
-lore leaks in here. Flavor lines written at Phase 1, review-gated.
+**Zone 2 — The Sunken Chapels:** Drowned Ghoul — "hauls itself from the
+chapel floodwater, bloated with rite-wine." · Censer Haunt — "swings on
+a chain no hand holds, smoke curdling into a shape." · Vestry Crawler —
+"drags itself between the pews on too many elbows." · Choir of Teeth —
+"opens a hundred mouths and sings off-key." · Palsied Acolyte —
+"shambles forward, still murmuring a rite it forgot the ending to." ·
+Font Leech — "uncoils from the baptismal font, fat on stolen blessings."
+
+**Zone 3 — The Old Workings:** Delver Who Stayed — "turns toward you,
+wearing gear you nearly recognize." · Wrought Warden — "grinds upright
+on iron joints, its light without a source." · Gallery Stalker — "keeps
+pace along the tunnel roof, patient as rust." · Lantern-Eater —
+"swallows the last of the light and asks, politely, for more." · The
+Foreman's Echo — "repeats an order to workers three centuries gone." ·
+Chainswarm — "rises rattling from the workings, each link hungry on its
+own."
+
+**Zone 4 — The Nameless Deep:** Goo-Touched Mass — "sloughs toward you,
+wrong in a way the eye slides off." · The Unshaped — "hasn't decided
+what it is yet, and studies you for ideas." · Fathomer — "measures the
+distance between you and the dark, and finds it small." · Alexandrite
+Angel — "unfolds too many wings, each one a different color of wrong." ·
+It That Tithes — "asks for a piece of you, and doesn't wait for an
+answer." · The Third Shadow — "falls the wrong direction, and it is not
+alone."
+
+**Zone transitions (approved copy, one-time beat per zone per run):**
+Z1 "The Gravemouth swallows you whole. The dark is older than you are."
+· Z2 "The chapel air tastes of drowned incense." · Z3 "The tunnels here
+are cut too straight to be natural. Something worked this stone." · Z4
+"The dark stops behaving. You are somewhere the ancestors didn't name."
 
 ### Loot (per fight won) — the pocket
 
@@ -401,15 +456,30 @@ Derived from `delve_log` by query (no separate tables):
 - **The Memorial Wall** — deepest *deaths*, all time, carved-stone styled.
   Grim honor. ("Here fell <handle>, at 44 fathoms.")
 
-Activity feed hooks (`addActivityEvent('delve', …)`): new weekly-board
+**Sidebar (SIDEBAR.md integration).** The GAMES panel's YOUR STATS
+section gains exactly one line, following the existing wordle/hack
+pattern in `panelForGames`: `delve: N fights left` (or
+`delve: camped at N fathoms` when a camped run exists, or
+`delve: out of fights today`). One line, no new section, no other margin
+content — further Delve margin presence is out of scope per SIDEBAR.md.
+
+Activity feed hooks (`addActivityEvent('games', 'delve_…', …)` — category
+`games`, so lines surface in the arcade sidebar's ACTIVITY section like
+the other games): new weekly-board
 leader, first Zone 3 / Zone 4 reach per user, deaths below 30 fathoms,
 Alexandrite-grade offerings, cursed-item jackpots. Per CLAUDE.md the feed
 is ambience, not spam: throttle repeatable Delve events to one per user
-per day (graffiti-log pattern); one-time milestones are exempt.
+per day (graffiti-log pattern); one-time milestones are exempt. All
+lines must pass the PLACES.md editorial policy — celebration and
+invitation, not logging. A routine surfacing is a log line; a first
+descent below 30 fathoms is feed-worthy.
 
 ---
 
-## Database (all new; `ensureDelveSchema(db)` in src/database/index.js)
+## Database (all new; `ensureDelveSchema(db)` in src/database/index.js —
+grown additively per session: Session A creates delve_items; Session B
+adds delve_merchant_purchases; Session C adds delve_runs, delve_daily,
+delve_log)
 
 ```sql
 -- One live/camped run per user. State is a JSON blob: this is a single
@@ -440,6 +510,15 @@ CREATE TABLE IF NOT EXISTS delve_daily (
   fights_used  INTEGER NOT NULL DEFAULT 0,
   bonus_fights INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (username, day)
+);
+
+-- Sooth's per-user daily purchase caps (created in Session B).
+CREATE TABLE IF NOT EXISTS delve_merchant_purchases (
+  username TEXT NOT NULL,
+  day      TEXT NOT NULL,          -- dayKeyET()
+  resource TEXT NOT NULL,
+  qty      INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (username, day, resource)
 );
 
 CREATE TABLE IF NOT EXISTS delve_log (
@@ -482,11 +561,46 @@ action (equipment is authoritative in SQL, not in the blob).
 
 ---
 
-## WebSocket protocol (all additive)
+## Interaction model v2 — global verbs, one district
 
-**Command:** `case 'delve': cmdDelve(api, state); return true;` →
-`sendOps([{op:'openDelve'}])`. List `/delve` in `renderGames` with a
-one-liner and today's fights-remaining, matching the existing entries.
+Per the CLAUDE.md world model, the Delve is a **district**: it consumes
+minerals (offerings), produces chrome, minerals, and gear, and lives
+fictionally at the Ancestral Caves. Its verbs are **global commands**,
+exactly like `/mining` → `/market` → `/sell` — each one command, one
+function, one view. There is no routed caves screen and no place-scoped
+handler; `/delve` is the district's front door and menu, and the other
+verbs work from anywhere their game state allows.
+
+| command | function |
+|---------|----------|
+| `/delve` | the caves view: entrance tableau, your status (fights left, camped-run notice, equipped summary), and the menu of the verbs below |
+| `/descend` | open the run modal (starts a run, or resumes an active/camped one) |
+| `/offer <mineral> <mineral> <mineral> <weapon\|armor\|trinket>` | make an offering; the god's gift prints in the terminal |
+| `/gear` | terminal view: 4 slots + inventory, stats, cursed stats in spite-red |
+| `/equip <id> <slot>` / `/unequip <slot>` | change equipment |
+| `/sooth` | terminal view: the stall — daily stock + your sellable gear with prices |
+| `/sooth buy <mineral>` / `/sooth sell <id>` | trade with Sooth |
+| `/fathoms` | terminal view: weekly board, all-time board, the Memorial Wall |
+
+**State gating (server-enforced, in-fiction rejections):** `/offer`,
+`/equip`, `/unequip`, and `/sooth` actions require no active run below
+the surface — mid-run they reject with depth-flavored refusals.
+`/descend` with an exhausted fight budget and no active run rejects
+with "The cave will not have you again today." Views (`/delve`,
+`/gear`, `/sooth` stock, `/fathoms`) always work.
+
+All entrance functions are **server-rendered command handlers** — they
+call the delve service and print via `api` (the `/market` pattern). They
+are not WS message types. Mid-run pocket-equip remains in the modal (it
+happens at depth, between encounters, per the Equipment rules).
+
+## Run-modal WebSocket protocol
+
+The retired entrance message types (`delve_offer`, `delve_equip`,
+`delve_unequip`, `delve_sell`, `delve_buy`, `delve_board`) and the
+`delve_offer_result` op must be **removed** — sanctioned as the one
+exception to "additive protocol" because the feature never shipped.
+The surviving protocol serves only the run modal:
 
 **Client → server (`msg.type`):**
 
@@ -499,21 +613,14 @@ one-liner and today's fights-remaining, matching the existing entries.
 | `delve_event_choice` | `{choice}` | event only; 'accept'/'decline' etc. |
 | `delve_surface` | — | idle only |
 | `delve_camp` | — | idle only |
-| `delve_equip` | `{itemId?|pocketIndex?, slot}` | depth 0: any owned item; mid-run idle: pocket items only |
-| `delve_unequip` | `{slot}` | depth 0 only |
-| `delve_offer` | `{minerals:[r,r,r], itemType}` | depth 0 only |
-| `delve_sell` | `{itemId}` | depth 0 only |
-| `delve_buy` | `{resource}` | depth 0 only; Sooth's stock |
-| `delve_board` | — | leaderboards + memorial wall |
+| `delve_pocket_equip` | `{pocketIndex, slot}` | mid-run idle only; pocket items only |
 
 **Server → client (ops):**
 
 | op | payload |
 |----|---------|
-| `openDelve` | — |
-| `delve_state` | full snapshot: run state (or `{noRun:true}` + entrance data), effective stats, equipment, inventory, fights remaining, merchant stock, `narration:[{text, cls}]` |
-| `delve_offer_result` | the granted item (for the reveal animation) — followed by a `delve_state` |
-| `delve_board` | leaderboard rows + memorial rows |
+| `openDelve` | — (emitted by `/descend`, never by `/delve`) |
+| `delve_state` | full snapshot: run state, effective stats, equipment, pocket, fights remaining, `narration:[{text, cls}]` |
 | `delve_error` | `{message}` — mirrors `hack_error` style |
 
 Every action handler: `requireAuth` → validate against current
@@ -531,15 +638,23 @@ a handler `async` mid-mutation).
 
 ## UI (client, `public/index.html`)
 
-Standard modal conventions per CLAUDE.md: `#delve-overlay` containing
-`#delve-modal`, built with `document.createElement`, removed entirely on
-close, key handlers attach on open / detach on close and never leak into
-the terminal. Born into the PHOSPHOR system: `.term-window` frame,
-`.term-titlebar` (`═[ THE ANCESTRAL CAVES ]═`), `[X]` close, overlay
-`rgba(10,6,18,.9)`, Esc-to-close (closing ≠ surfacing; the run persists — subtle hint line
-when closing mid-run: "The cave keeps your place.").
+**Terminal.** `cmdDelve` prints the caves view: tableau, status, and
+command menu. `/gear`, `/sooth`, `/fathoms`, and offering results are
+server-rendered terminal views in the `/market` style — box-drawing
+frames welcome, no client-side state. The Records view is carved-stone
+styled in phosphor; the Memorial Wall lists the deepest deaths. Item
+names print in `--gold`, cursed stats in `--spite`, mineral names in
+their `RESOURCES` colors.
 
-**Layout, top to bottom:**
+**The run modal (combat only).** Standard modal conventions per
+CLAUDE.md: `#delve-overlay` containing `#delve-modal`, built with
+`document.createElement`, removed entirely on close, key handlers attach
+on open / detach on close and never leak into the terminal. `.term-window`
+frame, `.term-titlebar` (`═[ THE DELVE ]═`), `[X]` close, Esc-to-close
+(closing ≠ surfacing; the run persists — hint line: "The cave keeps your
+place."). Opened only by `/descend`.
+
+**Modal layout, top to bottom:**
 1. **Depth strip** — the signature element. Neon progress bar in mineral
    colors marking zone bands, current fathom numeral glowing
    `--phos-bright`, zone name beneath in `--phos-dim`.
@@ -548,70 +663,92 @@ when closing mid-run: "The cave keeps your place.").
    `IN POCKET: 262 ₢ · 3 malachite · 1 vitriol · 1 item` and
    `FIGHTS LEFT: ▓▓▓▓▓▓░░░░░░░░░` (hack-style block meter).
 3. **Scene panel** — narration log (scrolling, newest last), enemy line
-   with HP bar during combat (`--spite` bar), event prompt during events,
-   entrance tableau at depth 0 (compact box-drawing art: statue / mouth /
-   merchant — keep it under ~12 rows).
+   with HP bar during combat (`--spite` bar), event prompts with choice
+   buttons.
 4. **Action bar** — context-sensitive `.term-btn` keycaps:
-   - idle: `[DESCEND]` `[SURFACE]` `[CAMP]` (+ `[EQUIP]` if pocket items)
+   - idle: `[DESCEND]` `[SURFACE]` `[CAMP]` (+ `[EQUIP]` when pocket
+     items exist → minimal in-modal pocket-equip prompt, the one
+     equipment act that happens at depth)
    - combat: `[ATTACK]` `[FLEE]`
    - event: choice buttons
-   - depth 0: `[DESCEND]` `[OFFER]` `[EQUIP]` `[TRADE]` `[RECORDS]`
-5. **Sub-panels** (depth 0, swap into the scene panel): Offering altar
-   (3 mineral pickers + type picker + `[MAKE OFFERING]`, item reveal with
-   a short glow-in), Equipment (4 slots + inventory list, stat deltas
-   shown before confirm), Sooth's stall, Records (boards + memorial wall).
+   On surfacing or death the modal closes itself back to the place, and
+   the outcome (bank summary or the wake-at-the-statue beat) prints in
+   the terminal.
+
+No entrance sub-panels exist in the modal — offering altar, equipment
+management, Sooth, and records are all terminal territory.
 
 Palette semantics: system voice `--phos`; treasure/pocket `--gold`;
-danger/enemy `--spite`; success/banked `--venom`; mineral names in their
-`RESOURCES` colors. Respect `prefers-reduced-motion` for the depth-bar
-pulse and item-reveal effects.
+danger/enemy `--spite`; success/banked `--venom`. Respect
+`prefers-reduced-motion` for the depth-bar pulse.
 
 ---
 
-## Implementation phases (Claude Code; one per session; gate each)
+## Release plan & implementation sessions (fresh build; one production push per release)
 
-**Phase 0 — Skeleton & schema.**
-`ensureDelveSchema`; create `src/services/delve.js` with the service
-factory and a constants block (all tuning tables from this doc in one
-exported object — the single tuning surface); `/delve` command +
-`openDelve` op, modal shell with depth strip + entrance tableau +
-`delve_getstate` returning a stub `{noRun:true}` snapshot. Games menu
-entry. *Gate: modal opens/closes cleanly desktop + mobile, screenshot,
-schema visible in sqlite, zero touches to existing tables.*
+**This is a clean-tree build.** An earlier build of this feature was
+developed and then deliberately reverted before commit; no Delve code
+exists in the codebase. Where this spec marks copy as "approved," it
+was reviewed during that build — reuse it verbatim rather than
+rewriting. Each release below is self-contained and carries the promise
+of the next; sessions are one-per-sitting with a stop-for-review gate.
 
-**Phase 1 — The run engine.**
-Descend/fight/attack/flee/surface/death, enemy scaling, chrome+mineral
-loot to pocket, banking transaction, daily fights, persistence across
-reconnect/restart, narration lines. No items, no events, no camping.
-*Gate: (a) full run round-trip on live board — descend, die, descend,
-surface, balances correct; (b) kill the server mid-run, restart, resume;
-(c) a `scripts/delve-sim.js` Monte-Carlo (naked player + three gear
-archetypes vs. the scaling table, 10k runs) with results reviewed against
-the intended zone walls before tuning is accepted.*
+**Session A → Release 1: The Body & The Statue.**
+From scratch: `ensureDelveSchema` with `delve_items` only;
+`src/services/delve.js` — `createDelveService({ db, chrome, timeUtils,
+hub })` exporting `DELVE_CONSTANTS` (every tuning table in this spec in
+one object, the single tuning surface) and implementing the offering
+generator (budget → variance → curse → affixes → point costs), the
+naming grammar (budget-spend suffix rule), and
+`computeEffectiveStats(username)`. Global command handlers printing via
+`api` in the `/market` style: `/gear`, `/equip <id> <slot>`,
+`/unequip <slot>`, `/offer <m> <m> <m> <type>`, with state gating
+per Interaction Model v2 (gates ship now even though no run can exist
+yet). Unbranded per the Player model note — no Delve, caves, or game
+references anywhere in Release 1 surfaces. No modal code of any kind
+this session. *Gate: full offer→gear→equip→unequip loop via typed
+commands on the live board; transaction audit (minerals debited + item
+row in one transaction); bad-input rejections in-fiction with no
+mutation; curse spot-check (200 draws at budget 300 vs ~35% expected);
+20 sample names reviewed — weapons carry ATK suffixes; grep confirms
+zero forbidden vocabulary and zero Delve branding.*
 
-**Phase 2 — Offerings & equipment.**
-Offering flow (budget/variance/curse/statgen/naming), item persistence,
-equip/unequip with slot rules, effective stats in combat, mid-run pocket
-equip, Sooth sell/buy. *Gate: offer→equip→fight-stronger round-trip;
-name grammar spot-check (20 sample items reviewed for tone); sell path
-deletes only the sold item row; transaction audit on offer + banking.*
+**Session B → Release 2: Sooth arrives.**
+Add `delve_merchant_purchases`; `/sooth`, `/sooth buy <mineral>`,
+`/sooth sell <id>` per the Merchant sections (daily seeded stock,
+market × 1.25 pricing, per-user cap 5, sale = floor(budget × 0.4) and
+the only row deletion Delve ever performs); stall view in the `/market`
+style; one activity-feed arrival line (celebration policy). *Gate:
+buy/sell round-trips with cap enforcement; equipped/foreign-item sales
+rejected without mutation; Sooth's bits tone-reviewed.*
 
-**Phase 3 — Events & camping.**
-Event deck, choice events, bonus fights, camping + ambush resume.
-*Gate: each event forced via a temporary admin-only test hook and
-verified; camp → next-day resume verified with clock roll.*
+**Session C → Release 3: The Gravemouth opens.** (Two sittings, one
+production push: C1 then C2.)
+*C1 — the run engine + modal:* `delve_runs`/`delve_daily`/`delve_log`;
+the full run lifecycle per The Delve sections (descend/combat/flee/
+surface/death/banking, daily fights, enemy scaling with the approved
+roster copy, loot incl. item drops, persistence across
+reconnect/restart, full-snapshot protocol); `/delve` (caves view) +
+`/descend` + the run-only modal per the UI section, with mid-run
+pocket-equip. *Gate: original run-engine gates — live round-trip with
+balance audit, kill-server-mid-combat resume, two-tab no-double-resolve,
+plus scripts/delve-sim.js (10k runs × naked/common/uncommon/rare
+archetypes built via the real generator) with results reported, no
+self-tuning.*
+*C2 — events & camping:* the full event deck, choice events, bonus
+fights, camping + ambush resume, per the Events and Camping sections.
+*Gate: each event forced via a temporary sysop-only hook then removed;
+restart-mid-choice resume; camp/ambush rates verified; sim extended
+with the event deck and the full table reported for Punky's tuning
+decision; all narration tone-reviewed.*
 
-**Phase 4 — Records & feed.**
-Leaderboards, memorial wall, activity events, `renderGames` status line
-polish. *Gate: boards populate from real log rows; feed lines read in
-tone.*
-
-**Phase 5 — Flavor & polish pass.**
-All narration/flavor text finalized (enemy flavor lines, zone
-transitions, event prose, Sooth's bits, death/reconstitution beats) —
-reviewed against the tone rules as a checklist. Item reveal animation,
-depth-strip pulse, reduced-motion audit, mobile layout pass.
-*Gate: Punky reads every string. Final full walkthrough.*
+**Session D → Release 4: `/fathoms`.**
+The records view (weekly board, all-time, Memorial Wall — depth counts
+only on surfaced runs), remaining activity feed lines per the feed
+policy, `renderGames`/`panelForGames` lines updated to what's live,
+final flavor pass against the tone checklist, reduced-motion audit,
+mobile pass. *Gate: boards populate from real log rows; Punky reads
+every string; final full walkthrough.*
 
 ---
 

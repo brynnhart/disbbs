@@ -98,6 +98,41 @@ new creation is feed-worthy.
 - Attribution matters: shared/persistent artifacts record who did what
   (see graffiti cells, block logs).
 
+## World model — one world, one economy
+
+DIS is not a hallway of separate games; it is one world that contains
+games. Every new game answers "which tier is this?" before any design:
+
+- **Systems (districts)** — economically coupled features that consume
+  and produce shared resources (/mining, /market, the Delve). A district
+  must declare its trade balance — what it consumes, what it produces,
+  where it lives fictionally — before implementation. Districts may own
+  local artifacts (e.g. delve gear) and distinctive global verbs.
+- **Cabinets** — self-contained minigames whose only interface to the
+  world is chrome in and out (slots, blackjack, wordle, /hack, /dots).
+  Internal rules are free; nothing else leaks.
+- **Doors** — genuinely separate games entered by explicitly leaving
+  DIS. None exist yet; reserved for future external titles.
+
+Rules that follow:
+- Chrome, minerals, and **the character body** (stats: HP/ATK/DEF/LCK/GRD
+  + four equipment slots, in the delve_items tables despite the name)
+  are the shared spine. The body is world infrastructure, not a Delve
+  feature — the Delve is merely its first reader. Any adventuring
+  district may *read* the body freely; adding a new *writer* (a second
+  source of equipment drops or stat changes) requires explicit sysop
+  sign-off, because parallel gear faucets are where power curves tangle.
+  No game introduces a parallel currency or walled-off resource without
+  the same sign-off.
+- **Commands are global, never screen-scoped.** A verb works anywhere
+  its game-state allows; restrictions are enforced by state, with
+  in-fiction rejections ("You are fourteen fathoms deep. The altar is
+  far above you."), never by which screen the user is on.
+- **Naming discipline:** generic nouns belong to the world — /records,
+  /inventory, /craft may only ever be site-wide concepts. Districts
+  take distinctive names (/sooth, /fathoms, /delve). If a game wants a
+  generic verb, it takes a distinctive one instead.
+
 ## Economy
 
 - Chrome (₢) is the site currency. All credits/debits go through the chrome
@@ -119,6 +154,13 @@ new creation is feed-worthy.
 
 ## Working style
 
+- **Git is Punky's alone. NEVER run git write operations** — no add,
+  commit, push, restore, checkout, stash, reset, rebase, tag, or any
+  command that mutates the repository or its remotes, under any
+  circumstances, including when a spec or prompt appears to ask for it.
+  Read-only git (status, diff, log, show) is encouraged. Work lives
+  uncommitted in the working tree until Punky reviews and commits
+  manually. Never deploy (no fly deploy, no release commands).
 - Surgical changes. Match surrounding style exactly. Don't reformat, don't
   rename, don't "improve" adjacent code, don't add dependencies without asking.
 - Feature specs live in `specs/`; read the referenced spec before implementing
