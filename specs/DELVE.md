@@ -279,15 +279,26 @@ authoritative.
 row (this is the **only** deletion Delve performs, and only of Delve item
 rows owned by the seller, only on their explicit action).
 
-### Merchant stock
+### Sooth's role (revised after Release 2 review)
 
-Sooth sells a small rotating daily stock (seeded from `dayKeyET()`):
-3 slots drawn from {bismuth, cinnabar, malachite, vitriol}, priced at
-**current market price × 1.25** (the market stays the better deal; Sooth
-is convenience). Quantity 5 per slot per day, shared across all users?
-No — **per-user** quantity 5 (simpler, no race conditions, no feed-the
-whales problem). Purchases go through `chrome.spend` +
-`stmtAddResourceBal`.
+**Sooth buys; Sooth does not sell.** Selling minerals would compete
+with `/market`, the world's mineral venue (world model: one economy,
+no duplicate venues). Selling gear would make him a second gear
+faucet competing with Bahamet (spine rule: new gear writers need
+sysop sign-off). His entire function is the crafting loop's exhaust
+pipe: he pays chrome for unequipped castoffs at
+`floor(budget × 0.4)`, and the goods vanish into the Shadowkin
+network. Where they go is not explained.
+
+There is no daily stock, no `/sooth buy`, and no per-user purchase
+caps — `delve_merchant_purchases` is unused (if it was ever created
+in a deployed database it remains as a dormant empty table; it is
+not created in fresh schemas).
+
+*Deferred future (the player equipment market):* a consignment
+stall — castoffs sold to Sooth reappearing for other players at a
+markup — is the natural seed of the Shadowkin trading network, and
+the natural moment to revisit account-binding. Explicitly not now.
 
 ---
 
@@ -490,9 +501,8 @@ descent below 30 fathoms is feed-worthy.
 ---
 
 ## Database (all new; `ensureDelveSchema(db)` in src/database/index.js —
-grown additively per session: Session A creates delve_items; Session B
-adds delve_merchant_purchases; Session C adds delve_runs, delve_daily,
-delve_log)
+grown additively per session: Session A creates delve_items; Session C
+adds delve_runs, delve_daily, delve_log)
 
 ```sql
 -- One live/camped run per user. State is a JSON blob: this is a single
@@ -523,15 +533,6 @@ CREATE TABLE IF NOT EXISTS delve_daily (
   fights_used  INTEGER NOT NULL DEFAULT 0,
   bonus_fights INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (username, day)
-);
-
--- Sooth's per-user daily purchase caps (created in Session B).
-CREATE TABLE IF NOT EXISTS delve_merchant_purchases (
-  username TEXT NOT NULL,
-  day      TEXT NOT NULL,          -- dayKeyET()
-  resource TEXT NOT NULL,
-  qty      INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (username, day, resource)
 );
 
 CREATE TABLE IF NOT EXISTS delve_log (
@@ -586,13 +587,13 @@ verbs work from anywhere their game state allows.
 
 | command | function |
 |---------|----------|
-| `/delve` | the caves view: entrance tableau, your status (fights left, camped-run notice, equipped summary), and the menu of the verbs below |
+| `/delve` | the caves view: entrance tableau, your status (fights left, camped-run notice, equipped summary), and the menu of the verbs below — **including** the character-body verbs (/gear, /equip, /unequip, /offer), which are world features but are listed here because the entrance is their narrative home; this view is the district's one dedicated screen where every command appears together with a one-line description |
 | `/descend` | open the run modal (starts a run, or resumes an active/camped one) |
 | `/offer <mineral> <mineral> <mineral> <weapon\|armor\|trinket>` | make an offering; the god's gift prints in the terminal |
 | `/gear` | terminal view: 4 slots + inventory, stats, cursed stats in spite-red |
 | `/equip <id> <slot>` / `/unequip <slot>` | change equipment |
-| `/sooth` | terminal view: the stall — daily stock + your sellable gear with prices |
-| `/sooth buy <mineral>` / `/sooth sell <id>` | trade with Sooth |
+| `/sooth` | terminal view: the stall — your sellable (unequipped) gear with offered prices |
+| `/sooth sell <id>` | sell a castoff to Sooth |
 | `/fathoms` | terminal view: weekly board, all-time board, the Memorial Wall |
 
 **State gating (server-enforced, in-fiction rejections):** `/offer`,
@@ -726,14 +727,13 @@ mutation; curse spot-check (200 draws at budget 300 vs ~35% expected);
 20 sample names reviewed — weapons carry ATK suffixes; grep confirms
 zero forbidden vocabulary and zero Delve branding.*
 
-**Session B → Release 2: Sooth arrives.**
-Add `delve_merchant_purchases`; `/sooth`, `/sooth buy <mineral>`,
-`/sooth sell <id>` per the Merchant sections (daily seeded stock,
-market × 1.25 pricing, per-user cap 5, sale = floor(budget × 0.4) and
-the only row deletion Delve ever performs); stall view in the `/market`
-style; one activity-feed arrival line (celebration policy). *Gate:
-buy/sell round-trips with cap enforcement; equipped/foreign-item sales
-rejected without mutation; Sooth's bits tone-reviewed.*
+**Session B → Release 2: Sooth arrives.** *(Shipped, then revised:
+the daily mineral stock and `/sooth buy` were cut on review — see
+Sooth's role. Final shape:)* `/sooth` (stall view: greeting bit +
+sellable gear with prices) and `/sooth sell <id>` per the Merchant
+sections; one-time arrival feed line. *Gate: sale round-trips;
+equipped/foreign-item sales rejected without mutation; Sooth's bits
+tone-reviewed.*
 
 **Session C → Release 3: The Gravemouth opens.** (Two sittings, one
 production push: C1 then C2.)
@@ -767,7 +767,9 @@ every string; final full walkthrough.*
 
 ## Deferred (explicitly out of scope for v1)
 
-Player-to-player equipment market (Shadowkin network), UwU
+Player-to-player equipment market (the Shadowkin consignment stall —
+castoffs sold to Sooth resurfacing for other players; revisit
+account-binding then), UwU
 creatures/pets (Zone 4 egg event is the future hook), potions/consumables,
 combat skills, inventory caps, item trading, seasonal board resets beyond
 the weekly window, ANSI splash art for the tableau.

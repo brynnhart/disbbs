@@ -1039,6 +1039,7 @@ function cmdHelp(api, state){
   api.print('  /equip <id> <slot>    Equip an item into slot 1-4', 'cyan');
   api.print('  /unequip <slot>       Unequip whatever is in a slot', 'cyan');
   api.print('  /offer <mineral> <mineral> <mineral> <weapon|armor|trinket>   Offer 3 minerals to Bahamet for an item', 'cyan');
+  api.print('  /sooth    Visit Sooth\'s stall and sell your unequipped gear — /sooth sell <id>', 'cyan');
 
   if (state && state.isAdmin){
     api.hr(); api.print('Admin:', 'yellow');
@@ -4069,9 +4070,10 @@ function cmdMarketBuy(api, state, args) {
  * without naming what it's gating against.
  */
 const DELVE_GATE_MESSAGES = {
-  offer:   'Your hands are full elsewhere. The altar will wait.',
-  equip:   'You cannot spare a hand for that right now.',
-  unequip: 'Whatever you are wearing, you are keeping on for now.',
+  offer:     'Your hands are full elsewhere. The altar will wait.',
+  equip:     'You cannot spare a hand for that right now.',
+  unequip:   'Whatever you are wearing, you are keeping on for now.',
+  soothSell: 'Sooth waves it off. "Not now. I\'m not going anywhere."',
 };
 
 function delveStatLine(stats) {
@@ -4210,6 +4212,91 @@ function cmdUnequip(api, state, args) {
 
   const flash = `  unequipped <span style="color:var(--gold)">${escapeHTML(result.item.name)}</span> from slot ${slot}.`;
   renderGear(api, state, flash);
+}
+
+/* ======================= Sooth (the Shadowkin fence) =======================
+ * specs/DELVE.md Session B. Sooth is a Shadowkin: dark, vaguely demonic in
+ * form, not evil, a very mercantile people — a shadow with excellent
+ * customer service. Sooth never explains what the statue is for and never
+ * mentions any game.
+ */
+const SOOTH_GREETINGS = [
+  "Sooth's shadow unspools from somewhere it wasn't a moment ago, all courtesy and no explanation.",
+  '"Sell whatever you don\'t need — browsing costs nothing," Sooth says, in a voice like a held breath.',
+  "Sooth counts your chrome before you've reached for it, and smiles without quite having a mouth to do it with.",
+  '"Lovely to see you," Sooth offers, correctly, regardless of the hour.',
+  "Sooth's ledger has no bottom anyone has found. Sooth is always buying. Sooth never explains why.",
+  '"Returning customers pay the same as everyone else," Sooth says, sounding delighted about it anyway.',
+];
+
+function pickSoothGreeting() {
+  return SOOTH_GREETINGS[Math.floor(Math.random() * SOOTH_GREETINGS.length)];
+}
+
+// Sooth's arrival is a one-time world event (celebration/invitation, per
+// PLACES.md editorial policy), guarded by a settings-table flag so it
+// fires exactly once ever, not per-user, not per-restart.
+(function ensureSoothArrivalAnnounced() {
+  if (getSetting.get('sooth_arrived')) return;
+  addActivityEvent('games', 'sooth_arrives', 'A new stall has opened near the statue — Sooth, a Shadowkin merchant, is buying castoffs. Try /sooth.');
+  setSetting.run('sooth_arrived', '1');
+})();
+
+function renderSooth(api, state, flash) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+
+  api.batch(b => {
+    b.clear();
+    b.setInputLimit(null);
+    b.hrTitled('Sooth');
+    b.print(pickSoothGreeting(), 'dim');
+    if (flash) { b.hr(); b.printHTML(flash); }
+    b.hr();
+    const inv = delve.getInventory(username);
+    if (inv.unequipped.length) {
+      b.print('Your gear (sell):', 'cyan');
+      for (const item of inv.unequipped) {
+        const sellPrice = Math.max(1, Math.floor(item.budget * delve.DELVE_CONSTANTS.OFFERING.SELL_PCT));
+        const curseTag = item.cursed ? ' <span style="color:var(--spite)">(cursed)</span>' : '';
+        b.printHTML(`  #${item.id} <span style="color:var(--gold)">${escapeHTML(item.name)}</span>${curseTag}  sells for ${escapeHTML(fmtCr(sellPrice))} ₢`);
+      }
+    } else {
+      b.print('Your gear (sell): nothing unequipped to sell.', 'dim');
+    }
+    b.hr();
+    b.print('— /sooth sell <id> —', 'dim');
+  });
+}
+
+function cmdSoothSell(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  if (delve.getActiveRun(username)) { api.print(DELVE_GATE_MESSAGES.soothSell, 'yellow'); return; }
+  if (!args || args.length !== 1) {
+    api.print('usage: /sooth sell <id>', 'yellow'); return;
+  }
+
+  const itemId = parseInt(args[0], 10);
+  if (!Number.isInteger(itemId) || itemId < 1) { api.print('unknown item id.', 'red'); return; }
+
+  const result = delve.sellItem({ username, itemId });
+  if (!result.ok) {
+    if (result.error === 'not_found') { api.print("you don't own that item.", 'red'); return; }
+    if (result.error === 'equipped')  { api.print('unequip it first — Sooth only buys castoffs.', 'red'); return; }
+    api.print('Sooth declines.', 'red'); return;
+  }
+
+  const flash = `  sold <span style="color:var(--gold)">${escapeHTML(result.item.name)}</span> to Sooth for ${escapeHTML(fmtCr(result.sellPrice))} ₢.`;
+  renderSooth(api, state, flash);
+}
+
+function cmdSooth(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  const sub = (args && args[0]) ? String(args[0]).toLowerCase().trim() : '';
+  if (!sub) { renderSooth(api, state); return; }
+  if (sub === 'sell') { cmdSoothSell(api, state, (args || []).slice(1)); return; }
+  api.print('usage: /sooth   or   /sooth sell <id>', 'yellow');
 }
 
 /* ======================= Rob ======================= */
@@ -5517,6 +5604,7 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'equip':    cmdEquip(api, state, args);   return true;
     case 'unequip':  cmdUnequip(api, state, args); return true;
     case 'offer':    cmdOffer(api, state, args);   return true;
+    case 'sooth':    cmdSooth(api, state, args);   return true;
 
     /* Games */
     case 'games':    routeGo(api, state, 'games'); return true;

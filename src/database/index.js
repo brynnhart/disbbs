@@ -1594,9 +1594,12 @@ function ensureHackSchema(db) {
   `);
 }
 
-// Delve — Session A creates delve_items only. Grown additively per
-// session (see specs/DELVE.md): Session B adds delve_merchant_purchases,
-// Session C adds delve_runs / delve_daily / delve_log.
+// Delve — Session A created delve_items. Grown additively per session
+// (see specs/DELVE.md): Session C adds delve_runs / delve_daily /
+// delve_log. Session B's delve_merchant_purchases was cut on review
+// before ever shipping (Sooth buys castoffs only — no stock, no
+// purchase caps; see "Sooth's role" in the spec) and was never created
+// in any deployed database, so it is not created here.
 function ensureDelveSchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS delve_items (

@@ -190,13 +190,6 @@ const DELVE_CONSTANTS = {
     RESUME_HP_PCT: 0.25,
     AMBUSH_CHANCE: 0.35,
   },
-
-  MERCHANT: {
-    STOCK_POOL: ['bismuth', 'cinnabar', 'malachite', 'vitriol'],
-    STOCK_SLOTS: 3,
-    PRICE_MULT: 1.25,
-    DAILY_QTY_CAP: 5,
-  },
 };
 
 function pickRandom(arr) {
@@ -363,6 +356,8 @@ function createDelveService({ db, chrome, timeUtils, hub }) {
   const stmtGetResourceBal    = db.prepare(`SELECT amount FROM resource_balances WHERE username = ? AND resource = ?`);
   const stmtDeductResourceBal = db.prepare(`UPDATE resource_balances SET amount = amount - ? WHERE username = ? AND resource = ?`);
 
+  const stmtDeleteItem = db.prepare(`DELETE FROM delve_items WHERE id = ?`);
+
   function rowToItem(row) {
     if (!row) return null;
     return {
@@ -499,6 +494,27 @@ function createDelveService({ db, chrome, timeUtils, hub }) {
     return { ok: true, item: rowToItem(row) };
   }
 
+  // Sooth (Session B, revised): buys unequipped castoffs only. No stock,
+  // no purchase caps — selling minerals would duplicate /market, and
+  // selling gear would make Sooth a second gear faucet (see specs/DELVE.md,
+  // "Sooth's role").
+  function sellItem({ username, itemId }) {
+    if (service.getActiveRun(username)) return { error: 'gated' };
+
+    const row = stmtGetItemById.get(itemId);
+    if (!row || row.username !== username) return { error: 'not_found' };
+    if (row.equipped_slot != null) return { error: 'equipped' };
+
+    const sellPrice = Math.max(1, Math.floor(row.budget * DELVE_CONSTANTS.OFFERING.SELL_PCT));
+
+    db.transaction(() => {
+      stmtDeleteItem.run(row.id);
+      chrome.award(username, sellPrice, `sooth: sold ${row.name}`);
+    })();
+
+    return { ok: true, sellPrice, item: rowToItem(row) };
+  }
+
   Object.assign(service, {
     DELVE_CONSTANTS,
     generateOffering,
@@ -507,6 +523,7 @@ function createDelveService({ db, chrome, timeUtils, hub }) {
     unequipItem,
     computeEffectiveStats,
     getInventory,
+    sellItem,
   });
   return service;
 }
