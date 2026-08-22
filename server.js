@@ -1040,6 +1040,8 @@ function cmdHelp(api, state){
   api.print('  /unequip <slot>       Unequip whatever is in a slot', 'cyan');
   api.print('  /offer <mineral> <mineral> <mineral> <weapon|armor|trinket>   Offer 3 minerals to Bahamet for an item', 'cyan');
   api.print('  /sooth    Visit Sooth\'s stall and sell your unequipped gear — /sooth sell <id>', 'cyan');
+  api.print('  /delve    The Ancestral Caves — status, and the full menu of caves commands', 'cyan');
+  api.print('  /descend  Enter the caves — start or resume a run', 'cyan');
 
   if (state && state.isAdmin){
     api.hr(); api.print('Admin:', 'yellow');
@@ -4069,11 +4071,35 @@ function cmdMarketBuy(api, state, args) {
  * features the Delve merely reads. State gating rejects in-fiction
  * without naming what it's gating against.
  */
+// Session C1: the game is public now (Release 3 ends the mystery), so
+// entrance-gate rejections speak the live fathom instead of staying vague.
+const FATHOM_ONES = ['zero','one','two','three','four','five','six','seven','eight','nine','ten',
+  'eleven','twelve','thirteen','fourteen','fifteen','sixteen','seventeen','eighteen','nineteen'];
+const FATHOM_TENS = ['', '', 'twenty','thirty','forty','fifty','sixty','seventy','eighty','ninety'];
+function fathomWords(n) {
+  n = Math.max(0, Math.floor(n));
+  if (n < 20) return FATHOM_ONES[n];
+  if (n < 100) {
+    const tens = FATHOM_TENS[Math.floor(n / 10)];
+    const ones = n % 10;
+    return ones ? `${tens}-${FATHOM_ONES[ones]}` : tens;
+  }
+  if (n < 1000) {
+    const hundreds = Math.floor(n / 100);
+    const rest = n % 100;
+    return rest ? `${FATHOM_ONES[hundreds]} hundred ${fathomWords(rest)}` : `${FATHOM_ONES[hundreds]} hundred`;
+  }
+  return String(n); // fathom depths realistically never reach four digits
+}
+function fathomPhrase(n) {
+  return `${fathomWords(n)} fathom${Math.floor(n) === 1 ? '' : 's'}`;
+}
+
 const DELVE_GATE_MESSAGES = {
-  offer:     'Your hands are full elsewhere. The altar will wait.',
-  equip:     'You cannot spare a hand for that right now.',
-  unequip:   'Whatever you are wearing, you are keeping on for now.',
-  soothSell: 'Sooth waves it off. "Not now. I\'m not going anywhere."',
+  offer:     (run) => `You are ${fathomPhrase(run.state.depth)} deep. The altar is far above you.`,
+  equip:     (run) => `You are ${fathomPhrase(run.state.depth)} deep. Your hands are full of the dark.`,
+  unequip:   (run) => `You are ${fathomPhrase(run.state.depth)} deep. Whatever you are wearing, you are keeping on.`,
+  soothSell: (run) => `You are ${fathomPhrase(run.state.depth)} deep. Sooth's stall is far above you.`,
 };
 
 function delveStatLine(stats) {
@@ -4132,7 +4158,8 @@ function cmdGear(api, state) {
 function cmdOffer(api, state, args) {
   if (!requireAuth(api, state)) return;
   const username = state.username;
-  if (delve.getActiveRun(username)) { api.print(DELVE_GATE_MESSAGES.offer, 'yellow'); return; }
+  const activeRunOffer = delve.getActiveRun(username);
+  if (activeRunOffer) { api.print(DELVE_GATE_MESSAGES.offer(activeRunOffer), 'yellow'); return; }
   if (!args || args.length !== 4) {
     api.print('usage: /offer <mineral> <mineral> <mineral> <weapon|armor|trinket>', 'yellow'); return;
   }
@@ -4170,7 +4197,8 @@ function cmdOffer(api, state, args) {
 function cmdEquip(api, state, args) {
   if (!requireAuth(api, state)) return;
   const username = state.username;
-  if (delve.getActiveRun(username)) { api.print(DELVE_GATE_MESSAGES.equip, 'yellow'); return; }
+  const activeRunEquip = delve.getActiveRun(username);
+  if (activeRunEquip) { api.print(DELVE_GATE_MESSAGES.equip(activeRunEquip), 'yellow'); return; }
   if (!args || args.length !== 2) {
     api.print('usage: /equip <id> <slot>   e.g. /equip 12 1', 'yellow'); return;
   }
@@ -4196,7 +4224,8 @@ function cmdEquip(api, state, args) {
 function cmdUnequip(api, state, args) {
   if (!requireAuth(api, state)) return;
   const username = state.username;
-  if (delve.getActiveRun(username)) { api.print(DELVE_GATE_MESSAGES.unequip, 'yellow'); return; }
+  const activeRunUnequip = delve.getActiveRun(username);
+  if (activeRunUnequip) { api.print(DELVE_GATE_MESSAGES.unequip(activeRunUnequip), 'yellow'); return; }
   if (!args || args.length !== 1) {
     api.print('usage: /unequip <slot>   e.g. /unequip 1', 'yellow'); return;
   }
@@ -4272,7 +4301,8 @@ function renderSooth(api, state, flash) {
 function cmdSoothSell(api, state, args) {
   if (!requireAuth(api, state)) return;
   const username = state.username;
-  if (delve.getActiveRun(username)) { api.print(DELVE_GATE_MESSAGES.soothSell, 'yellow'); return; }
+  const activeRunSoothSell = delve.getActiveRun(username);
+  if (activeRunSoothSell) { api.print(DELVE_GATE_MESSAGES.soothSell(activeRunSoothSell), 'yellow'); return; }
   if (!args || args.length !== 1) {
     api.print('usage: /sooth sell <id>', 'yellow'); return;
   }
@@ -4297,6 +4327,180 @@ function cmdSooth(api, state, args) {
   if (!sub) { renderSooth(api, state); return; }
   if (sub === 'sell') { cmdSoothSell(api, state, (args || []).slice(1)); return; }
   api.print('usage: /sooth   or   /sooth sell <id>', 'yellow');
+}
+
+/* ======================= The Delve — run engine (Session C1) =======================
+ * The game is public now (Release 3 ends the mystery). /delve and /descend
+ * live here; everything mutating a live run goes through src/services/delve.js
+ * — server.js only translates its results into terminal prints or delve_*
+ * ops. Events this session always resolve as the Collapsed Gallery stub
+ * ("Nothing here but dust."); the full deck and camping are Session C2.
+ */
+
+function cmdDelve(api, state) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  const run = delve.getActiveRun(username);
+  const fightsRemaining = delve.getFightsRemaining(username);
+  const fightsPerDay = delve.DELVE_CONSTANTS.DAILY.FIGHTS_PER_DAY;
+  const inv = delve.getInventory(username);
+
+  api.batch(b => {
+    b.clear();
+    b.setInputLimit(null);
+    const tableauRows = [
+      [{ text: 'The Statue of Bahamet stands where your shade returns, and where offerings are made.' }],
+      [{ text: 'Sooth\'s stall waits nearby — a Shadowkin fence, buying whatever gear you don\'t need.' }],
+      [{ text: 'The Gravemouth yawns behind, the descent itself.' }],
+    ];
+    b.printHTML(renderBoxFrame('THE ANCESTRAL CAVES', tableauRows, 80));
+    b.hr();
+    b.print(`Fights left today: ${fightsRemaining}/${fightsPerDay}`, 'dim');
+    if (run) {
+      const zoneNum = delve.zoneForFathom(run.state.depth);
+      const zoneName = delve.DELVE_CONSTANTS.ZONES[zoneNum].name;
+      b.printHTML(`A run is in progress — fathom ${run.state.depth}, <span style="color:var(--gold)">${escapeHTML(zoneName)}</span>. /descend to resume.`);
+    } else {
+      b.print('No run in progress.', 'dim');
+    }
+    const eff = inv.effectiveStats;
+    b.printHTML(`Equipped: HP ${eff.hp}  ATK ${eff.atk}  DEF ${eff.def}  LCK ${eff.lck}  GRD ${eff.grd}`);
+    b.hr();
+    b.print('  /descend   Enter the caves — start or resume a run', 'cyan');
+    b.print('  /offer <mineral> <mineral> <mineral> <weapon|armor|trinket>   Offer 3 minerals to Bahamet for an item', 'cyan');
+    b.print('  /gear      Your character sheet — stats, equipped gear, and inventory', 'cyan');
+    b.print('  /equip <id> <slot>    Equip an item into slot 1-4', 'cyan');
+    b.print('  /unequip <slot>       Unequip whatever is in a slot', 'cyan');
+    b.print('  /sooth     Visit Sooth\'s stall and sell your unequipped gear — /sooth sell <id>', 'cyan');
+    b.print('  /fathoms   Weekly board, all-time board, the Memorial Wall (coming soon)', 'dim');
+  });
+}
+
+function cmdDescend(api, state) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  if (!delve.getActiveRun(username) && delve.getFightsRemaining(username) <= 0) {
+    api.print('The cave will not have you again today.', 'yellow');
+    return;
+  }
+  sendOps(api.ws, [{ op: 'openDelve' }]);
+}
+
+const DELVE_DEATH_LINE = 'Your shade gathers itself at the statue\'s feet. Your hands are empty.';
+const DELVE_ERROR_MESSAGES = {
+  bad_phase: 'The cave does not answer to that, not now.',
+  no_fights: 'The cave will not have you again today.',
+  bad_item:  'There is nothing there to equip.',
+  bad_slot:  'Slot must be 1-4.',
+};
+
+function delveBuildStateOp(username, result) {
+  if (result.ended) {
+    return {
+      op: 'delve_state',
+      active: false,
+      ended: result.ended,
+      depth: result.depth,
+      bankSummary: result.bankSummary || null,
+      narration: result.narration || [],
+      fightsRemaining: result.fightsRemaining,
+      fightsPerDay: delve.DELVE_CONSTANTS.DAILY.FIGHTS_PER_DAY,
+    };
+  }
+  const st = result.state;
+  const eff = delve.computeEffectiveStats(username);
+  const zoneNum = delve.zoneForFathom(st.depth);
+  const zone = delve.DELVE_CONSTANTS.ZONES[zoneNum];
+  const inv = delve.getInventory(username);
+  return {
+    op: 'delve_state',
+    active: true,
+    ended: false,
+    depth: st.depth,
+    zone: zoneNum,
+    zoneName: zone.name,
+    hp: st.hp,
+    maxHp: eff.hp,
+    status: st.status,
+    pocket: st.pocket,
+    encounter: st.encounter,
+    effectiveStats: eff,
+    equipment: inv.equipped,
+    fightsRemaining: result.fightsRemaining,
+    fightsPerDay: delve.DELVE_CONSTANTS.DAILY.FIGHTS_PER_DAY,
+    narration: result.narration || [],
+  };
+}
+
+function handleDelveGetState(api, state) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  const run = delve.getActiveRun(username);
+  const fightsRemaining = delve.getFightsRemaining(username);
+  if (!run) {
+    sendOps(api.ws, [{
+      op: 'delve_state', active: false, ended: false, depth: 0,
+      fightsRemaining, fightsPerDay: delve.DELVE_CONSTANTS.DAILY.FIGHTS_PER_DAY, narration: [],
+    }]);
+    return;
+  }
+  sendOps(api.ws, [delveBuildStateOp(username, { state: run.state, narration: [], fightsRemaining })]);
+}
+
+function handleDelveDescend(api, state) {
+  if (!requireAuth(api, state)) return;
+  const result = delve.descend({ username: state.username });
+  if (result.error) { sendOps(api.ws, [{ op: 'delve_error', message: DELVE_ERROR_MESSAGES[result.error] || 'The cave refuses.' }]); return; }
+  sendOps(api.ws, [delveBuildStateOp(state.username, result)]);
+}
+
+function handleDelveAttack(api, state) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  const result = delve.attack({ username });
+  if (result.error) { sendOps(api.ws, [{ op: 'delve_error', message: DELVE_ERROR_MESSAGES[result.error] || 'The cave refuses.' }]); return; }
+  const ops = [delveBuildStateOp(username, result)];
+  if (result.ended === 'died') {
+    ops.push({ op: 'printHTML', html: `<span style="color:var(--spite)">${escapeHTML(DELVE_DEATH_LINE)}</span> (died at fathom ${result.depth})` });
+  }
+  sendOps(api.ws, ops);
+}
+
+function handleDelveFlee(api, state) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  const result = delve.flee({ username });
+  if (result.error) { sendOps(api.ws, [{ op: 'delve_error', message: DELVE_ERROR_MESSAGES[result.error] || 'The cave refuses.' }]); return; }
+  const ops = [delveBuildStateOp(username, result)];
+  if (result.ended === 'died') {
+    ops.push({ op: 'printHTML', html: `<span style="color:var(--spite)">${escapeHTML(DELVE_DEATH_LINE)}</span> (died at fathom ${result.depth})` });
+  }
+  sendOps(api.ws, ops);
+}
+
+function handleDelveSurface(api, state) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  const result = delve.surface({ username });
+  if (result.error) { sendOps(api.ws, [{ op: 'delve_error', message: DELVE_ERROR_MESSAGES[result.error] || 'The cave refuses.' }]); return; }
+  const bits = [`${fmtCr(result.bankSummary.chrome)} ₢`];
+  for (const [m, qty] of Object.entries(result.bankSummary.minerals)) {
+    if (qty > 0) bits.push(`${qty} ${escapeHTML(RESOURCES[m] ? RESOURCES[m].label : m)}`);
+  }
+  if (result.bankSummary.itemCount) bits.push(`${result.bankSummary.itemCount} item${result.bankSummary.itemCount === 1 ? '' : 's'}`);
+  const ops = [
+    delveBuildStateOp(username, result),
+    { op: 'printHTML', html: `<span style="color:var(--venom)">You surface from ${result.depth} fathoms.</span> Banked: ${bits.join(', ')}.` },
+  ];
+  sendOps(api.ws, ops);
+}
+
+function handleDelvePocketEquip(msg, api, state) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  const result = delve.pocketEquip({ username, pocketIndex: msg.pocketIndex, slot: msg.slot });
+  if (result.error) { sendOps(api.ws, [{ op: 'delve_error', message: DELVE_ERROR_MESSAGES[result.error] || 'The cave refuses.' }]); return; }
+  sendOps(api.ws, [delveBuildStateOp(username, result)]);
 }
 
 /* ======================= Rob ======================= */
@@ -5605,6 +5809,8 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'unequip':  cmdUnequip(api, state, args); return true;
     case 'offer':    cmdOffer(api, state, args);   return true;
     case 'sooth':    cmdSooth(api, state, args);   return true;
+    case 'delve':    cmdDelve(api, state);         return true;
+    case 'descend':  cmdDescend(api, state);       return true;
 
     /* Games */
     case 'games':    routeGo(api, state, 'games'); return true;
@@ -5873,6 +6079,13 @@ wss.on('connection', (ws, req) => {
     if (msg.type === 'blackjack_hit')      { handleBlackjackHit(msg, api, state); return; }
     if (msg.type === 'blackjack_stand')    { handleBlackjackStand(msg, api, state); return; }
     if (msg.type === 'blackjack_getstate') { handleBlackjackGetState(api, state); return; }
+
+    if (msg.type === 'delve_getstate')     { handleDelveGetState(api, state); return; }
+    if (msg.type === 'delve_descend')      { handleDelveDescend(api, state); return; }
+    if (msg.type === 'delve_attack')       { handleDelveAttack(api, state); return; }
+    if (msg.type === 'delve_flee')         { handleDelveFlee(api, state); return; }
+    if (msg.type === 'delve_surface')      { handleDelveSurface(api, state); return; }
+    if (msg.type === 'delve_pocket_equip') { handleDelvePocketEquip(msg, api, state); return; }
 
     if (msg.type === 'dots_getstate') {
       if (!requireAuth(api, state)) return;

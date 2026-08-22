@@ -1595,11 +1595,11 @@ function ensureHackSchema(db) {
 }
 
 // Delve — Session A created delve_items. Grown additively per session
-// (see specs/DELVE.md): Session C adds delve_runs / delve_daily /
-// delve_log. Session B's delve_merchant_purchases was cut on review
-// before ever shipping (Sooth buys castoffs only — no stock, no
-// purchase caps; see "Sooth's role" in the spec) and was never created
-// in any deployed database, so it is not created here.
+// (see specs/DELVE.md): Session C1 adds delve_runs / delve_daily /
+// delve_log for the run engine. Session B's delve_merchant_purchases was
+// cut on review before ever shipping (Sooth buys castoffs only — no
+// stock, no purchase caps; see "Sooth's role" in the spec) and was never
+// created in any deployed database, so it is not created here.
 function ensureDelveSchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS delve_items (
@@ -1614,6 +1614,35 @@ function ensureDelveSchema(db) {
       created_at    INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_delve_items_user ON delve_items(username);
+
+    -- One live/camped run per user. State is a JSON blob: this is a single
+    -- actively-mutated document, not queryable data. Log/board queries use
+    -- delve_log, never this.
+    CREATE TABLE IF NOT EXISTS delve_runs (
+      username   TEXT PRIMARY KEY,
+      state      TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS delve_daily (
+      username     TEXT NOT NULL,
+      day          TEXT NOT NULL,
+      fights_used  INTEGER NOT NULL DEFAULT 0,
+      bonus_fights INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (username, day)
+    );
+
+    CREATE TABLE IF NOT EXISTS delve_log (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      username      TEXT NOT NULL,
+      day           TEXT NOT NULL,
+      depth         INTEGER NOT NULL,
+      outcome       TEXT NOT NULL,    -- 'surfaced' | 'died'
+      chrome_banked INTEGER NOT NULL DEFAULT 0,
+      created_at    INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_delve_log_outcome ON delve_log(outcome, depth DESC);
+    CREATE INDEX IF NOT EXISTS idx_delve_log_user ON delve_log(username, created_at DESC);
   `);
 }
 

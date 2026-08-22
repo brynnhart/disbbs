@@ -347,6 +347,35 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
 .dots-close-btn { appearance:none; border:1px solid var(--panel-edge); background:transparent; color:var(--phos-dim); font:inherit; font-size:12px; padding:6px 14px; border-radius:0; cursor:pointer; align-self:center }
 .dots-close-btn:hover { border-color:#555; color:var(--fg) }
 
+/* ===== Delve modal ===== */
+#delve-overlay { position:fixed; inset:0; background:rgba(10,6,18,.9); display:flex; align-items:center; justify-content:center; z-index:1000; padding:16px; box-sizing:border-box }
+#delve-modal { background:var(--panel); border:1px solid var(--panel-edge); border-radius:0; box-shadow:0 12px 48px rgba(0,0,0,.55); display:flex; flex-direction:column; gap:12px; padding:20px; max-height:96vh; overflow:auto; width:560px; max-width:96vw }
+#delve-title { color:var(--phos-bright); font-weight:bold; font-size:13px; letter-spacing:1px; text-align:center }
+#delve-depth-numeral { color:var(--phos-bright); font-size:14px; text-align:center }
+#delve-depth-zonebar { display:flex; gap:2px; height:8px }
+.delve-zone-seg { flex:1; background:#222 }
+.delve-zone-seg.active { background:var(--phos-dim) }
+#delve-pocket-line { color:var(--gold); font-size:12px }
+#delve-fights-bar { color:var(--gold); font-size:12px; font-variant-numeric:tabular-nums }
+#delve-scene { background:#070707; border:1px solid var(--panel-edge); padding:8px; min-height:120px; max-height:220px; overflow:auto; font-size:12px }
+#delve-scene-log div { margin-bottom:2px }
+.delve-dmg-out { color:var(--phos) }
+.delve-dmg-in { color:var(--spite) }
+.delve-loot { color:var(--gold) }
+.delve-victory, .delve-system { color:var(--venom) }
+.delve-death { color:var(--spite) }
+.delve-enemy-intro { color:var(--fg) }
+#delve-enemy { margin-top:6px; color:var(--spite); font-size:12px }
+#delve-actions { display:flex; gap:8px; justify-content:center; flex-wrap:wrap }
+.delve-action-btn { appearance:none; border:1px solid var(--panel-edge); background:transparent; color:var(--phos-dim); padding:6px 14px; border-radius:0; cursor:pointer; font:inherit; font-size:12px }
+.delve-action-btn:hover:not(:disabled) { border-color:var(--phos); color:var(--phos) }
+.delve-action-btn:disabled { opacity:.35; cursor:not-allowed }
+#delve-pocket-equip-panel { border:1px solid var(--panel-edge); padding:8px; font-size:12px }
+#delve-pocket-equip-panel .delve-pe-row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-bottom:6px }
+.delve-close-btn { appearance:none; border:1px solid var(--panel-edge); background:transparent; color:var(--phos-dim); font:inherit; font-size:12px; padding:6px 14px; border-radius:0; cursor:pointer; align-self:center }
+.delve-close-btn:hover { border-color:#555; color:var(--fg) }
+#delve-error { min-height:14px; font-size:12px; color:var(--spite); text-align:center }
+
 /* ===== Synth modal ===== */
 #synth-overlay{position:fixed;inset:0;background:rgba(10,6,18,.9);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px;box-sizing:border-box}
 #synth-modal{background:var(--panel);border:1px solid var(--panel-edge);border-radius:0;box-shadow:0 12px 48px rgba(0,0,0,.55);display:flex;flex-direction:column;gap:10px;padding:16px;max-height:96vh;overflow:auto;width:fit-content;max-width:980px}
@@ -2660,6 +2689,9 @@ body[data-crt="full"] .prompt::after{
           else if (op.op === 'dots_update')     dotsHandleUpdate(op);
           else if (op.op === 'dots_newgame')    dotsHandleNewGame(op);
           else if (op.op === 'dots_error')      dotsShowError(op.message);
+          else if (op.op === 'openDelve')       openDelve();
+          else if (op.op === 'delve_state')     delveHandleState(op);
+          else if (op.op === 'delve_error')     delveShowError(op.message || 'Error.');
           else if (op.op === 'openSynth')       openSynth(op || {});
           else if (op.op === 'synth_error')     synthHandleError(op);
           else if (op.op === 'synth_saved')     synthHandleSaved(op);
@@ -2873,7 +2905,7 @@ body[data-crt="full"] .prompt::after{
 
   // ESC quickly refocuses prompt
   document.addEventListener('keydown', function(ev){
-    if (ev.key === 'Escape' && !document.getElementById('pxa-overlay') && !document.getElementById('wordle-overlay') && !document.getElementById('bj-overlay') && !document.getElementById('mining-overlay') && !document.getElementById('grf-overlay') && !document.getElementById('hack-overlay') && !document.getElementById('dots-overlay') && !document.getElementById('synth-overlay') && !document.getElementById('tracker-overlay')) focusInputEnd(input);
+    if (ev.key === 'Escape' && !document.getElementById('pxa-overlay') && !document.getElementById('wordle-overlay') && !document.getElementById('bj-overlay') && !document.getElementById('mining-overlay') && !document.getElementById('grf-overlay') && !document.getElementById('hack-overlay') && !document.getElementById('dots-overlay') && !document.getElementById('synth-overlay') && !document.getElementById('tracker-overlay') && !document.getElementById('delve-overlay')) focusInputEnd(input);
   });
 
   // ===== Pixel Art Editor =====
@@ -3297,6 +3329,25 @@ body[data-crt="full"] .prompt::after{
   var DOTS_DOT_R = 5; // dot radius px
   var DOTS_LINE_HIT = 14; // hit area width for line clicks
   var dotsErrorTimer = null, dotsNewGameTimer = null;
+
+  // ===== Delve =====
+  var dlActive = false, dlDepth = 0, dlZone = 1, dlZoneName = '';
+  var dlHp = 0, dlMaxHp = 0, dlStatus = 'idle';
+  var dlPocket = { chrome: 0, minerals: {}, items: [] };
+  var dlEncounter = null;
+  var dlEffectiveStats = { hp:0, atk:0, def:0, lck:0, grd:0 };
+  var dlEquipment = { 1:null, 2:null, 3:null, 4:null };
+  var dlFightsRemaining = 0, dlFightsPerDay = 15;
+  var dlSubmitting = false;
+  var dlPocketEquipOpen = false;
+  // Presentation-only mirror of DELVE_CONSTANTS.ZONES fathom bands (same
+  // client-side duplication pattern as DOTS_GRID/DOTS_COLS above).
+  var DL_ZONES = [
+    { n:1, label:'GRAVEMOUTH',     min:1,  max:10 },
+    { n:2, label:'CHAPELS',        min:11, max:25 },
+    { n:3, label:'WORKINGS',       min:26, max:45 },
+    { n:4, label:'NAMELESS DEEP',  min:46, max:86 } // 86 = nominal visual cap only; real depth is uncapped
+  ];
 
   function fmtCr(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
 
@@ -4727,6 +4778,286 @@ body[data-crt="full"] .prompt::after{
     dotsGameId = null; dotsLines = []; dotsSquares = {}; dotsCanDraw = false;
     dotsPlayerColors = {}; dotsScores = []; dotsEndsAt = 0;
     focusInputEnd(input);
+  }
+
+  // ===== Delve =====
+  function delveZoneIndexForDepth(depth) {
+    for (var i = 0; i < DL_ZONES.length; i++) {
+      if (depth >= DL_ZONES[i].min && depth <= DL_ZONES[i].max) return i;
+    }
+    return DL_ZONES.length - 1;
+  }
+
+  function delveBar(filled, total, fullChar, emptyChar) {
+    filled = Math.max(0, Math.min(total, filled));
+    var s = '';
+    for (var i = 0; i < total; i++) s += (i < filled ? fullChar : emptyChar);
+    return s;
+  }
+
+  function openDelve() {
+    if (document.getElementById('delve-overlay')) return;
+    dlActive = false; dlDepth = 0; dlZone = 1; dlZoneName = '';
+    dlHp = 0; dlMaxHp = 0; dlStatus = 'idle';
+    dlPocket = { chrome: 0, minerals: {}, items: [] };
+    dlEncounter = null;
+    dlEffectiveStats = { hp:0, atk:0, def:0, lck:0, grd:0 };
+    dlEquipment = { 1:null, 2:null, 3:null, 4:null };
+    dlFightsRemaining = 0; dlFightsPerDay = 15;
+    dlSubmitting = false; dlPocketEquipOpen = false;
+
+    var overlay = document.createElement('div'); overlay.id = 'delve-overlay';
+    var modal   = document.createElement('div'); modal.id   = 'delve-modal';
+
+    var titleEl = document.createElement('div'); titleEl.id = 'delve-title';
+    titleEl.textContent = '═[ THE DELVE ]═';
+    modal.appendChild(titleEl);
+
+    var depthNumEl = document.createElement('div'); depthNumEl.id = 'delve-depth-numeral';
+    depthNumEl.textContent = 'THE ANCESTRAL CAVES';
+    modal.appendChild(depthNumEl);
+
+    var zoneBarEl = document.createElement('div'); zoneBarEl.id = 'delve-depth-zonebar';
+    DL_ZONES.forEach(function() {
+      var seg = document.createElement('div'); seg.className = 'delve-zone-seg';
+      zoneBarEl.appendChild(seg);
+    });
+    modal.appendChild(zoneBarEl);
+
+    var pocketEl = document.createElement('div'); pocketEl.id = 'delve-pocket-line';
+    pocketEl.textContent = 'IN POCKET: 0 ₢';
+    modal.appendChild(pocketEl);
+
+    var hpEl = document.createElement('div'); hpEl.id = 'delve-hp-line';
+    hpEl.textContent = 'HP: —';
+    modal.appendChild(hpEl);
+
+    var fightsEl = document.createElement('div'); fightsEl.id = 'delve-fights-bar';
+    fightsEl.textContent = 'FIGHTS LEFT: ';
+    modal.appendChild(fightsEl);
+
+    var sceneEl = document.createElement('div'); sceneEl.id = 'delve-scene';
+    var logEl = document.createElement('div'); logEl.id = 'delve-scene-log';
+    sceneEl.appendChild(logEl);
+    var enemyEl = document.createElement('div'); enemyEl.id = 'delve-enemy';
+    enemyEl.style.display = 'none';
+    sceneEl.appendChild(enemyEl);
+    var peEl = document.createElement('div'); peEl.id = 'delve-pocket-equip-panel';
+    peEl.style.display = 'none';
+    sceneEl.appendChild(peEl);
+    modal.appendChild(sceneEl);
+
+    var errorEl = document.createElement('div'); errorEl.id = 'delve-error';
+    modal.appendChild(errorEl);
+
+    var actionsEl = document.createElement('div'); actionsEl.id = 'delve-actions';
+    modal.appendChild(actionsEl);
+
+    var hintEl = document.createElement('div'); hintEl.id = 'delve-hint';
+    hintEl.className = 'dim';
+    hintEl.style.fontSize = '11px';
+    hintEl.style.textAlign = 'center';
+    hintEl.textContent = 'Esc or Close keeps your place — closing does not surface.';
+    modal.appendChild(hintEl);
+
+    var closeBtn = document.createElement('button');
+    closeBtn.className = 'delve-close-btn'; closeBtn.type = 'button'; closeBtn.textContent = 'Close';
+    closeBtn.addEventListener('click', function() { closeDelve(true); });
+    modal.appendChild(closeBtn);
+
+    function dlEsc(e) { if (e.key === 'Escape') { closeDelve(true); document.removeEventListener('keydown', dlEsc); } }
+    document.addEventListener('keydown', dlEsc);
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'delve_getstate' }));
+    }
+  }
+
+  function closeDelve(showHint) {
+    var overlay = document.getElementById('delve-overlay');
+    if (overlay) overlay.remove();
+    if (showHint) op_print('The cave keeps your place.', 'dim');
+    dlActive = false; dlPocketEquipOpen = false; dlSubmitting = false;
+    focusInputEnd(input);
+  }
+
+  function delveRenderDepthStrip() {
+    var numEl = document.getElementById('delve-depth-numeral');
+    if (numEl) numEl.textContent = dlDepth > 0 ? ('FATHOM ' + dlDepth + ' — ' + dlZoneName.toUpperCase()) : 'THE ANCESTRAL CAVES';
+    var barEl = document.getElementById('delve-depth-zonebar');
+    if (barEl) {
+      var idx = delveZoneIndexForDepth(dlDepth || 1);
+      var segs = barEl.querySelectorAll('.delve-zone-seg');
+      for (var i = 0; i < segs.length; i++) {
+        segs[i].className = 'delve-zone-seg' + (i === idx && dlDepth > 0 ? ' active' : '');
+      }
+    }
+  }
+
+  function delveRenderPocket() {
+    var pocketEl = document.getElementById('delve-pocket-line');
+    if (pocketEl) {
+      var bits = [fmtCr(dlPocket.chrome) + ' ₢'];
+      Object.keys(dlPocket.minerals || {}).forEach(function(m) {
+        var qty = dlPocket.minerals[m];
+        if (qty > 0) bits.push(qty + ' ' + m);
+      });
+      var itemCount = (dlPocket.items || []).length;
+      if (itemCount) bits.push(itemCount + ' item' + (itemCount === 1 ? '' : 's'));
+      pocketEl.textContent = 'IN POCKET: ' + bits.join(' · ');
+    }
+    var hpEl = document.getElementById('delve-hp-line');
+    if (hpEl) hpEl.textContent = dlActive ? ('HP: ' + dlHp + ' / ' + dlMaxHp) : 'HP: —';
+    delveRenderFightsBar();
+  }
+
+  function delveRenderFightsBar() {
+    var fightsEl = document.getElementById('delve-fights-bar');
+    if (!fightsEl) return;
+    var total = Math.max(1, dlFightsPerDay);
+    fightsEl.textContent = 'FIGHTS LEFT: ' + delveBar(dlFightsRemaining, total, '▓', '░') + ' ' + dlFightsRemaining + '/' + total;
+  }
+
+  function delveAppendNarration(lines) {
+    var logEl = document.getElementById('delve-scene-log');
+    if (!logEl) return;
+    (lines || []).forEach(function(line) {
+      var d = document.createElement('div');
+      d.textContent = line.text || '';
+      if (line.cls) d.className = line.cls;
+      logEl.appendChild(d);
+    });
+    var sceneEl = document.getElementById('delve-scene');
+    if (sceneEl) sceneEl.scrollTop = sceneEl.scrollHeight;
+  }
+
+  var DELVE_ENEMY_BAR_SEGMENTS = 20;
+
+  function delveRenderScene() {
+    var enemyEl = document.getElementById('delve-enemy');
+    if (!enemyEl) return;
+    if (dlStatus === 'combat' && dlEncounter && dlEncounter.enemy) {
+      var e = dlEncounter.enemy;
+      var filled = e.maxHp > 0 ? Math.round((Math.max(0, e.hp) / e.maxHp) * DELVE_ENEMY_BAR_SEGMENTS) : 0;
+      enemyEl.style.display = '';
+      enemyEl.textContent = e.name + '  ' + delveBar(filled, DELVE_ENEMY_BAR_SEGMENTS, '▓', '░') + '  ' + Math.max(0, e.hp) + '/' + e.maxHp;
+    } else {
+      enemyEl.style.display = 'none';
+      enemyEl.textContent = '';
+    }
+  }
+
+  function delveSend(type, extra) {
+    if (dlSubmitting) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    dlSubmitting = true;
+    var msg = Object.assign({ type: type }, extra || {});
+    ws.send(JSON.stringify(msg));
+  }
+
+  function delveTogglePocketEquip() {
+    dlPocketEquipOpen = !dlPocketEquipOpen;
+    delveRenderPocketEquipPanel();
+  }
+
+  function delveRenderPocketEquipPanel() {
+    var panel = document.getElementById('delve-pocket-equip-panel');
+    if (!panel) return;
+    if (!dlPocketEquipOpen || !(dlPocket.items || []).length) { panel.style.display = 'none'; panel.innerHTML = ''; return; }
+    panel.style.display = '';
+    panel.innerHTML = '';
+    dlPocket.items.forEach(function(item, idx) {
+      var row = document.createElement('div'); row.className = 'delve-pe-row';
+      var label = document.createElement('span'); label.textContent = item.name + ':';
+      row.appendChild(label);
+      for (var slot = 1; slot <= 4; slot++) {
+        (function(slotNum) {
+          var slotBtn = document.createElement('button');
+          slotBtn.className = 'delve-action-btn'; slotBtn.type = 'button';
+          slotBtn.textContent = 'Slot ' + slotNum;
+          slotBtn.addEventListener('click', function() {
+            delveSend('delve_pocket_equip', { pocketIndex: idx, slot: slotNum });
+          });
+          row.appendChild(slotBtn);
+        })(slot);
+      }
+      panel.appendChild(row);
+    });
+  }
+
+  function delveRenderActions() {
+    var actionsEl = document.getElementById('delve-actions');
+    if (!actionsEl) return;
+    actionsEl.innerHTML = '';
+
+    function addBtn(label, disabled, onClick) {
+      var b = document.createElement('button');
+      b.className = 'delve-action-btn'; b.type = 'button'; b.textContent = label;
+      if (disabled) b.disabled = true;
+      b.addEventListener('click', onClick);
+      actionsEl.appendChild(b);
+      return b;
+    }
+
+    if (dlStatus === 'combat') {
+      addBtn('ATTACK', false, function() { delveSend('delve_attack'); });
+      addBtn('FLEE', false, function() { delveSend('delve_flee'); });
+      return;
+    }
+
+    addBtn('DESCEND', dlFightsRemaining <= 0, function() { delveSend('delve_descend'); });
+    if (dlActive) {
+      addBtn('SURFACE', false, function() { delveSend('delve_surface'); });
+      if ((dlPocket.items || []).length) {
+        addBtn('EQUIP', false, function() { delveTogglePocketEquip(); });
+      }
+    }
+  }
+
+  function delveShowError(msg) {
+    var errorEl = document.getElementById('delve-error');
+    if (errorEl) errorEl.textContent = msg || '';
+    dlSubmitting = false;
+  }
+
+  function delveHandleState(op) {
+    if (!document.getElementById('delve-overlay')) return;
+    dlSubmitting = false;
+
+    if (op.ended) {
+      // The terminal print for this outcome arrives as a sibling printHTML
+      // op in the same batch — nothing to print here, just close.
+      closeDelve(false);
+      return;
+    }
+
+    dlActive = !!op.active;
+    dlDepth = op.depth || 0;
+    dlZone = op.zone || 1;
+    dlZoneName = op.zoneName || '';
+    dlHp = op.hp != null ? op.hp : 0;
+    dlMaxHp = op.maxHp != null ? op.maxHp : 0;
+    dlStatus = op.status || 'idle';
+    dlPocket = op.pocket || { chrome: 0, minerals: {}, items: [] };
+    dlEncounter = op.encounter || null;
+    dlEffectiveStats = op.effectiveStats || dlEffectiveStats;
+    dlEquipment = op.equipment || dlEquipment;
+    dlFightsRemaining = op.fightsRemaining != null ? op.fightsRemaining : dlFightsRemaining;
+    dlFightsPerDay = op.fightsPerDay || dlFightsPerDay;
+    dlPocketEquipOpen = dlPocketEquipOpen && (dlPocket.items || []).length > 0;
+
+    var errorEl = document.getElementById('delve-error');
+    if (errorEl) errorEl.textContent = '';
+
+    delveRenderDepthStrip();
+    delveRenderPocket();
+    delveAppendNarration(op.narration);
+    delveRenderScene();
+    delveRenderPocketEquipPanel();
+    delveRenderActions();
   }
 
   // ===== Auth overlay logic =====

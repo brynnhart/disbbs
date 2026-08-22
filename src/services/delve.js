@@ -21,14 +21,17 @@ const DELVE_CONSTANTS = {
     POINT_COST: { hp: 2, atk: 6, def: 6, lck: 12, grd: 12 },
   },
 
+  // weight mirrors server.js's RESOURCES[m].weight exactly (same duplication
+  // rationale as points/tier above — used by Session C1's zone mineral
+  // drop tables, since RESOURCES isn't injected into this service).
   MINERALS: {
-    bismuth:     { points: 3,   tier: 'common' },
-    cinnabar:    { points: 5,   tier: 'common' },
-    malachite:   { points: 10,  tier: 'uncommon' },
-    vitriol:     { points: 15,  tier: 'uncommon' },
-    brimstone:   { points: 25,  tier: 'rare' },
-    obsidian:    { points: 40,  tier: 'rare' },
-    alexandrite: { points: 100, tier: 'very_rare' },
+    bismuth:     { points: 3,   tier: 'common',    weight: 30 },
+    cinnabar:    { points: 5,   tier: 'common',    weight: 25 },
+    malachite:   { points: 10,  tier: 'uncommon',  weight: 18 },
+    vitriol:     { points: 15,  tier: 'uncommon',  weight: 14 },
+    brimstone:   { points: 25,  tier: 'rare',      weight: 8  },
+    obsidian:    { points: 40,  tier: 'rare',      weight: 4  },
+    alexandrite: { points: 100, tier: 'very_rare', weight: 1  },
   },
 
   OFFERING: {
@@ -340,6 +343,87 @@ function generateOffering({ minerals, itemType }) {
   };
 }
 
+// ======================= Run engine — pure helpers (Session C1) =======================
+// No DB access, no side effects (beyond Math.random). Reused by
+// src/services/delve.js's run engine below and by scripts/delve-sim.js's
+// standalone simulator, which reads DELVE_CONSTANTS/generateOffering
+// directly rather than duplicating this math.
+
+function zoneForFathom(fathom) {
+  const zones = DELVE_CONSTANTS.ZONES;
+  for (const key of Object.keys(zones)) {
+    const z = zones[key];
+    if (fathom >= z.fathomMin && fathom <= z.fathomMax) return Number(key);
+  }
+  return 4; // open-ended Zone 4 (fathomMax: Infinity) always matches above; kept for safety
+}
+
+function enemyStatsFor(zoneNum, fathom) {
+  const zone = DELVE_CONSTANTS.ZONES[zoneNum];
+  const growth = Math.pow(zone.growthPerFathom, fathom - zone.fathomMin);
+  return {
+    hp:  Math.max(1, Math.round(zone.enemyBase.hp  * growth)),
+    atk: Math.max(1, Math.round(zone.enemyBase.atk * growth)),
+    def: Math.max(0, Math.round(zone.enemyBase.def * growth)),
+  };
+}
+
+function rollEncounterKind(lck) {
+  const E = DELVE_CONSTANTS.ENCOUNTER;
+  const eventChance = Math.min(E.EVENT_CHANCE_CAP, E.EVENT_CHANCE + lck * E.LCK_SHIFT_PER_POINT);
+  return Math.random() < eventChance ? 'event' : 'fight';
+}
+
+function eligibleMineralPool(zoneNum) {
+  const zone = DELVE_CONSTANTS.ZONES[zoneNum];
+  if (zone.bleed && Math.random() < zone.bleed.chance) {
+    return DELVE_CONSTANTS.ZONES[zone.bleed.fromZone].minerals;
+  }
+  return zone.minerals;
+}
+
+function drawZoneMineral(zoneNum) {
+  const pool = eligibleMineralPool(zoneNum);
+  const weights = {};
+  for (const m of pool) weights[m] = DELVE_CONSTANTS.MINERALS[m].weight;
+  return weightedPick(weights);
+}
+
+function rollDamage(atk, def) {
+  const [lo, hi] = DELVE_CONSTANTS.COMBAT.DAMAGE_VARIANCE;
+  const base = Math.max(1, atk - def);
+  return Math.max(1, Math.round(base * (lo + Math.random() * (hi - lo))));
+}
+
+function rollFleeSuccess(lck) {
+  const C = DELVE_CONSTANTS.COMBAT;
+  const chance = Math.min(C.FLEE_CAP, C.FLEE_BASE + C.FLEE_PER_LCK * lck);
+  return Math.random() < chance;
+}
+
+// Fight loot: chrome always, mineral/item on independent rolls. Item drops
+// reuse the real, unmodified offering generator with a virtual 3-mineral
+// budget drawn from the zone's table — per spec, "generated exactly like
+// offerings," minimum-roll rule included for free.
+function computeFightLoot({ fathom, zoneNum, grd, lck }) {
+  const L = DELVE_CONSTANTS.LOOT;
+  const chrome = Math.round((L.CHROME_BASE + fathom * L.CHROME_PER_FATHOM) * (1 + L.CHROME_GRD_MULT * grd));
+
+  let mineral = null;
+  const mineralChance = Math.min(L.MINERAL_DROP_CAP, L.MINERAL_DROP_BASE + L.MINERAL_DROP_PER_GRD * grd);
+  if (Math.random() < mineralChance) mineral = drawZoneMineral(zoneNum);
+
+  let item = null;
+  const itemChance = Math.min(L.ITEM_DROP_CAP, L.ITEM_DROP_BASE + L.ITEM_DROP_PER_LCK * lck);
+  if (Math.random() < itemChance) {
+    const minerals = [drawZoneMineral(zoneNum), drawZoneMineral(zoneNum), drawZoneMineral(zoneNum)];
+    const itemType = pickRandom(['weapon', 'armor', 'trinket']);
+    item = generateOffering({ minerals, itemType });
+  }
+
+  return { chrome, mineral, item };
+}
+
 function createDelveService({ db, chrome, timeUtils, hub }) {
   const { nowEpoch } = timeUtils;
   const service = {};
@@ -358,6 +442,28 @@ function createDelveService({ db, chrome, timeUtils, hub }) {
 
   const stmtDeleteItem = db.prepare(`DELETE FROM delve_items WHERE id = ?`);
 
+  // delve_runs — one live run per user, JSON state blob (Session C1)
+  const stmtGetRun    = db.prepare(`SELECT username, state, updated_at FROM delve_runs WHERE username = ?`);
+  const stmtUpsertRun = db.prepare(`INSERT INTO delve_runs (username, state, updated_at) VALUES (?, ?, ?)
+                                     ON CONFLICT(username) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at`);
+  const stmtDeleteRun = db.prepare(`DELETE FROM delve_runs WHERE username = ?`);
+
+  // delve_daily — 15 fights/day, board-time day key
+  const stmtEnsureDaily   = db.prepare(`INSERT INTO delve_daily (username, day, fights_used, bonus_fights) VALUES (?, ?, 0, 0)
+                                         ON CONFLICT(username, day) DO NOTHING`);
+  const stmtGetDaily      = db.prepare(`SELECT fights_used, bonus_fights FROM delve_daily WHERE username = ? AND day = ?`);
+  const stmtIncFightsUsed = db.prepare(`UPDATE delve_daily SET fights_used = fights_used + 1 WHERE username = ? AND day = ?`);
+
+  // delve_log — one row per ended run
+  const stmtInsertLog = db.prepare(`INSERT INTO delve_log (username, day, depth, outcome, chrome_banked, created_at) VALUES (?, ?, ?, ?, ?, ?)`);
+
+  // Mineral award path (banking pocket minerals on surface). Mirrors
+  // server.js's stmtAddResourceBal upsert exactly — prepared fresh here for
+  // the same documented reason as stmtGetResourceBal/stmtDeductResourceBal
+  // above (RESOURCES/its statements aren't injected into this service).
+  const stmtAwardResourceBal = db.prepare(`INSERT INTO resource_balances (username, resource, amount) VALUES (?, ?, ?)
+                                            ON CONFLICT(username, resource) DO UPDATE SET amount = amount + excluded.amount`);
+
   function rowToItem(row) {
     if (!row) return null;
     return {
@@ -373,14 +479,55 @@ function createDelveService({ db, chrome, timeUtils, hub }) {
     };
   }
 
-  // Session C makes this real (delve_runs lookup). Returns null (no active
-  // run) until then, so entrance gating is wired correctly from day one.
-  // Gating checks below call `service.getActiveRun(...)` (not this local
-  // function directly) so the lookup can be swapped on the returned
-  // instance — e.g. injecting a fake active run in tests, or Session C
-  // replacing the implementation outright — without touching call sites.
+  // Run persistence (Session C1). The delve_runs row is the single source
+  // of truth for a live run — nothing about it lives in memory, so
+  // reconnect/refresh/server-restart all resume from exactly this.
+  function loadRunRaw(username) {
+    const row = stmtGetRun.get(username);
+    if (!row) return null;
+    return { username: row.username, state: JSON.parse(row.state), updatedAt: row.updated_at };
+  }
+
+  function persistRunState(username, state) {
+    stmtUpsertRun.run(username, JSON.stringify(state), nowEpoch());
+  }
+
+  function todayKey() {
+    return timeUtils.dayKeyET();
+  }
+
+  function getDailyRow(username, day) {
+    stmtEnsureDaily.run(username, day);
+    return stmtGetDaily.get(username, day);
+  }
+
+  function fightsRemainingFor(username, day) {
+    const row = getDailyRow(username, day);
+    return Math.max(0, DELVE_CONSTANTS.DAILY.FIGHTS_PER_DAY + row.bonus_fights - row.fights_used);
+  }
+
+  function freshRunState(username, maxHp) {
+    return {
+      depth: 0,
+      hp: maxHp,
+      status: 'idle',
+      pocket: { chrome: 0, minerals: {}, items: [] },
+      encounter: null,
+      zonesSeen: [],
+      // Audit/provenance only, not a real seeded PRNG — nothing else in this
+      // codebase seeds Math.random() (offerings, hack, mining, slots all use
+      // it bare), so this is a stored identifier for a support/audit trail,
+      // not a reproducibility mechanism.
+      seed: `${username}:${nowEpoch()}:${Math.random().toString(36).slice(2)}`,
+      startedDay: todayKey(),
+    };
+  }
+
+  // Gating checks throughout (createOffering/equipItem/unequipItem/sellItem)
+  // call `service.getActiveRun(...)` (not loadRunRaw directly) so the lookup
+  // stays swappable on the returned instance without touching call sites.
   service.getActiveRun = function getActiveRun(username) {
-    return null;
+    return loadRunRaw(username);
   };
 
   function computeEffectiveStats(username) {
@@ -460,6 +607,21 @@ function createDelveService({ db, chrome, timeUtils, hub }) {
     };
   }
 
+  // Mutation core shared by the gated public equip (Session A/B) and the
+  // run engine's ungated mid-run pocket-equip (Session C1, which must work
+  // WHILE getActiveRun is truthy — the opposite of what the public gate
+  // allows). No gate check, no own transaction; callers wrap.
+  function applyEquip({ username, itemId, slot }) {
+    const occupantRow = stmtGetSlotOccupant.get(username, slot);
+    let evicted = null;
+    if (occupantRow && occupantRow.id !== itemId) {
+      stmtSetEquippedSlot.run(null, occupantRow.id);
+      evicted = rowToItem(occupantRow);
+    }
+    stmtSetEquippedSlot.run(slot, itemId);
+    return { evicted };
+  }
+
   function equipItem({ username, itemId, slot }) {
     if (service.getActiveRun(username)) return { error: 'gated' };
     slot = parseInt(slot, 10);
@@ -468,16 +630,7 @@ function createDelveService({ db, chrome, timeUtils, hub }) {
     const row = stmtGetItemById.get(itemId);
     if (!row || row.username !== username) return { error: 'not_found' };
 
-    const result = db.transaction(() => {
-      const occupantRow = stmtGetSlotOccupant.get(username, slot);
-      let evicted = null;
-      if (occupantRow && occupantRow.id !== row.id) {
-        stmtSetEquippedSlot.run(null, occupantRow.id);
-        evicted = rowToItem(occupantRow);
-      }
-      stmtSetEquippedSlot.run(slot, row.id);
-      return { evicted };
-    })();
+    const result = db.transaction(() => applyEquip({ username, itemId: row.id, slot }))();
 
     return { ok: true, item: rowToItem(stmtGetItemById.get(row.id)), evicted: result.evicted };
   }
@@ -515,6 +668,211 @@ function createDelveService({ db, chrome, timeUtils, hub }) {
     return { ok: true, sellPrice, item: rowToItem(row) };
   }
 
+  /* ======================= The run engine (Session C1) =======================
+   * descend/attack/flee/surface/pocketEquip are the only mutators of a live
+   * run. Each reads delve_runs (via loadRunRaw), validates the run's current
+   * `status` (out-of-phase calls are rejected with zero mutation — this
+   * doubles as the anti-double-resolve guard, since better-sqlite3 is
+   * synchronous and one WS message handler always runs to completion before
+   * the next is processed), mutates, and persists inside one db.transaction.
+   * Every event this session resolves instantly as the Collapsed Gallery
+   * stub ("Nothing here but dust.", zero fight cost) — the full event deck
+   * is Session C2. Camping is also C2; fights-exhausted-mid-run leaves only
+   * surface available (descend/no_fights covers both a fresh run and an
+   * idle run sitting at zero fights).
+   */
+
+  function getFightsRemaining(username) {
+    return fightsRemainingFor(username, todayKey());
+  }
+
+  function descend({ username }) {
+    const day = todayKey();
+    const existing = loadRunRaw(username);
+    let state = existing ? existing.state : null;
+
+    if (state && state.status !== 'idle') return { error: 'bad_phase' };
+    if (fightsRemainingFor(username, day) <= 0) return { error: 'no_fights' };
+
+    if (!state) {
+      const eff = computeEffectiveStats(username);
+      state = freshRunState(username, eff.hp);
+    }
+
+    return db.transaction(() => {
+      const eff = computeEffectiveStats(username);
+      const narration = [];
+
+      state.depth += 1;
+      const zoneNum = zoneForFathom(state.depth);
+
+      if (state.zonesSeen.indexOf(zoneNum) === -1) {
+        state.zonesSeen.push(zoneNum);
+        narration.push({ text: DELVE_CONSTANTS.ZONE_TRANSITIONS[zoneNum], cls: 'delve-system' });
+      }
+
+      if (rollEncounterKind(eff.lck) === 'event') {
+        narration.push({ text: 'Nothing here but dust.', cls: 'dim' });
+        state.status = 'idle';
+        state.encounter = null;
+      } else {
+        stmtIncFightsUsed.run(username, day);
+        const enemyDef = pickRandom(DELVE_CONSTANTS.ENEMIES[zoneNum]);
+        const stats = enemyStatsFor(zoneNum, state.depth);
+        state.status = 'combat';
+        state.encounter = {
+          kind: 'fight',
+          enemy: { name: enemyDef.name, hp: stats.hp, maxHp: stats.hp, atk: stats.atk, def: stats.def },
+          event: null,
+        };
+        narration.push({ text: `${enemyDef.name} — ${enemyDef.flavor}`, cls: 'delve-enemy-intro' });
+      }
+
+      persistRunState(username, state);
+      return { ok: true, state, narration, fightsRemaining: fightsRemainingFor(username, day) };
+    })();
+  }
+
+  function attack({ username }) {
+    const day = todayKey();
+    const existing = loadRunRaw(username);
+    if (!existing || existing.state.status !== 'combat') return { error: 'bad_phase' };
+    const state = existing.state;
+    const eff = computeEffectiveStats(username);
+    const enemy = state.encounter.enemy;
+
+    return db.transaction(() => {
+      const narration = [];
+      const dmgOut = rollDamage(eff.atk, enemy.def);
+      enemy.hp -= dmgOut;
+      narration.push({ text: `You strike for ${dmgOut}.`, cls: 'delve-dmg-out' });
+
+      if (enemy.hp <= 0) {
+        const zoneNum = zoneForFathom(state.depth);
+        const loot = computeFightLoot({ fathom: state.depth, zoneNum, grd: eff.grd, lck: eff.lck });
+        state.pocket.chrome += loot.chrome;
+        if (loot.mineral) state.pocket.minerals[loot.mineral] = (state.pocket.minerals[loot.mineral] || 0) + 1;
+        if (loot.item) state.pocket.items.push(loot.item);
+        narration.push({ text: `${enemy.name} falls.`, cls: 'delve-victory' });
+        const lootBits = [`+${loot.chrome} ₢`];
+        if (loot.mineral) lootBits.push(`+1 ${loot.mineral}`);
+        if (loot.item) lootBits.push(loot.item.name);
+        narration.push({ text: lootBits.join(' · '), cls: 'delve-loot' });
+        state.status = 'idle';
+        state.encounter = null;
+        persistRunState(username, state);
+        return { ok: true, state, narration, fightsRemaining: fightsRemainingFor(username, day) };
+      }
+
+      const dmgIn = rollDamage(enemy.atk, eff.def);
+      state.hp -= dmgIn;
+      narration.push({ text: `${enemy.name} strikes back for ${dmgIn}.`, cls: 'delve-dmg-in' });
+
+      if (state.hp <= 0) {
+        const depth = state.depth;
+        narration.push({ text: 'Your shade gathers itself at the statue’s feet. Your hands are empty.', cls: 'delve-death' });
+        stmtInsertLog.run(username, day, depth, 'died', 0, nowEpoch());
+        stmtDeleteRun.run(username);
+        return { ok: true, ended: 'died', depth, narration, fightsRemaining: fightsRemainingFor(username, day) };
+      }
+
+      persistRunState(username, state);
+      return { ok: true, state, narration, fightsRemaining: fightsRemainingFor(username, day) };
+    })();
+  }
+
+  function flee({ username }) {
+    const day = todayKey();
+    const existing = loadRunRaw(username);
+    if (!existing || existing.state.status !== 'combat') return { error: 'bad_phase' };
+    const state = existing.state;
+    const eff = computeEffectiveStats(username);
+    const enemy = state.encounter.enemy;
+
+    return db.transaction(() => {
+      const narration = [];
+
+      if (rollFleeSuccess(eff.lck)) {
+        state.depth = Math.max(1, state.depth - 1);
+        state.status = 'idle';
+        state.encounter = null;
+        narration.push({ text: 'You break away into the dark.', cls: 'delve-system' });
+        persistRunState(username, state);
+        return { ok: true, state, narration, fightsRemaining: fightsRemainingFor(username, day) };
+      }
+
+      narration.push({ text: 'You fail to break away.', cls: 'dim' });
+      const dmgIn = rollDamage(enemy.atk, eff.def);
+      state.hp -= dmgIn;
+      narration.push({ text: `${enemy.name} strikes for ${dmgIn}.`, cls: 'delve-dmg-in' });
+
+      if (state.hp <= 0) {
+        const depth = state.depth;
+        narration.push({ text: 'Your shade gathers itself at the statue’s feet. Your hands are empty.', cls: 'delve-death' });
+        stmtInsertLog.run(username, day, depth, 'died', 0, nowEpoch());
+        stmtDeleteRun.run(username);
+        return { ok: true, ended: 'died', depth, narration, fightsRemaining: fightsRemainingFor(username, day) };
+      }
+
+      persistRunState(username, state);
+      return { ok: true, state, narration, fightsRemaining: fightsRemainingFor(username, day) };
+    })();
+  }
+
+  function surface({ username }) {
+    const day = todayKey();
+    const existing = loadRunRaw(username);
+    if (!existing || existing.state.status !== 'idle') return { error: 'bad_phase' };
+    const state = existing.state;
+    const depth = state.depth;
+    const pocket = state.pocket;
+
+    return db.transaction(() => {
+      const newBalance = chrome.award(username, pocket.chrome, `delve surfaced from ${depth} fathoms`);
+      for (const [mineral, qty] of Object.entries(pocket.minerals)) {
+        if (qty > 0) stmtAwardResourceBal.run(username, mineral, qty);
+      }
+      for (const item of pocket.items) {
+        stmtInsertItem.run(username, item.name, item.itemType, JSON.stringify(item.stats), item.budget, item.cursed ? 1 : 0, nowEpoch());
+      }
+      stmtInsertLog.run(username, day, depth, 'surfaced', pocket.chrome, nowEpoch());
+      stmtDeleteRun.run(username);
+      return {
+        ok: true, ended: 'surfaced', depth,
+        bankSummary: { chrome: pocket.chrome, minerals: pocket.minerals, itemCount: pocket.items.length, newBalance },
+        narration: [{ text: `You surface. ${pocket.chrome} ₢ banked.`, cls: 'delve-victory' }],
+        fightsRemaining: fightsRemainingFor(username, day),
+      };
+    })();
+  }
+
+  function pocketEquip({ username, pocketIndex, slot }) {
+    const existing = loadRunRaw(username);
+    if (!existing || existing.state.status !== 'idle') return { error: 'bad_phase' };
+    const state = existing.state;
+    const idx = parseInt(pocketIndex, 10);
+    slot = parseInt(slot, 10);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= state.pocket.items.length) return { error: 'bad_item' };
+    if (!Number.isInteger(slot) || slot < 1 || slot > 4) return { error: 'bad_slot' };
+
+    const item = state.pocket.items[idx];
+    const day = todayKey();
+
+    return db.transaction(() => {
+      const info = stmtInsertItem.run(username, item.name, item.itemType, JSON.stringify(item.stats), item.budget, item.cursed ? 1 : 0, nowEpoch());
+      const newId = info.lastInsertRowid;
+      const { evicted } = applyEquip({ username, itemId: newId, slot });
+      state.pocket.items.splice(idx, 1);
+      persistRunState(username, state);
+      return {
+        ok: true, state, evicted,
+        equipped: rowToItem(stmtGetItemById.get(newId)),
+        narration: [{ text: `You fasten ${item.name} into place. It will not come off in the dark.`, cls: 'delve-system' }],
+        fightsRemaining: fightsRemainingFor(username, day),
+      };
+    })();
+  }
+
   Object.assign(service, {
     DELVE_CONSTANTS,
     generateOffering,
@@ -524,6 +882,13 @@ function createDelveService({ db, chrome, timeUtils, hub }) {
     computeEffectiveStats,
     getInventory,
     sellItem,
+    zoneForFathom,
+    getFightsRemaining,
+    descend,
+    attack,
+    flee,
+    surface,
+    pocketEquip,
   });
   return service;
 }
@@ -531,4 +896,5 @@ function createDelveService({ db, chrome, timeUtils, hub }) {
 module.exports = {
   createDelveService,
   DELVE_CONSTANTS,
+  generateOffering,
 };
