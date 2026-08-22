@@ -1,15 +1,20 @@
 'use strict';
 
-// Session C1 balance simulation — specs/DELVE.md Release plan, Session C
-// gate. Standalone: no DB, no server, imports only DELVE_CONSTANTS and the
-// real generateOffering() from src/services/delve.js. This is intentionally
-// a PARALLEL implementation of the encounter/combat/loot math (it can't hit
-// the DB the way src/services/delve.js's run engine does), reading the same
-// constants so the numbers stay honest.
+// Delve balance simulation — specs/DELVE.md Release plan, Session C gate.
+// Standalone: no DB, no server, imports only DELVE_CONSTANTS and the real
+// generateOffering() from src/services/delve.js. This is intentionally a
+// PARALLEL implementation of the encounter/combat/loot/event math (it can't
+// hit the DB the way src/services/delve.js's run engine does), reading the
+// same constants so the numbers stay honest.
 //
 // This script reports; it never retunes. Nothing here writes back to
-// DELVE_CONSTANTS or any file — the tuning decision is Punky's, after
-// Session C2 adds the event deck to the model.
+// DELVE_CONSTANTS or any file — the tuning decision is Punky's.
+//
+// Session C1 added the baseline simulateRun (events are the Collapsed
+// Gallery stub: zero cost, no effect). Session C2 adds simulateRunWithEvents,
+// modeling the full nine-event deck, and prints both tables side by side so
+// the C1-flagged uncommon-tier death-rate trap can be checked against the
+// event deck's healing/bonus-fights being in the loop.
 //
 // Usage: node scripts/delve-sim.js
 
@@ -45,6 +50,22 @@ function rollEncounterKind(lck) {
   const E = DELVE_CONSTANTS.ENCOUNTER;
   const eventChance = Math.min(E.EVENT_CHANCE_CAP, E.EVENT_CHANCE + lck * E.LCK_SHIFT_PER_POINT);
   return Math.random() < eventChance ? 'event' : 'fight';
+}
+
+// Duplicated from src/services/delve.js's pickWeightedEvent — same
+// self-contained-parallel-simulator precedent as the rest of this file
+// (weightedPick/generateOffering internals aren't exported for reuse).
+// zoneMin (Alexandrite Seam, Zone 3-4 only) is deck-membership exclusion,
+// not a re-draw-on-miss loop.
+function pickWeightedEvent(zoneNum) {
+  const pool = DELVE_CONSTANTS.EVENTS.filter(e => !e.zoneMin || zoneNum >= e.zoneMin);
+  const total = pool.reduce((sum, e) => sum + e.weight, 0);
+  let r = Math.random() * total;
+  for (const e of pool) {
+    r -= e.weight;
+    if (r <= 0) return e;
+  }
+  return pool[pool.length - 1];
 }
 
 function rollDamage(atk, def) {
@@ -159,6 +180,91 @@ function simulateRun(gear) {
   return { outcome: 'surfaced', depth, fightsUsed, chrome };
 }
 
+// Session C2: models shrine healing, chrome/mineral events, and bonus
+// fights (all named explicitly in the task). Gambler uses the stated simple
+// policy: accept only when pocket chrome < 50. Wandering Shadowkin and
+// Cursed Altar aren't covered by an explicit policy in the task and their
+// real effect (a specific generated item) can't be folded into this sim's
+// fixed-at-start stat block, so both ALWAYS DECLINE here — a modeling
+// choice, not spec-mandated, flagged in the report same as the gear-sampling
+// choice above. Collapsed Gallery and Alexandrite Seam are zero-effect on
+// this model's tracked stats (HP/chrome/depth/fights), so they're a no-op
+// continue like the C1 baseline's stub. Cached Memory's bonus fights extend
+// a per-run LOCAL budget — DELVE_CONSTANTS.DAILY.FIGHTS_PER_DAY itself is
+// never touched.
+function simulateRunWithEvents(gear) {
+  const base = DELVE_CONSTANTS.STATS.BASE;
+  const maxHp = Math.max(1, base.hp + (gear.hp || 0));
+  let hp = maxHp;
+  const atk = Math.max(1, base.atk + (gear.atk || 0));
+  const def = Math.max(0, base.def + (gear.def || 0));
+  const lck = base.lck + (gear.lck || 0);
+  const grd = base.grd + (gear.grd || 0);
+
+  const gamblerDef = DELVE_CONSTANTS.EVENTS.find(e => e.id === 'gambler');
+  const cachedMemoryDef = DELVE_CONSTANTS.EVENTS.find(e => e.id === 'cached_memory');
+  const GAMBLER_POLICY_THRESHOLD = 50;
+
+  let depth = 0;
+  let fightsUsed = 0;
+  let fightBudget = FIGHTS_PER_DAY;
+  let chrome = 0;
+
+  while (fightsUsed < fightBudget) {
+    if (hp < SURFACE_HP_THRESHOLD * maxHp) {
+      return { outcome: 'surfaced', depth, fightsUsed, chrome };
+    }
+
+    depth += 1;
+    const zoneNum = zoneForFathom(depth);
+
+    if (rollEncounterKind(lck) === 'event') {
+      const eventDef = pickWeightedEvent(zoneNum);
+      switch (eventDef.id) {
+        case 'wayside_shrine':
+          hp = Math.min(maxHp, hp + Math.round(maxHp * 0.5));
+          break;
+        case 'chrome_seam':
+          chrome += Math.round((10 + 4 * depth) * (1 + 0.03 * grd));
+          break;
+        case 'mineral_pocket':
+        case 'alexandrite_seam':
+        case 'collapsed_gallery':
+        case 'wandering_shadowkin': // declined: no effect
+        case 'cursed_altar':        // declined: no effect
+          break;
+        case 'cached_memory':
+          fightBudget += cachedMemoryDef.bonusFights;
+          break;
+        case 'gambler':
+          if (chrome < GAMBLER_POLICY_THRESHOLD) {
+            const chance = Math.min(gamblerDef.cap, gamblerDef.base + gamblerDef.perLck * lck);
+            chrome = Math.random() < chance ? chrome * 2 : 0;
+          }
+          break;
+      }
+      continue;
+    }
+
+    fightsUsed += 1;
+    const enemy = enemyStatsFor(zoneNum, depth);
+
+    for (;;) {
+      enemy.hp -= rollDamage(atk, enemy.def);
+      if (enemy.hp <= 0) {
+        chrome += fightChromeReward(depth, grd);
+        break;
+      }
+      hp -= rollDamage(enemy.atk, def);
+      if (hp <= 0) {
+        return { outcome: 'died', depth, deathZone: zoneNum, fightsUsed, chrome: 0 };
+      }
+    }
+  }
+
+  return { outcome: 'surfaced', depth, fightsUsed, chrome };
+}
+
 function percentile(sortedArr, p) {
   if (!sortedArr.length) return 0;
   return sortedArr[Math.min(sortedArr.length - 1, Math.floor(p * (sortedArr.length - 1)))];
@@ -168,10 +274,10 @@ function median(arr) {
   return percentile(s, 0.5);
 }
 
-function runArchetype(label, tier) {
+function runArchetype(label, tier, simulateFn) {
   const gear = averagedArchetypeGear(tier);
   const results = [];
-  for (let i = 0; i < RUNS_PER_ARCHETYPE; i++) results.push(simulateRun(gear));
+  for (let i = 0; i < RUNS_PER_ARCHETYPE; i++) results.push(simulateFn(gear));
 
   const depths = results.map(r => r.depth).sort((a, b) => a - b);
   const deaths = results.filter(r => r.outcome === 'died');
@@ -193,10 +299,23 @@ function runArchetype(label, tier) {
   console.log(`median fights used: ${median(fightsUsed)}`);
 }
 
-console.log('Delve balance simulation — Session C1');
+console.log('Delve balance simulation');
 console.log(`policy: descend until HP < ${SURFACE_HP_THRESHOLD * 100}% max, then surface. No flee. No self-tuning — report only.`);
 
-runArchetype('Naked', null);
-runArchetype('Full common-tier gear', 'common');
-runArchetype('Full uncommon-tier gear', 'uncommon');
-runArchetype('Full rare-tier gear', 'rare');
+console.log('\n\n########################################');
+console.log('# C1 baseline (Collapsed Gallery stub only, no event effects)');
+console.log('########################################');
+runArchetype('Naked', null, simulateRun);
+runArchetype('Full common-tier gear', 'common', simulateRun);
+runArchetype('Full uncommon-tier gear', 'uncommon', simulateRun);
+runArchetype('Full rare-tier gear', 'rare', simulateRun);
+
+console.log('\n\n########################################');
+console.log('# C2 (full event deck: shrine heals, chrome/mineral events, bonus');
+console.log('# fights, gambler accept-under-50 policy; Shadowkin/Cursed Altar');
+console.log('# always declined — see file header)');
+console.log('########################################');
+runArchetype('Naked', null, simulateRunWithEvents);
+runArchetype('Full common-tier gear', 'common', simulateRunWithEvents);
+runArchetype('Full uncommon-tier gear', 'uncommon', simulateRunWithEvents);
+runArchetype('Full rare-tier gear', 'rare', simulateRunWithEvents);

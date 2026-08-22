@@ -4359,7 +4359,11 @@ function cmdDelve(api, state) {
     if (run) {
       const zoneNum = delve.zoneForFathom(run.state.depth);
       const zoneName = delve.DELVE_CONSTANTS.ZONES[zoneNum].name;
-      b.printHTML(`A run is in progress — fathom ${run.state.depth}, <span style="color:var(--gold)">${escapeHTML(zoneName)}</span>. /descend to resume.`);
+      if (run.state.status === 'camped') {
+        b.printHTML(`You are camped at fathom ${run.state.depth}, <span style="color:var(--gold)">${escapeHTML(zoneName)}</span>. /descend to wake.`);
+      } else {
+        b.printHTML(`A run is in progress — fathom ${run.state.depth}, <span style="color:var(--gold)">${escapeHTML(zoneName)}</span>. /descend to resume.`);
+      }
     } else {
       b.print('No run in progress.', 'dim');
     }
@@ -4388,11 +4392,37 @@ function cmdDescend(api, state) {
 
 const DELVE_DEATH_LINE = 'Your shade gathers itself at the statue\'s feet. Your hands are empty.';
 const DELVE_ERROR_MESSAGES = {
-  bad_phase: 'The cave does not answer to that, not now.',
-  no_fights: 'The cave will not have you again today.',
-  bad_item:  'There is nothing there to equip.',
-  bad_slot:  'Slot must be 1-4.',
+  bad_phase:    'The cave does not answer to that, not now.',
+  no_fights:    'The cave will not have you again today.',
+  bad_item:     'There is nothing there to equip.',
+  bad_slot:     'Slot must be 1-4.',
+  insufficient: 'You don\'t have the chrome for that.',
+  would_kill:   'That would finish you. The altar can wait.',
+  bad_choice:   'The cave does not understand.',
 };
+
+// Choice-event display detail is recomputed fresh from live state on every
+// reply, never trusted from what's stored — same "full snapshot, no stale
+// derived data" discipline as effectiveStats. Only the Shadowkin's specific
+// item/price is actually persisted (src/services/delve.js's beginEventChoice)
+// since it must stay identical across a reconnect; bleed amount and gambler
+// stake are deterministic functions of current hp/pocket.chrome.
+function delveComputeEventDetail(st) {
+  if (st.status !== 'event' || !st.encounter || !st.encounter.event) return null;
+  const ev = st.encounter.event;
+  if (ev.id === 'cursed_altar') {
+    const eventDef = delve.DELVE_CONSTANTS.EVENTS.find(e => e.id === 'cursed_altar');
+    const bleedAmount = Math.max(1, Math.floor(st.hp * eventDef.hpBleedPct));
+    return { id: ev.id, bleedAmount, canAccept: st.hp - bleedAmount > 0 };
+  }
+  if (ev.id === 'gambler') {
+    return { id: ev.id, stake: st.pocket.chrome };
+  }
+  if (ev.id === 'wandering_shadowkin') {
+    return { id: ev.id, item: ev.item, price: ev.price, canAfford: st.pocket.chrome >= ev.price };
+  }
+  return { id: ev.id };
+}
 
 function delveBuildStateOp(username, result) {
   if (result.ended) {
@@ -4424,6 +4454,7 @@ function delveBuildStateOp(username, result) {
     status: st.status,
     pocket: st.pocket,
     encounter: st.encounter,
+    eventDetail: delveComputeEventDetail(st),
     effectiveStats: eff,
     equipment: inv.equipped,
     fightsRemaining: result.fightsRemaining,
@@ -4499,6 +4530,22 @@ function handleDelvePocketEquip(msg, api, state) {
   if (!requireAuth(api, state)) return;
   const username = state.username;
   const result = delve.pocketEquip({ username, pocketIndex: msg.pocketIndex, slot: msg.slot });
+  if (result.error) { sendOps(api.ws, [{ op: 'delve_error', message: DELVE_ERROR_MESSAGES[result.error] || 'The cave refuses.' }]); return; }
+  sendOps(api.ws, [delveBuildStateOp(username, result)]);
+}
+
+function handleDelveEventChoice(msg, api, state) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  const result = delve.eventChoice({ username, choice: msg.choice });
+  if (result.error) { sendOps(api.ws, [{ op: 'delve_error', message: DELVE_ERROR_MESSAGES[result.error] || 'The cave refuses.' }]); return; }
+  sendOps(api.ws, [delveBuildStateOp(username, result)]);
+}
+
+function handleDelveCamp(api, state) {
+  if (!requireAuth(api, state)) return;
+  const username = state.username;
+  const result = delve.camp({ username });
   if (result.error) { sendOps(api.ws, [{ op: 'delve_error', message: DELVE_ERROR_MESSAGES[result.error] || 'The cave refuses.' }]); return; }
   sendOps(api.ws, [delveBuildStateOp(username, result)]);
 }
@@ -6086,6 +6133,8 @@ wss.on('connection', (ws, req) => {
     if (msg.type === 'delve_flee')         { handleDelveFlee(api, state); return; }
     if (msg.type === 'delve_surface')      { handleDelveSurface(api, state); return; }
     if (msg.type === 'delve_pocket_equip') { handleDelvePocketEquip(msg, api, state); return; }
+    if (msg.type === 'delve_event_choice') { handleDelveEventChoice(msg, api, state); return; }
+    if (msg.type === 'delve_camp')         { handleDelveCamp(api, state); return; }
 
     if (msg.type === 'dots_getstate') {
       if (!requireAuth(api, state)) return;

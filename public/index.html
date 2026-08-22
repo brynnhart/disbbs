@@ -366,6 +366,7 @@ canvas.pxa-thumb{display:inline-block;vertical-align:middle;image-rendering:pixe
 .delve-death { color:var(--spite) }
 .delve-enemy-intro { color:var(--fg) }
 #delve-enemy { margin-top:6px; color:var(--spite); font-size:12px }
+#delve-event-prompt { margin-top:6px; color:var(--gold); font-size:12px }
 #delve-actions { display:flex; gap:8px; justify-content:center; flex-wrap:wrap }
 .delve-action-btn { appearance:none; border:1px solid var(--panel-edge); background:transparent; color:var(--phos-dim); padding:6px 14px; border-radius:0; cursor:pointer; font:inherit; font-size:12px }
 .delve-action-btn:hover:not(:disabled) { border-color:var(--phos); color:var(--phos) }
@@ -3335,6 +3336,7 @@ body[data-crt="full"] .prompt::after{
   var dlHp = 0, dlMaxHp = 0, dlStatus = 'idle';
   var dlPocket = { chrome: 0, minerals: {}, items: [] };
   var dlEncounter = null;
+  var dlEventDetail = null;
   var dlEffectiveStats = { hp:0, atk:0, def:0, lck:0, grd:0 };
   var dlEquipment = { 1:null, 2:null, 3:null, 4:null };
   var dlFightsRemaining = 0, dlFightsPerDay = 15;
@@ -4801,6 +4803,7 @@ body[data-crt="full"] .prompt::after{
     dlHp = 0; dlMaxHp = 0; dlStatus = 'idle';
     dlPocket = { chrome: 0, minerals: {}, items: [] };
     dlEncounter = null;
+    dlEventDetail = null;
     dlEffectiveStats = { hp:0, atk:0, def:0, lck:0, grd:0 };
     dlEquipment = { 1:null, 2:null, 3:null, 4:null };
     dlFightsRemaining = 0; dlFightsPerDay = 15;
@@ -4842,6 +4845,9 @@ body[data-crt="full"] .prompt::after{
     var enemyEl = document.createElement('div'); enemyEl.id = 'delve-enemy';
     enemyEl.style.display = 'none';
     sceneEl.appendChild(enemyEl);
+    var eventPromptEl = document.createElement('div'); eventPromptEl.id = 'delve-event-prompt';
+    eventPromptEl.style.display = 'none';
+    sceneEl.appendChild(eventPromptEl);
     var peEl = document.createElement('div'); peEl.id = 'delve-pocket-equip-panel';
     peEl.style.display = 'none';
     sceneEl.appendChild(peEl);
@@ -4938,15 +4944,36 @@ body[data-crt="full"] .prompt::after{
 
   function delveRenderScene() {
     var enemyEl = document.getElementById('delve-enemy');
-    if (!enemyEl) return;
+    var eventPromptEl = document.getElementById('delve-event-prompt');
+    if (!enemyEl || !eventPromptEl) return;
+
     if (dlStatus === 'combat' && dlEncounter && dlEncounter.enemy) {
       var e = dlEncounter.enemy;
       var filled = e.maxHp > 0 ? Math.round((Math.max(0, e.hp) / e.maxHp) * DELVE_ENEMY_BAR_SEGMENTS) : 0;
       enemyEl.style.display = '';
       enemyEl.textContent = e.name + '  ' + delveBar(filled, DELVE_ENEMY_BAR_SEGMENTS, '▓', '░') + '  ' + Math.max(0, e.hp) + '/' + e.maxHp;
+      eventPromptEl.style.display = 'none';
+      eventPromptEl.textContent = '';
+    } else if (dlStatus === 'event' && dlEventDetail) {
+      enemyEl.style.display = 'none';
+      enemyEl.textContent = '';
+      eventPromptEl.style.display = '';
+      var txt = '';
+      if (dlEventDetail.id === 'gambler') {
+        txt = 'Stake: ' + fmtCr(dlEventDetail.stake) + ' ₢';
+      } else if (dlEventDetail.id === 'wandering_shadowkin') {
+        txt = dlEventDetail.item.name + ' — ' + fmtCr(dlEventDetail.price) + ' ₢';
+        if (!dlEventDetail.canAfford) txt += ' (not enough pocket chrome)';
+      } else if (dlEventDetail.id === 'cursed_altar') {
+        txt = 'Bleed ' + dlEventDetail.bleedAmount + ' HP for a cursed gift';
+        if (!dlEventDetail.canAccept) txt += ' (would be fatal — unavailable)';
+      }
+      eventPromptEl.textContent = txt;
     } else {
       enemyEl.style.display = 'none';
       enemyEl.textContent = '';
+      eventPromptEl.style.display = 'none';
+      eventPromptEl.textContent = '';
     }
   }
 
@@ -5008,9 +5035,28 @@ body[data-crt="full"] .prompt::after{
       return;
     }
 
+    if (dlStatus === 'event' && dlEventDetail) {
+      var evId = dlEventDetail.id;
+      if (evId === 'gambler') {
+        addBtn('DOUBLE OR NOTHING', false, function() { delveSend('delve_event_choice', { choice: 'accept' }); });
+      } else if (evId === 'wandering_shadowkin') {
+        addBtn('BUY', !dlEventDetail.canAfford, function() { delveSend('delve_event_choice', { choice: 'accept' }); });
+      } else if (evId === 'cursed_altar') {
+        addBtn('BLEED', !dlEventDetail.canAccept, function() { delveSend('delve_event_choice', { choice: 'accept' }); });
+      }
+      addBtn('DECLINE', false, function() { delveSend('delve_event_choice', { choice: 'decline' }); });
+      return;
+    }
+
+    if (dlStatus === 'camped') {
+      addBtn('DESCEND', false, function() { delveSend('delve_descend'); });
+      return;
+    }
+
     addBtn('DESCEND', dlFightsRemaining <= 0, function() { delveSend('delve_descend'); });
     if (dlActive) {
       addBtn('SURFACE', false, function() { delveSend('delve_surface'); });
+      addBtn('CAMP', false, function() { delveSend('delve_camp'); });
       if ((dlPocket.items || []).length) {
         addBtn('EQUIP', false, function() { delveTogglePocketEquip(); });
       }
@@ -5043,6 +5089,7 @@ body[data-crt="full"] .prompt::after{
     dlStatus = op.status || 'idle';
     dlPocket = op.pocket || { chrome: 0, minerals: {}, items: [] };
     dlEncounter = op.encounter || null;
+    dlEventDetail = op.eventDetail || null;
     dlEffectiveStats = op.effectiveStats || dlEffectiveStats;
     dlEquipment = op.equipment || dlEquipment;
     dlFightsRemaining = op.fightsRemaining != null ? op.fightsRemaining : dlFightsRemaining;

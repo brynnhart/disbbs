@@ -359,14 +359,25 @@ Per-zone base stats × per-fathom growth. One constants table drives it all
 | Zone | Base HP | Base ATK | Base DEF | Growth/fathom (all stats) |
 |------|---------|----------|----------|---------------------------|
 | 1 | 8   | 2  | 0  | ×1.10 (compounding from zone start) |
-| 2 | 30  | 8  | 3  | ×1.09 |
-| 3 | 90  | 20 | 9  | ×1.08 |
+| 2 | 22  | 5  | 1  | ×1.09 |
+| 3 | 74  | 17 | 3  | ×1.13 |
 | 4 | 260 | 48 | 22 | ×1.07 |
 
 (Naked player comfortably handles fathoms 1–5; full common-tier gear
-clears Zone 1; the wall between zones is intentional and gear-gated.
-These numbers are starting guesses — Session C includes a simulation
-script, see the Release plan.)
+clears Zone 1; the wall between zones is intentional and gear-gated —
+Zone 2's base is calibrated to be continuous with Zone 1's own
+fathom-10 stats (≈19/4.7/0) rather than a doorstep spike, so the
+difficulty ramp is Zone 2's compounding, not the boundary itself. Zone
+3's base is likewise continuous with Zone 2's fathom-25 stats; its
+growth rate is deliberately steeper than Zone 2's to give rare-tier
+gear a real Zone 3, though the 15-fights/day budget means rare-tier
+runs typically arrive in Zone 3 with little budget left — see the
+tuning session's report for the resulting death-rate ceiling this
+imposes on that tier regardless of Zone 3's own scaling. Zone 4 keeps
+its original discontinuity from Zone 3 deliberately — see Session
+"Zone 2 cliff" tuning notes. These numbers are Punky-accepted after a
+sim-driven tuning pass — Session C's simulation script, see the
+Release plan, is how future retuning should also be validated.)
 
 ### Enemy roster (approved copy — written and tone-reviewed in an
 earlier build; use verbatim, stats come from the scaling table)

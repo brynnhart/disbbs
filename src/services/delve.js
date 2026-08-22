@@ -103,8 +103,8 @@ const DELVE_CONSTANTS = {
 
   ZONES: {
     1: { name: 'The Gravemouth',     fathomMin: 1,  fathomMax: 10,       minerals: ['bismuth', 'cinnabar'],     bleed: null,                        enemyBase: { hp: 8,   atk: 2,  def: 0  }, growthPerFathom: 1.10 },
-    2: { name: 'The Sunken Chapels', fathomMin: 11, fathomMax: 25,       minerals: ['malachite', 'vitriol'],    bleed: { fromZone: 1, chance: 0.25 }, enemyBase: { hp: 30,  atk: 8,  def: 3  }, growthPerFathom: 1.09 },
-    3: { name: 'The Old Workings',   fathomMin: 26, fathomMax: 45,       minerals: ['brimstone', 'obsidian'],   bleed: { fromZone: 2, chance: 0.25 }, enemyBase: { hp: 90,  atk: 20, def: 9  }, growthPerFathom: 1.08 },
+    2: { name: 'The Sunken Chapels', fathomMin: 11, fathomMax: 25,       minerals: ['malachite', 'vitriol'],    bleed: { fromZone: 1, chance: 0.25 }, enemyBase: { hp: 22,  atk: 5,  def: 1  }, growthPerFathom: 1.09 },
+    3: { name: 'The Old Workings',   fathomMin: 26, fathomMax: 45,       minerals: ['brimstone', 'obsidian'],   bleed: { fromZone: 2, chance: 0.25 }, enemyBase: { hp: 74,  atk: 17, def: 3  }, growthPerFathom: 1.13 },
     4: { name: 'The Nameless Deep',  fathomMin: 46, fathomMax: Infinity, minerals: ['alexandrite'],              bleed: { fromZone: 3, chance: 0.35 }, enemyBase: { hp: 260, atk: 48, def: 22 }, growthPerFathom: 1.07 },
   },
 
@@ -182,8 +182,8 @@ const DELVE_CONSTANTS = {
     { id: 'chrome_seam',          weight: 16, name: 'Chrome Seam',          effect: 'Pocket +(10 + 4*fathom) * (1 + 0.03*GRD) chrome.' },
     { id: 'mineral_pocket',       weight: 14, name: 'Mineral Pocket',       effect: 'Pocket +2 draws from the zone drop table.' },
     { id: 'cached_memory',        weight: 12, name: 'A Cached Memory',      effect: '+2 fights today.', bonusFights: 2 },
-    { id: 'gambler',              weight: 12, name: 'The Gambler',          effect: 'Optional: double-or-nothing on pocket chrome (50/50, LCK +1%/pt, cap 60%).', choice: true },
-    { id: 'wandering_shadowkin',  weight: 10, name: 'Wandering Shadowkin',  effect: 'Offers 1 item (zone-budget) at budget * 1.2 chrome, payable from pocket chrome only.', priceMult: 1.2 },
+    { id: 'gambler',              weight: 12, name: 'The Gambler',          effect: 'Optional: double-or-nothing on pocket chrome (50/50, LCK +1%/pt, cap 60%).', choice: true, base: 0.50, perLck: 0.01, cap: 0.60 },
+    { id: 'wandering_shadowkin',  weight: 10, name: 'Wandering Shadowkin',  effect: 'Offers 1 item (zone-budget) at budget * 1.2 chrome, payable from pocket chrome only.', choice: true, priceMult: 1.2 },
     { id: 'cursed_altar',         weight: 8,  name: 'Cursed Altar',         effect: 'Optional: bleed 25% current HP for a pocket item rolled with curse guaranteed.', choice: true, hpBleedPct: 0.25 },
     { id: 'collapsed_gallery',    weight: 6,  name: 'Collapsed Gallery',    effect: 'Nothing here but dust.' },
     { id: 'alexandrite_seam',     weight: 2,  name: 'Alexandrite Seam',     effect: 'Pocket +1 Alexandrite.', zoneMin: 3 },
@@ -401,6 +401,31 @@ function rollFleeSuccess(lck) {
   return Math.random() < chance;
 }
 
+// Deck is data — filters DELVE_CONSTANTS.EVENTS to the entries eligible at
+// this zone (Alexandrite Seam's zoneMin:3 is a deck-membership rule, not a
+// re-draw-on-miss loop) before weighting.
+function pickWeightedEvent(zoneNum) {
+  const pool = DELVE_CONSTANTS.EVENTS.filter(e => !e.zoneMin || zoneNum >= e.zoneMin);
+  const weights = {};
+  for (const e of pool) weights[e.id] = e.weight;
+  const chosenId = weightedPick(weights);
+  return DELVE_CONSTANTS.EVENTS.find(e => e.id === chosenId);
+}
+
+// Cursed Altar's "curse guaranteed" without adding a force-curse parameter to
+// the unmodified offering generator — rejection-sample until cursed, capped
+// so a pathological run of luck can't hang. Mirrors delve-sim.js's
+// rollUncursedItem (same idea, opposite target).
+function rollGuaranteedCursedItem(minerals, itemType) {
+  let item;
+  let guard = 0;
+  do {
+    item = generateOffering({ minerals, itemType });
+    guard++;
+  } while (!item.cursed && guard < 500);
+  return item;
+}
+
 // Fight loot: chrome always, mineral/item on independent rolls. Item drops
 // reuse the real, unmodified offering generator with a virtual 3-mineral
 // budget drawn from the zone's table — per spec, "generated exactly like
@@ -453,6 +478,7 @@ function createDelveService({ db, chrome, timeUtils, hub }) {
                                          ON CONFLICT(username, day) DO NOTHING`);
   const stmtGetDaily      = db.prepare(`SELECT fights_used, bonus_fights FROM delve_daily WHERE username = ? AND day = ?`);
   const stmtIncFightsUsed = db.prepare(`UPDATE delve_daily SET fights_used = fights_used + 1 WHERE username = ? AND day = ?`);
+  const stmtAddBonusFights = db.prepare(`UPDATE delve_daily SET bonus_fights = bonus_fights + ? WHERE username = ? AND day = ?`);
 
   // delve_log — one row per ended run
   const stmtInsertLog = db.prepare(`INSERT INTO delve_log (username, day, depth, outcome, chrome_banked, created_at) VALUES (?, ?, ?, ?, ?, ?)`);
@@ -686,10 +712,118 @@ function createDelveService({ db, chrome, timeUtils, hub }) {
     return fightsRemainingFor(username, todayKey());
   }
 
+  // Instant events resolve fully inside descend()'s reply: mutate `state` in
+  // place (same style as attack()'s inline mutation), return narration.
+  // Zero fight cost — the fight roll already happened, this branch never
+  // increments fights_used.
+  function resolveInstantEvent({ eventDef, state, eff, zoneNum, username, day }) {
+    const narration = [];
+    switch (eventDef.id) {
+      case 'wayside_shrine': {
+        const healAmt = Math.round(eff.hp * 0.5);
+        state.hp = Math.min(eff.hp, state.hp + healAmt);
+        narration.push({ text: 'Wayside Shrine — a guttering candle, a basin gone still. You drink; the wounds close a little.', cls: 'delve-system' });
+        narration.push({ text: `+${healAmt} HP.`, cls: 'delve-victory' });
+        break;
+      }
+      case 'chrome_seam': {
+        const amt = Math.round((10 + 4 * state.depth) * (1 + 0.03 * eff.grd));
+        state.pocket.chrome += amt;
+        narration.push({ text: 'Chrome Seam — a vein catches the light where no light should reach.', cls: 'delve-system' });
+        narration.push({ text: `+${amt} ₢.`, cls: 'delve-loot' });
+        break;
+      }
+      case 'mineral_pocket': {
+        const drawn = [drawZoneMineral(zoneNum), drawZoneMineral(zoneNum)];
+        for (const m of drawn) state.pocket.minerals[m] = (state.pocket.minerals[m] || 0) + 1;
+        narration.push({ text: 'Mineral Pocket — the wall gives way at a touch, older stone beneath.', cls: 'delve-system' });
+        narration.push({ text: `+1 ${drawn[0]} · +1 ${drawn[1]}.`, cls: 'delve-loot' });
+        break;
+      }
+      case 'cached_memory': {
+        stmtAddBonusFights.run(eventDef.bonusFights, username, day);
+        narration.push({ text: 'A Cached Memory — someone left strength here for whoever came next.', cls: 'delve-system' });
+        narration.push({ text: `+${eventDef.bonusFights} fights today.`, cls: 'delve-loot' });
+        break;
+      }
+      case 'collapsed_gallery': {
+        narration.push({ text: 'Nothing here but dust.', cls: 'dim' });
+        break;
+      }
+      case 'alexandrite_seam': {
+        state.pocket.minerals.alexandrite = (state.pocket.minerals.alexandrite || 0) + 1;
+        narration.push({ text: 'Alexandrite Seam — a vein of impossible color, deeper than the rest of the rock.', cls: 'delve-system' });
+        narration.push({ text: '+1 alexandrite.', cls: 'delve-loot' });
+        break;
+      }
+    }
+    return narration;
+  }
+
+  // Choice events persist only what must survive a reconnect unchanged (the
+  // Shadowkin's specific item/price); everything else derivable from live
+  // state (bleed amount, gambler stake) is computed fresh at reply time by
+  // server.js's delveComputeEventDetail, never stored here.
+  function beginEventChoice({ eventDef, zoneNum }) {
+    const narration = [];
+    if (eventDef.id === 'gambler') {
+      narration.push({ text: 'A stranger crouches in the dark with a deck no one dealt them, and looks up like they’ve been waiting.', cls: 'delve-enemy-intro' });
+      return { payload: { id: eventDef.id }, narration };
+    }
+    if (eventDef.id === 'wandering_shadowkin') {
+      const minerals = [drawZoneMineral(zoneNum), drawZoneMineral(zoneNum), drawZoneMineral(zoneNum)];
+      const itemType = pickRandom(['weapon', 'armor', 'trinket']);
+      const item = generateOffering({ minerals, itemType });
+      const price = Math.max(1, Math.round(item.budget * eventDef.priceMult));
+      narration.push({ text: 'A Shadowkin unspools from the dark — not Sooth, though cut from the same cloth: same courtesy, same unhurried patience. A stranger, all the same.', cls: 'delve-enemy-intro' });
+      return { payload: { id: eventDef.id, item, price }, narration };
+    }
+    if (eventDef.id === 'cursed_altar') {
+      narration.push({ text: 'A second altar, older, its offerings gone black. Something here wants a piece of you, plainly.', cls: 'delve-enemy-intro' });
+      return { payload: { id: eventDef.id }, narration };
+    }
+    return { payload: { id: eventDef.id }, narration };
+  }
+
   function descend({ username }) {
     const day = todayKey();
     const existing = loadRunRaw(username);
     let state = existing ? existing.state : null;
+
+    // Waking from camp is its own flow — it must work even at 0 fights left
+    // ("the cave does not check your ledger"), so it runs before the
+    // fights-remaining gate below, and never advances depth.
+    if (state && state.status === 'camped') {
+      return db.transaction(() => {
+        const eff = computeEffectiveStats(username);
+        const narration = [];
+        const healAmt = Math.round(eff.hp * DELVE_CONSTANTS.CAMP.RESUME_HP_PCT);
+        state.hp = Math.min(eff.hp, state.hp + healAmt);
+        narration.push({ text: 'You wake stiff and cold. The cave did not forget you.', cls: 'delve-system' });
+        narration.push({ text: `+${healAmt} HP.`, cls: 'delve-victory' });
+
+        if (Math.random() < DELVE_CONSTANTS.CAMP.AMBUSH_CHANCE) {
+          const zoneNum = zoneForFathom(state.depth);
+          if (fightsRemainingFor(username, day) > 0) stmtIncFightsUsed.run(username, day);
+          const enemyDef = pickRandom(DELVE_CONSTANTS.ENEMIES[zoneNum]);
+          const stats = enemyStatsFor(zoneNum, state.depth);
+          state.status = 'combat';
+          state.encounter = {
+            kind: 'fight',
+            enemy: { name: enemyDef.name, hp: stats.hp, maxHp: stats.hp, atk: stats.atk, def: stats.def },
+            event: null,
+          };
+          narration.push({ text: 'Something found you first.', cls: 'delve-dmg-in' });
+          narration.push({ text: `${enemyDef.name} — ${enemyDef.flavor}`, cls: 'delve-enemy-intro' });
+        } else {
+          state.status = 'idle';
+          state.encounter = null;
+        }
+
+        persistRunState(username, state);
+        return { ok: true, state, narration, fightsRemaining: fightsRemainingFor(username, day) };
+      })();
+    }
 
     if (state && state.status !== 'idle') return { error: 'bad_phase' };
     if (fightsRemainingFor(username, day) <= 0) return { error: 'no_fights' };
@@ -712,9 +846,17 @@ function createDelveService({ db, chrome, timeUtils, hub }) {
       }
 
       if (rollEncounterKind(eff.lck) === 'event') {
-        narration.push({ text: 'Nothing here but dust.', cls: 'dim' });
-        state.status = 'idle';
-        state.encounter = null;
+        const eventDef = pickWeightedEvent(zoneNum);
+        if (eventDef.choice) {
+          const begun = beginEventChoice({ eventDef, zoneNum });
+          narration.push(...begun.narration);
+          state.status = 'event';
+          state.encounter = { kind: 'event', enemy: null, event: begun.payload };
+        } else {
+          narration.push(...resolveInstantEvent({ eventDef, state, eff, zoneNum, username, day }));
+          state.status = 'idle';
+          state.encounter = null;
+        }
       } else {
         stmtIncFightsUsed.run(username, day);
         const enemyDef = pickRandom(DELVE_CONSTANTS.ENEMIES[zoneNum]);
@@ -873,6 +1015,101 @@ function createDelveService({ db, chrome, timeUtils, hub }) {
     })();
   }
 
+  function eventChoice({ username, choice }) {
+    const day = todayKey();
+    const existing = loadRunRaw(username);
+    if (!existing || existing.state.status !== 'event') return { error: 'bad_phase' };
+    const state = existing.state;
+    const ev = state.encounter.event;
+    const zoneNum = zoneForFathom(state.depth);
+    const normChoice = String(choice || '').toLowerCase().trim();
+
+    return db.transaction(() => {
+      const narration = [];
+
+      if (normChoice === 'decline') {
+        const declineLines = {
+          gambler: 'You leave the cards where they lie.',
+          wandering_shadowkin: 'The Shadowkin shrugs, unbothered, and is gone.',
+          cursed_altar: 'You leave the altar wanting.',
+        };
+        narration.push({ text: declineLines[ev.id] || 'You leave it be.', cls: 'dim' });
+        state.status = 'idle';
+        state.encounter = null;
+        persistRunState(username, state);
+        return { ok: true, state, narration, fightsRemaining: fightsRemainingFor(username, day) };
+      }
+
+      if (normChoice !== 'accept') return { error: 'bad_choice' };
+
+      if (ev.id === 'gambler') {
+        const eff = computeEffectiveStats(username);
+        const eventDef = DELVE_CONSTANTS.EVENTS.find(e => e.id === 'gambler');
+        const chance = Math.min(eventDef.cap, eventDef.base + eventDef.perLck * eff.lck);
+        const stake = state.pocket.chrome;
+        if (Math.random() < chance) {
+          state.pocket.chrome = stake * 2;
+          narration.push({ text: 'The cards turn your way.', cls: 'delve-victory' });
+          narration.push({ text: `₢ doubled — ${state.pocket.chrome} ₢ in pocket.`, cls: 'delve-loot' });
+        } else {
+          state.pocket.chrome = 0;
+          narration.push({ text: 'The cards do not turn your way.', cls: 'delve-death' });
+          narration.push({ text: 'Pocket chrome, gone.', cls: 'delve-dmg-in' });
+        }
+        state.status = 'idle';
+        state.encounter = null;
+        persistRunState(username, state);
+        return { ok: true, state, narration, fightsRemaining: fightsRemainingFor(username, day) };
+      }
+
+      if (ev.id === 'wandering_shadowkin') {
+        if (state.pocket.chrome < ev.price) return { error: 'insufficient' };
+        state.pocket.chrome -= ev.price;
+        state.pocket.items.push(ev.item);
+        narration.push({ text: 'The Shadowkin nods, satisfied, and is gone before you can ask anything else.', cls: 'delve-system' });
+        narration.push({ text: `${ev.item.name} — yours now.`, cls: 'delve-loot' });
+        state.status = 'idle';
+        state.encounter = null;
+        persistRunState(username, state);
+        return { ok: true, state, narration, fightsRemaining: fightsRemainingFor(username, day) };
+      }
+
+      if (ev.id === 'cursed_altar') {
+        const eventDef = DELVE_CONSTANTS.EVENTS.find(e => e.id === 'cursed_altar');
+        const bleedAmount = Math.max(1, Math.floor(state.hp * eventDef.hpBleedPct));
+        if (state.hp - bleedAmount <= 0) return { error: 'would_kill' };
+        state.hp -= bleedAmount;
+        const minerals = [drawZoneMineral(zoneNum), drawZoneMineral(zoneNum), drawZoneMineral(zoneNum)];
+        const itemType = pickRandom(['weapon', 'armor', 'trinket']);
+        const item = rollGuaranteedCursedItem(minerals, itemType);
+        state.pocket.items.push(item);
+        narration.push({ text: `You bleed ${bleedAmount} HP onto the black stone.`, cls: 'delve-dmg-in' });
+        narration.push({ text: `${item.name} — cursed, and yours.`, cls: 'delve-loot' });
+        state.status = 'idle';
+        state.encounter = null;
+        persistRunState(username, state);
+        return { ok: true, state, narration, fightsRemaining: fightsRemainingFor(username, day) };
+      }
+
+      return { error: 'bad_choice' };
+    })();
+  }
+
+  function camp({ username }) {
+    const existing = loadRunRaw(username);
+    if (!existing || existing.state.status !== 'idle') return { error: 'bad_phase' };
+    const state = existing.state;
+    return db.transaction(() => {
+      state.status = 'camped';
+      persistRunState(username, state);
+      return {
+        ok: true, state,
+        narration: [{ text: 'You make camp in the dark. The cave will keep, for a while.', cls: 'delve-system' }],
+        fightsRemaining: fightsRemainingFor(username, todayKey()),
+      };
+    })();
+  }
+
   Object.assign(service, {
     DELVE_CONSTANTS,
     generateOffering,
@@ -889,6 +1126,8 @@ function createDelveService({ db, chrome, timeUtils, hub }) {
     flee,
     surface,
     pocketEquip,
+    eventChoice,
+    camp,
   });
   return service;
 }
