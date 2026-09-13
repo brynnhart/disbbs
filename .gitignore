@@ -2,3 +2,4 @@
 *.sqlite3-wal
 *.sqlite3-shm
 dis_data.tar.gz
+/node_modules
