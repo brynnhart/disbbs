@@ -10,6 +10,9 @@ function createDatabase({ dbPath }) {
   db.pragma('journal_mode = WAL');
   db.pragma('synchronous = NORMAL');
   db.pragma('foreign_keys = ON');
+  // Without this, an INSERT OR REPLACE that removes a users row would skip
+  // the delete triggers in ensureModerationSchema.
+  db.pragma('recursive_triggers = ON');
 
   db.exec(`
 CREATE TABLE IF NOT EXISTS meta (
@@ -211,6 +214,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
   ensurePasswordResetTokensSchema(db);
   ensureFingerprintColumns(db);
   ensureBanSchema(db);
+  ensureModerationSchema(db);
   ensureLastSeenColumn(db);
   ensureRegistrationRejectionsSchema(db);
   ensureWordleSchema(db);
@@ -1274,6 +1278,57 @@ function ensureBanSchema(db){
   `);
 }
 
+// Bans mark the account (users.banned_at) instead of deleting it; every
+// moderation action lands in mod_log. The triggers are the last line of
+// defence for admin accounts: no code path may delete or ban one.
+function ensureModerationSchema(db){
+  try {
+    const cols = db.prepare('PRAGMA table_info(users)').all().map(c => c.name);
+    if (!cols.includes('banned_at')) db.exec('ALTER TABLE users ADD COLUMN banned_at INTEGER');
+    if (!cols.includes('banned_by')) db.exec('ALTER TABLE users ADD COLUMN banned_by TEXT');
+  } catch (e) {
+    console.error('ensureModerationSchema users columns failed:', e && e.message ? e.message : e);
+  }
+  try {
+    const cols = db.prepare('PRAGMA table_info(ban_list)').all().map(c => c.name);
+    if (!cols.includes('ban_log_id')) db.exec('ALTER TABLE ban_list ADD COLUMN ban_log_id INTEGER');
+  } catch (e) {
+    console.error('ensureModerationSchema ban_list column failed:', e && e.message ? e.message : e);
+  }
+  // Not wrapped: if the protections can't be installed, the server must not start.
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_ban_list_ban_log_id ON ban_list(ban_log_id);
+
+    CREATE TABLE IF NOT EXISTS mod_log (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at INTEGER NOT NULL,
+      actor      TEXT    NOT NULL,
+      action     TEXT    NOT NULL,
+      target     TEXT,
+      ref_id     INTEGER,
+      detail     TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_mod_log_created ON mod_log(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_mod_log_target  ON mod_log(target, created_at DESC);
+
+    CREATE TRIGGER IF NOT EXISTS trg_users_no_delete_admin
+    BEFORE DELETE ON users
+    WHEN OLD.is_admin IS NOT 0
+    BEGIN SELECT RAISE(ABORT, 'admin accounts cannot be deleted'); END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_users_no_ban_admin
+    BEFORE UPDATE OF banned_at, is_admin ON users
+    WHEN NEW.banned_at IS NOT NULL AND NEW.is_admin IS NOT 0
+    BEGIN SELECT RAISE(ABORT, 'admin accounts cannot be banned'); END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_ban_list_no_admin
+    BEFORE INSERT ON ban_list
+    WHEN NEW.username IS NOT NULL
+     AND EXISTS (SELECT 1 FROM users WHERE username = NEW.username AND is_admin IS NOT 0)
+    BEGIN SELECT RAISE(ABORT, 'admin accounts cannot be banned'); END;
+  `);
+}
+
 function ensureRegistrationRejectionsSchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS registration_rejections (
@@ -1686,4 +1741,5 @@ function ensureDotsSchema(db) {
 
 module.exports = {
   createDatabase,
+  ensureModerationSchema,
 };
