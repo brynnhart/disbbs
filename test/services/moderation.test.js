@@ -115,7 +115,45 @@ test('isProtected and isAdminRow fail in the safe direction', () => {
   assert.strictEqual(mod.isAdminRow(null), false);
   assert.strictEqual(mod.isAdminRow({ is_admin: null }), false);
   assert.strictEqual(mod.isAdminRow({ is_admin: 0 }), false);
+  assert.strictEqual(mod.isAdminRow({ is_admin: 2 }), false);
+  assert.strictEqual(mod.isAdminRow({ is_admin: '1' }), false);
   assert.strictEqual(mod.isAdminRow({ is_admin: 1 }), true);
+});
+
+test('connectionBanHit: admins (is_admin exactly 1) are exempt; everyone else is matched', () => {
+  const { db, addUser, mod } = setup();
+  const get = (n) => db.prepare('SELECT * FROM users WHERE username = ?').get(n);
+  addUser('regular');
+  addUser('odd', 2);
+  db.prepare("INSERT INTO ban_list (created_at, banned_by, ip) VALUES (1, 'x', '10.1.1.1')").run();
+  db.prepare("INSERT INTO ban_list (created_at, banned_by, fingerprint_hash) VALUES (1, 'x', 'fp-banned')").run();
+
+  const admin = get('Punkyroo');
+  assert.strictEqual(mod.connectionBanHit(admin, '10.1.1.1', null), null);
+  assert.strictEqual(mod.connectionBanHit(admin, null, 'fp-banned'), null);
+  assert.strictEqual(mod.connectionBanHit(admin, '10.1.1.1', 'fp-banned'), null);
+
+  assert.strictEqual(mod.connectionBanHit(get('regular'), '10.1.1.1', null), 'ip');
+  assert.strictEqual(mod.connectionBanHit(get('regular'), '10.9.9.9', 'fp-banned'), 'fingerprint');
+  assert.strictEqual(mod.connectionBanHit(get('regular'), '10.9.9.9', 'fp-clean'), null);
+  assert.strictEqual(mod.connectionBanHit(get('regular'), null, null), null);
+
+  // No exemption without a real row, or for is_admin values other than 1.
+  assert.strictEqual(mod.connectionBanHit(null, '10.1.1.1', null), 'ip');
+  assert.strictEqual(mod.connectionBanHit(undefined, null, 'fp-banned'), 'fingerprint');
+  assert.strictEqual(mod.connectionBanHit({ is_admin: '1' }, '10.1.1.1', null), 'ip');
+  assert.strictEqual(mod.connectionBanHit(get('odd'), '10.1.1.1', null), 'ip');
+});
+
+test('isAccountBanned gives no admin exemption to is_admin values other than 1', () => {
+  const { db, addUser, mod } = setup();
+  addUser('odd', 2);
+  // A legacy name row can't be inserted for a protected account (trigger), so
+  // add it first and then change is_admin, as an old database might have.
+  db.prepare("UPDATE users SET is_admin = 0 WHERE username = 'odd'").run();
+  db.prepare("INSERT INTO ban_list (created_at, banned_by, username) VALUES (1, 'old', 'odd')").run();
+  db.prepare("UPDATE users SET is_admin = 2 WHERE username = 'odd'").run();
+  assert.strictEqual(mod.isAccountBanned(db.prepare("SELECT * FROM users WHERE username = 'odd'").get()), true);
 });
 
 test('banUser refuses an admin target and logs the attempt', () => {

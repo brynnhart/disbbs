@@ -10,6 +10,7 @@ const { createHub } = require('./src/hub');
 const { createNotificationService } = require('./src/services/notifications');
 const { createChromeService } = require('./src/services/chrome');
 const { createDelveService } = require('./src/services/delve');
+const { createModerationService } = require('./src/services/moderation');
 const formatting = require('./src/utils/formatting');
 const timeUtils = require('./src/utils/time');
 
@@ -73,11 +74,6 @@ const database = createDatabase({ dbPath: DB_PATH });
 const { db, statements, helpers } = database;
 module.exports.__db = db;
 
-// Fast in-memory ban cache — populated at startup, updated on /ban
-const BANNED_USERNAMES = new Set(
-  db.prepare('SELECT username FROM ban_list WHERE username IS NOT NULL').all().map(r => r.username.toLowerCase())
-);
-
 try {
   const suspicious = db.prepare("SELECT username FROM users WHERE username GLOB '*[<>&\"'']*' OR username GLOB '*[ ]*'").all();
   if (suspicious.length) {
@@ -97,6 +93,7 @@ const notifications = createNotificationService({
 });
 const chrome = createChromeService({ db, nowEpoch: timeUtils.nowEpoch, dayKeyET: timeUtils.dayKeyET, hub: hubApi.hub, sendOps: hubApi.sendOps });
 const delve = createDelveService({ db, chrome, timeUtils, hub: hubApi.hub });
+const moderation = createModerationService({ db, nowEpoch: timeUtils.nowEpoch });
 
 function fmtCr(n) {
   return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
@@ -614,10 +611,10 @@ function buildFingerprintHash(fields) {
 
 // Checks a connection's IP and fingerprint against the ban list; only a positive
 // match on a present value can deny — missing data always passes through.
-function checkBanForConnection(ip, fingerprintHash) {
-  if (ip && checkBanByIp.get(ip)) return 'ip';
-  if (fingerprintHash && checkBanByFingerprint.get(fingerprintHash)) return 'fingerprint';
-  return null;
+// userRow is the account logging in: a real row with is_admin exactly 1 is
+// exempt; a missing row gets no exemption.
+function checkBanForConnection(ip, fingerprintHash, userRow) {
+  return moderation.connectionBanHit(userRow, ip, fingerprintHash);
 }
 
 function logBanEnforcementDenial(username, ip, check) {
@@ -5587,7 +5584,6 @@ function cmdBan(api, state, args) {
     if (target.last_login_ip && target.last_login_ip !== target.registration_ip) {
       insertBan.run(now, state.username, target.username, target.last_login_ip, null, null);
     }
-    BANNED_USERNAMES.add(target.username.toLowerCase());
 
     db.prepare('INSERT INTO ban_log (created_at, banned_by, username, chat_msgs, board_topics, board_comments, link_posts, link_comments, poll_votes, polls_created, status_posts, dm_sent, pixel_art) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
       now, state.username, target.username,
@@ -6003,12 +5999,13 @@ wss.on('connection', (ws, req) => {
           const userRow = getUserByName.get(record.username);
           if (userRow) {
             // Check if user is banned before authenticating
-            if (BANNED_USERNAMES.has(userRow.username.toLowerCase())) {
+            if (moderation.isAccountBanned(userRow)) {
+              logBanEnforcementDenial(userRow.username, ws.__ip, 'account');
               sendOps(ws, [{ op: 'error', message: 'This account has been suspended.' }]);
               try { ws.close(4003, 'banned'); } catch {}
               return;
             }
-            const banHit = checkBanForConnection(ws.__ip, userRow.fingerprint_hash);
+            const banHit = checkBanForConnection(ws.__ip, userRow.fingerprint_hash, userRow);
             if (banHit) {
               logBanEnforcementDenial(userRow.username, ws.__ip, banHit);
               sendOps(ws, [{ op: 'error', message: 'This account has been suspended.' }]);
@@ -6031,12 +6028,13 @@ wss.on('connection', (ws, req) => {
             const userRow = getUserByName.get(payload.u);
             if (userRow) {
               // Check if user is banned before authenticating
-              if (BANNED_USERNAMES.has(userRow.username.toLowerCase())) {
+              if (moderation.isAccountBanned(userRow)) {
+                logBanEnforcementDenial(userRow.username, ws.__ip, 'account');
                 sendOps(ws, [{ op: 'error', message: 'This account has been suspended.' }]);
                 try { ws.close(4003, 'banned'); } catch {}
                 return;
               }
-              const banHit = checkBanForConnection(ws.__ip, userRow.fingerprint_hash);
+              const banHit = checkBanForConnection(ws.__ip, userRow.fingerprint_hash, userRow);
               if (banHit) {
                 logBanEnforcementDenial(userRow.username, ws.__ip, banHit);
                 sendOps(ws, [{ op: 'error', message: 'This account has been suspended.' }]);
@@ -6530,7 +6528,13 @@ app.post('/api/login', (req, res) => {
 
   const fp = collectFingerprintFromReq(req, req.body || {});
 
-  const banHit = checkBanForConnection(fp.ip, fp.fpHash);
+  // Same response as a bad password, so the form doesn't reveal a ban.
+  if (moderation.isAccountBanned(user)) {
+    logBanEnforcementDenial(user.username, fp.ip, 'account');
+    return res.status(401).json({ ok: false, error: 'Invalid username or password.' });
+  }
+
+  const banHit = checkBanForConnection(fp.ip, fp.fpHash, user);
   if (banHit) {
     logBanEnforcementDenial(user.username, fp.ip, banHit);
     return res.status(401).json({ ok: false, error: 'Invalid username or password.' });

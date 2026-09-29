@@ -19,6 +19,8 @@ function createModerationService({ db, nowEpoch }) {
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
   const stmtBanByUsername   = db.prepare('SELECT id FROM ban_list WHERE LOWER(username) = LOWER(?) LIMIT 1');
+  const stmtBanByIp         = db.prepare('SELECT id FROM ban_list WHERE ip IS NOT NULL AND ip = ? LIMIT 1');
+  const stmtBanByFp         = db.prepare('SELECT id FROM ban_list WHERE fingerprint_hash IS NOT NULL AND fingerprint_hash = ? LIMIT 1');
   const stmtInsertModLog    = db.prepare(`
     INSERT INTO mod_log (created_at, actor, action, target, ref_id, detail)
     VALUES (?, ?, ?, ?, ?, ?)
@@ -26,10 +28,10 @@ function createModerationService({ db, nowEpoch }) {
   const stmtListModLog      = db.prepare('SELECT * FROM mod_log ORDER BY id DESC LIMIT ?');
   const stmtListModLogFor   = db.prepare('SELECT * FROM mod_log WHERE target = ? COLLATE NOCASE ORDER BY id DESC LIMIT ?');
 
-  // True when the row may exist and is an admin. Used for exemptions, so an
-  // unknown row is NOT exempt.
+  // True only for a real row with is_admin exactly 1. Used for exemptions,
+  // so a missing row or any other is_admin value is NOT exempt.
   function isAdminRow(row) {
-    return !!row && row.is_admin != null && row.is_admin !== 0;
+    return !!row && row.is_admin === 1;
   }
 
   // True when the row must not be banned. Fails closed: no row, or any
@@ -46,6 +48,16 @@ function createModerationService({ db, nowEpoch }) {
     if (isAdminRow(row)) return false;
     if (row.banned_at != null) return true;
     return !!stmtBanByUsername.get(row.username);
+  }
+
+  // IP/fingerprint ban match for a login. Admins are exempt, so a ban on
+  // someone sharing an admin's network or browser can't lock the admin out.
+  // Only a positive match on a present value denies.
+  function connectionBanHit(row, ip, fingerprintHash) {
+    if (isAdminRow(row)) return null;
+    if (ip && stmtBanByIp.get(ip)) return 'ip';
+    if (fingerprintHash && stmtBanByFp.get(fingerprintHash)) return 'fingerprint';
+    return null;
   }
 
   function log(actor, action, target, refId, detail) {
@@ -147,7 +159,7 @@ function createModerationService({ db, nowEpoch }) {
     }
   }
 
-  return { isAdminRow, isProtected, isAccountBanned, banUser, log, listLog };
+  return { isAdminRow, isProtected, isAccountBanned, connectionBanHit, banUser, log, listLog };
 }
 
 module.exports = { createModerationService };
