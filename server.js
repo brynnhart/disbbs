@@ -424,11 +424,6 @@ const {
   markPasswordResetTokenUsed,
   updateUserFingerprint,
   updateUserFingerprintOnRegister,
-  insertBan,
-  listBans,
-  getBanById,
-  deleteBanById,
-  updateBanNote,
   checkBanByUsername,
   checkBanByIp,
   checkBanByFingerprint,
@@ -999,11 +994,13 @@ function cmdHelp(api, state){
     api.print('  /rejections                  Last 20 blocked registration attempts (no valid IP + incomplete fingerprint)', 'cyan');
     api.print('  /ban <username> [keep]       Ban user (blocks IP + fingerprint; purges content + chrome unless keep)', 'cyan');
     api.print('  /purgeuser <username>        Purge a user\'s content and forfeit their chrome (account kept)', 'cyan');
-    api.print('  /banlist                     Show all ban list entries', 'cyan');
-    api.print('  /unban <id>                  Remove a ban list entry by id', 'cyan');
+    api.print('  /banlist                     Show banned accounts and all ban list entries', 'cyan');
+    api.print('  /unban <username> | #<id>    Lift a whole ban (all its entries) and restore the account', 'cyan');
     api.print('  /bannote <id> <text>         Add/update a note on a ban entry', 'cyan');
-    api.print('  /checkuser <username>        Show fingerprint info + ban list matches for a user', 'cyan');
-    api.print('  /purgeactivity <username>    Remove all activity feed entries mentioning a user', 'cyan');
+    api.print('  /checkuser <username>        Account, ban state, fingerprint, ban matches, recent moderation log', 'cyan');
+    api.print('  /purgeactivity <username>    Remove feed entries naming a user (whole-word match)', 'cyan');
+    api.print('  /purgechrome <username>      Forfeit a user\'s chrome through the chrome service (ledger kept)', 'cyan');
+    api.print('  /modlog [n] [username]       Moderation log, newest first (bans, unbans, notes, purges, refusals)', 'cyan');
     api.print('  /donations                   Recent donations with chrome awarded', 'cyan');
     api.print('  /linkdonor <kofi> <dis>      Link a Ko-fi name to a DIS account (retroactive award)', 'cyan');
     api.print('  /unlinkdonor <kofi>          Remove a Ko-fi name link', 'cyan');
@@ -5627,11 +5624,16 @@ function cmdPurgeUser(api, state, args) {
 function cmdPurgeActivity(api, state, args) {
   if (!requireAuth(api, state)) return;
   if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
-  const targetName = (args[0] || '').trim();
-  if (!targetName) { api.print('Usage: /purgeactivity <username>', 'yellow'); return; }
-  const r1 = db.prepare("DELETE FROM activity_feed WHERE message LIKE ?").run(`%${targetName}%`);
-  const r2 = db.prepare("DELETE FROM game_feed WHERE message LIKE ? OR username = ?").run(`%${targetName}%`, targetName);
-  api.print(`Purged activity: ${r1.changes} activity_feed rows, ${r2.changes} game_feed rows mentioning ${targetName}.`, 'green');
+  const parts = (args || []).filter(Boolean);
+  if (parts.length !== 1) { api.print('Usage: /purgeactivity <username>', 'yellow'); return; }
+  // Whole-word match only, so purging "al" leaves "alice" alone.
+  const res = moderation.purgeActivityFor(state.username, parts[0]);
+  if (!res.ok) {
+    if (res.reason === 'not_found') api.print(`No account or ban entry named ${escapeHTML(parts[0])} (exact username required).`, 'red');
+    else printModerationRefusal(api, res.reason, parts[0], 'purge activity for');
+    return;
+  }
+  api.print(`Purged activity for ${res.username}: ${res.activity} activity_feed rows, ${res.game} game_feed rows.`, 'green');
 }
 
 function cmdPurgeChrome(api, state, args) {
@@ -5655,16 +5657,25 @@ function cmdPurgeChrome(api, state, args) {
 function cmdBanList(api, state) {
   if (!requireAuth(api, state)) return;
   if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
-  const rows = listBans.all();
-  if (!rows.length) { api.print('Ban list is empty.', 'dim'); return; }
-  api.print('== Ban List ==', 'magenta');
+  const { rows, accounts } = moderation.listBanOverview();
+  if (!rows.length && !accounts.length) { api.print('Ban list is empty.', 'dim'); return; }
+  api.print('== Banned accounts ==', 'magenta');
   api.hr();
+  if (!accounts.length) api.print('No accounts are marked banned.', 'dim');
+  for (const a of accounts) {
+    api.print(`${a.username}  ban #${a.ban_log_id != null ? a.ban_log_id : '?'}  ${dayKeyET(a.banned_at * 1000)}  by:${a.banned_by || '?'}`, 'red');
+  }
+  api.hr();
+  api.print('== Ban list entries ==  (/unban <username> or /unban #<id>)', 'magenta');
+  api.hr();
+  if (!rows.length) api.print('No entries.', 'dim');
   for (const r of rows) {
     const date = dayKeyET(r.created_at * 1000);
     const fp   = r.fingerprint_hash ? r.fingerprint_hash.slice(0, 12) + '…' : '—';
     const ip   = r.ip || '—';
+    const ban  = r.ban_log_id != null ? `ban #${r.ban_log_id}` : 'old ban';
     const note = r.notes ? `  note: ${r.notes}` : '';
-    api.print(`[${r.id}] ${r.username || '—'}  ip:${ip}  fp:${fp}  ${date}  by:${r.banned_by}${note}`, 'cyan');
+    api.print(`[#${r.id}] ${r.username || '—'}  ${ban}  ip:${ip}  fp:${fp}  ${date}  by:${r.banned_by}${note}`, 'cyan');
   }
   api.hr();
 }
@@ -5672,12 +5683,24 @@ function cmdBanList(api, state) {
 function cmdUnban(api, state, args) {
   if (!requireAuth(api, state)) return;
   if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
-  const id = parseInt(args[0], 10);
-  if (!id) { api.print('Usage: /unban <id>', 'yellow'); return; }
-  const row = getBanById.get(id);
-  if (!row) { api.print(`No ban entry with id ${id}.`, 'red'); return; }
-  deleteBanById.run(id);
-  api.print(`Removed ban entry ${id} (was: ${row.username || '—'} / ${row.ip || '—'}).`, 'green');
+  const parts = (args || []).filter(Boolean);
+  if (parts.length !== 1) { api.print('Usage: /unban <username>  or  /unban #<id>  (ids from /banlist)', 'yellow'); return; }
+  const ref = /^\d+$/.test(parts[0]) ? `#${parts[0]}` : parts[0];
+  const res = moderation.unban({ actor: state.username, ref });
+  if (!res.ok) {
+    if (res.reason === 'not_banned')     api.print(`${escapeHTML(parts[0])} is not banned.`, 'yellow');
+    else if (res.reason === 'not_found') api.print(ref.startsWith('#') ? `No ban entry ${ref}.` : `No account or ban entry named ${escapeHTML(parts[0])}.`, 'red');
+    else api.print(`Refused (${res.reason}).`, 'red');
+    return;
+  }
+  const who = res.username || ref;
+  api.print(`Unbanned: ${who}  (${res.rowsRemoved} ban list ${res.rowsRemoved === 1 ? 'entry' : 'entries'} removed)`, 'green');
+  if (!res.username)        api.print('  IP/fingerprint-only entry: nothing tied to an account.', 'dim');
+  else if (!res.account)    api.print('  No account row (old ban): name and IPs unblocked only.', 'dim');
+  else if (res.stillBlocked) api.print(`  Account still blocked by other ban entries for this name. /unban ${res.username} removes them all.`, 'yellow');
+  else                      api.print(`  Account restored: ${res.username} can log in again.`, 'dim');
+  if (res.chromeForfeited == null) api.print('  Chrome forfeited at ban time: not recorded (old ban).', 'dim');
+  else api.print(`  Chrome forfeited at ban time: ${fmtCr(res.chromeForfeited)} ₢${res.chromeForfeited > 0 ? ' (not restored; award it back by hand if you want)' : ''}.`, 'dim');
 }
 
 function cmdBanNote(api, state, args) {
@@ -5686,10 +5709,32 @@ function cmdBanNote(api, state, args) {
   const id   = parseInt(args[0], 10);
   const note = args.slice(1).join(' ').trim();
   if (!id || !note) { api.print('Usage: /bannote <id> <note text>', 'yellow'); return; }
-  const row = getBanById.get(id);
-  if (!row) { api.print(`No ban entry with id ${id}.`, 'red'); return; }
-  updateBanNote.run(note, id);
+  const res = moderation.setBanNote(state.username, id, note);
+  if (!res.ok) { api.print(`No ban entry with id ${id}.`, 'red'); return; }
   api.print(`Note updated on ban entry ${id}.`, 'green');
+}
+
+// /modlog [n] [user] — newest first; every ban, unban, note and purge,
+// including refused attempts.
+function cmdModLog(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
+  let limit = 20;
+  let target = null;
+  for (const a of (args || []).filter(Boolean)) {
+    if (/^\d+$/.test(a)) limit = Math.min(200, parseInt(a, 10) || 20);
+    else target = a;
+  }
+  const rows = moderation.listLog({ limit, target });
+  api.print(`== Moderation log${target ? ' for ' + escapeHTML(target) : ''} (newest first) ==`, 'magenta');
+  api.hr();
+  if (!rows.length) api.print('No entries.', 'dim');
+  for (const r of rows) {
+    const refused = /_refused$/.test(r.action);
+    const ref = r.ref_id != null ? `  ban #${r.ref_id}` : '';
+    api.print(`${formatStampET(r.created_at * 1000)}  ${r.actor}  ${r.action}  ${r.target || '—'}${ref}${r.detail ? '  ' + r.detail : ''}`, refused ? 'yellow' : 'cyan');
+  }
+  api.hr();
 }
 
 function cmdCheckUser(api, state, args) {
@@ -5698,9 +5743,24 @@ function cmdCheckUser(api, state, args) {
   const targetName = (args[0] || '').trim();
   if (!targetName) { api.print('Usage: /checkuser <username>', 'yellow'); return; }
   const user = getUserByName.get(targetName);
-  if (!user) { api.print(`User not found: ${targetName}`, 'red'); return; }
+  if (!user) {
+    api.print(`User not found: ${escapeHTML(targetName)}`, 'red');
+    if (checkBanByUsername.get(targetName)) api.print('  Name is on the ban list (old ban, no account row). /banlist shows the entries.', 'yellow');
+    return;
+  }
 
+  const stamp = (sec) => sec ? formatStampET(sec * 1000) : '(never)';
   api.print(`== ${user.username} ==`, 'magenta');
+  api.print(`  is_admin:         ${user.is_admin}`, 'cyan');
+  if (user.banned_at != null) {
+    api.print(`  banned:           yes, ${stamp(user.banned_at)} by ${user.banned_by || '?'}`, 'red');
+  } else if (moderation.isAccountBanned(user)) {
+    api.print('  banned:           yes (old-style ban list entry for this name)', 'red');
+  } else {
+    api.print('  banned:           no', 'cyan');
+  }
+  api.print(`  created:          ${stamp(user.created_at)}`, 'cyan');
+  api.print(`  last login:       ${stamp(user.last_login_at)}`, 'cyan');
   api.print(`  registration_ip:  ${user.registration_ip  || '(none)'}`, 'cyan');
   api.print(`  last_login_ip:    ${user.last_login_ip    || '(none)'}`, 'cyan');
   api.print(`  user_agent:       ${user.user_agent       || '(none)'}`, 'cyan');
@@ -5720,9 +5780,16 @@ function cmdCheckUser(api, state, args) {
   ].filter(Boolean);
 
   if (hits.length) {
-    api.print(`  BAN MATCHES: ${hits.join(', ')}`, 'red');
+    api.print(`  BAN MATCHES: ${hits.join(', ')}${moderation.isAdminRow(user) ? '  (admin: exempt from IP/fingerprint matches at login)' : ''}`, 'red');
   } else {
     api.print('  No ban list matches.', 'dim');
+  }
+
+  const recent = moderation.listLog({ limit: 5, target: user.username });
+  api.print(`  Moderation log (last ${recent.length}):`, 'cyan');
+  if (!recent.length) api.print('    (none)', 'dim');
+  for (const r of recent) {
+    api.print(`    ${formatStampET(r.created_at * 1000)}  ${r.actor}  ${r.action}${r.detail ? '  ' + r.detail : ''}`, 'dim');
   }
 }
 
@@ -5891,6 +5958,7 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'purgeactivity': cmdPurgeActivity(api, state, args); return true;
     case 'purgechrome':   cmdPurgeChrome(api, state, args); return true;
     case 'purgeuser':     cmdPurgeUser(api, state, args); return true;
+    case 'modlog':        cmdModLog(api, state, args); return true;
 
     default:
       return false;
@@ -6511,7 +6579,7 @@ app.get('/healthz', (req, res) => {
   res.type('text').send('ok');
 });
 
-const stmtTotalMembers = db.prepare('SELECT COUNT(1) AS n FROM users');
+const stmtTotalMembers = db.prepare('SELECT COUNT(1) AS n FROM users WHERE banned_at IS NULL');
 
 app.get('/api/stats', (req, res) => {
   try {

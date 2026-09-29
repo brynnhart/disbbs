@@ -278,6 +278,15 @@ These only appear in `/help` if you're an admin.
 | `/removesuggestion <id>` | Remove a suggestion |
 | `/retention` | View current retention settings |
 | `/retention <area> <days>` | Set auto-delete for `chat`, `dms`. Use `0` to disable. |
+| `/ban <username> [keep]` | Ban an account: blocks its IPs and fingerprint and marks the account banned (the account itself is never deleted). Purges its content and forfeits its chrome unless `keep` is given. Admin accounts can't be banned. |
+| `/unban <username>` or `/unban #<id>` | Lift a whole ban (every ban list entry it created) and restore the account |
+| `/banlist` | Banned accounts and all ban list entries |
+| `/bannote <id> <text>` | Add or update a note on a ban list entry |
+| `/checkuser <username>` | Account status, ban state, fingerprint, ban matches, recent moderation log |
+| `/purgeuser <username>` | Remove a user's content and forfeit their chrome, without banning |
+| `/purgechrome <username>` | Forfeit a user's chrome through the chrome service (the ledger keeps both sides) |
+| `/purgeactivity <username>` | Remove activity/game feed entries naming a user (whole-word match) |
+| `/modlog [n] [username]` | Moderation log, newest first, including refused attempts |
 
 Note: auto-deletion is currently disabled for board topics, links, status posts, announcements, suggestions, and user accounts. Only chat messages and DMs are pruned on a schedule.
 

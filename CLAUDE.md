@@ -151,6 +151,16 @@ Rules that follow:
 
 - Ban and fingerprinting systems exist; do not weaken auth or registration
   gates. Rate-limit anything a client can spam.
+- Moderation lives in `src/services/moderation.js`. A ban marks the account
+  (`users.banned_at`/`banned_by`) and writes `ban_list`/`ban_log`; it never
+  deletes the user row. Never `DELETE FROM users` for moderation. Every
+  moderation action, including refused attempts, is written to `mod_log`.
+- Admin accounts can never be banned, purged or deleted. The service checks
+  this fail-closed (anything but `is_admin = 0` is protected), and SQLite
+  triggers in `ensureModerationSchema` back it up. Admins are exempt from
+  IP/fingerprint ban matches on every login path.
+- Login paths check `moderation.isAccountBanned(row)` and
+  `checkBanForConnection(ip, fp, row)`; a new login path must do both.
 
 ## Working style
 

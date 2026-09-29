@@ -8,7 +8,14 @@ function createChromeService({ db, nowEpoch, dayKeyET, hub, sendOps }) {
   const stmtInsertTx   = db.prepare('INSERT INTO chrome_transactions (username, amount, reason, created_at) VALUES (?, ?, ?, ?)');
   const stmtSetLastDaily   = db.prepare('UPDATE chrome_balances SET last_daily_at   = ? WHERE username = ?');
   const stmtSetLastStipend = db.prepare('UPDATE chrome_balances SET last_stipend_at = ? WHERE username = ?');
-  const stmtLeaderboard    = db.prepare('SELECT username, balance FROM chrome_balances WHERE balance > 0 ORDER BY balance DESC LIMIT ?');
+  // Banned accounts keep their row (and, after "/ban <user> keep", their
+  // balance) but never show on the leaderboard.
+  const stmtLeaderboard    = db.prepare(`
+    SELECT username, balance FROM chrome_balances
+     WHERE balance > 0
+       AND NOT EXISTS (SELECT 1 FROM users u WHERE u.username = chrome_balances.username AND u.banned_at IS NOT NULL)
+     ORDER BY balance DESC LIMIT ?
+  `);
   const stmtGetJackpot     = db.prepare('SELECT amount FROM slots_jackpot WHERE id = 1');
   const stmtSetJackpot     = db.prepare('UPDATE slots_jackpot SET amount = ? WHERE id = 1');
 

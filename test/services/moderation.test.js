@@ -12,7 +12,7 @@ let clock = 1_700_000_000;
 const nowEpoch = () => ++clock;
 
 function setup({ chromeOverride } = {}) {
-  const { db } = createDatabase({ dbPath: ':memory:' });
+  const { db, statements } = createDatabase({ dbPath: ':memory:' });
   const addUser = (username, isAdmin = 0, extra = {}) => {
     db.prepare(`
       INSERT INTO users (username, password_hash, is_admin, created_at, registration_ip, last_login_ip, fingerprint_hash)
@@ -22,7 +22,7 @@ function setup({ chromeOverride } = {}) {
   };
   const chrome = createChromeService({ db, nowEpoch, dayKeyET: () => 'day' });
   const mod = createModerationService({ db, nowEpoch, chrome: chromeOverride ? chromeOverride(chrome) : chrome });
-  return { db, addUser, mod, chrome };
+  return { db, addUser, mod, chrome, statements };
 }
 
 const modLog = (db) => db.prepare('SELECT actor, action, target, ref_id, detail FROM mod_log ORDER BY id').all();
@@ -530,4 +530,251 @@ test('forfeitChrome: spends through the service, zero balance is a no-op', () =>
   mod.banUser({ actor: 'Punkyroo', username: 'poor' });
   chrome.award('poor', 5, 'test');
   assert.strictEqual(mod.forfeitChrome('Punkyroo', db.prepare("SELECT * FROM users WHERE username = 'poor'").get()).reason, 'ban forfeiture');
+});
+
+/* ---------------- Stage 4: unban, notes, purgeactivity, visibility ---------------- */
+
+const userRow = (db, name) => db.prepare('SELECT * FROM users WHERE username = ?').get(name);
+const banRows = (db, name) => db.prepare('SELECT id, ip, ban_log_id FROM ban_list WHERE username = ? COLLATE NOCASE ORDER BY id').all(name);
+const lastLog = (db) => db.prepare('SELECT actor, action, target, ref_id, detail FROM mod_log ORDER BY id DESC LIMIT 1').get();
+const insertLegacyRow = (db, username, createdAt, bannedBy, ip) =>
+  Number(db.prepare('INSERT INTO ban_list (created_at, banned_by, username, ip) VALUES (?, ?, ?, ?)').run(createdAt, bannedBy, username, ip).lastInsertRowid);
+
+test('unban <username>: removes every row of the ban together, clears banned_at, reports forfeited chrome', () => {
+  const { db, addUser, mod, chrome } = setup();
+  addUser('victim', 0, { regIp: '10.0.0.1', loginIp: '10.0.0.2', fp: 'fp-v' });
+  chrome.award('victim', 30, 'welcome bonus');
+  const ban = mod.banUser({ actor: 'Punkyroo', username: 'victim', withinBan: purgeHook(mod, 'Punkyroo') });
+  assert.strictEqual(banRows(db, 'victim').length, 2);
+
+  const res = mod.unban({ actor: 'Punkyroo', ref: 'VICTIM' });
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.username, 'victim');
+  assert.strictEqual(res.rowsRemoved, 2);
+  assert.strictEqual(res.account, true);
+  assert.strictEqual(res.cleared, true);
+  assert.strictEqual(res.stillBlocked, false);
+  assert.deepStrictEqual(res.banLogIds, [ban.banLogId]);
+  assert.strictEqual(res.chromeForfeited, 30);
+
+  assert.strictEqual(banRows(db, 'victim').length, 0);
+  const row = userRow(db, 'victim');
+  assert.strictEqual(row.banned_at, null);
+  assert.strictEqual(row.banned_by, null);
+  assert.strictEqual(mod.isAccountBanned(row), false);
+  // Chrome is reported, not restored.
+  assert.strictEqual(chrome.getBalance('victim'), 0);
+
+  const log = lastLog(db);
+  assert.strictEqual(log.action, 'unban');
+  assert.strictEqual(log.target, 'victim');
+  assert.strictEqual(log.ref_id, ban.banLogId);
+  assert.deepStrictEqual(JSON.parse(log.detail), {
+    ref: 'VICTIM', rows_removed: 2, account: true, cleared: true, still_blocked: false,
+    ban_log_ids: [ban.banLogId], chrome_forfeited: 30,
+  });
+});
+
+test('unban after a keep ban reports 0 chrome forfeited', () => {
+  const { addUser, mod } = setup();
+  addUser('kept');
+  mod.banUser({ actor: 'Punkyroo', username: 'kept' });
+  assert.strictEqual(mod.unban({ actor: 'Punkyroo', ref: 'kept' }).chromeForfeited, 0);
+});
+
+test('unban #<id>: any row of a linked ban removes the whole group', () => {
+  const { db, addUser, mod } = setup();
+  addUser('victim', 0, { regIp: '10.0.0.1', loginIp: '10.0.0.2' });
+  mod.banUser({ actor: 'Punkyroo', username: 'victim' });
+  const rows = banRows(db, 'victim');
+  const res = mod.unban({ actor: 'Punkyroo', ref: `#${rows[1].id}` });
+  assert.strictEqual(res.rowsRemoved, 2);
+  assert.strictEqual(res.cleared, true);
+  assert.strictEqual(banRows(db, 'victim').length, 0);
+  assert.strictEqual(userRow(db, 'victim').banned_at, null);
+});
+
+test('legacy ban with no account row: grouped by username + created_at + banned_by', () => {
+  const { db, mod } = setup();
+  const a = insertLegacyRow(db, 'ghost', 500, 'oldadmin', '1.1.1.1');
+  insertLegacyRow(db, 'ghost', 500, 'oldadmin', '2.2.2.2');
+  const older = insertLegacyRow(db, 'ghost', 400, 'oldadmin', '3.3.3.3');
+  insertLegacyRow(db, 'someoneelse', 500, 'oldadmin', '4.4.4.4');
+
+  const res = mod.unban({ actor: 'Punkyroo', ref: `#${a}` });
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.rowsRemoved, 2);
+  assert.strictEqual(res.account, false);
+  assert.strictEqual(res.chromeForfeited, null);
+  assert.deepStrictEqual(banRows(db, 'ghost').map(r => r.id), [older]);
+  assert.strictEqual(banRows(db, 'someoneelse').length, 1);
+
+  const rest = mod.unban({ actor: 'Punkyroo', ref: 'Ghost' });
+  assert.strictEqual(rest.rowsRemoved, 1);
+  assert.strictEqual(rest.username, 'ghost');
+  assert.strictEqual(banRows(db, 'ghost').length, 0);
+});
+
+test('legacy ban on an existing account (no banned_at) is lifted by timestamp group', () => {
+  const { db, addUser, mod } = setup();
+  addUser('oldtimer');
+  const a = insertLegacyRow(db, 'oldtimer', 700, 'oldadmin', '5.5.5.5');
+  insertLegacyRow(db, 'oldtimer', 700, 'oldadmin', '6.6.6.6');
+  assert.strictEqual(mod.isAccountBanned(userRow(db, 'oldtimer')), true);
+  const res = mod.unban({ actor: 'Punkyroo', ref: `#${a}` });
+  assert.strictEqual(res.rowsRemoved, 2);
+  assert.strictEqual(res.account, true);
+  assert.strictEqual(res.stillBlocked, false);
+  assert.strictEqual(mod.isAccountBanned(userRow(db, 'oldtimer')), false);
+});
+
+test('unban #<id> of one ban leaves the account marked while another ban entry for the name remains', () => {
+  const { db, addUser, mod } = setup();
+  addUser('twice', 0, { regIp: '10.0.0.9' });
+  insertLegacyRow(db, 'twice', 100, 'oldadmin', '7.7.7.7');
+  mod.banUser({ actor: 'Punkyroo', username: 'twice' });
+  const linked = banRows(db, 'twice').find(r => r.ban_log_id != null);
+  const res = mod.unban({ actor: 'Punkyroo', ref: `#${linked.id}` });
+  assert.strictEqual(res.rowsRemoved, 1);
+  assert.strictEqual(res.cleared, false);
+  assert.strictEqual(res.stillBlocked, true);
+  assert.ok(userRow(db, 'twice').banned_at > 0);
+  const all = mod.unban({ actor: 'Punkyroo', ref: 'twice' });
+  assert.strictEqual(all.cleared, true);
+  assert.strictEqual(all.stillBlocked, false);
+});
+
+test('unban refusals are logged; admin rows are never touched', () => {
+  const { db, addUser, mod } = setup();
+  addUser('clean');
+  const admin2 = addUser('admin2');
+  // Legacy name row from before admin2 was promoted.
+  insertLegacyRow(db, 'admin2', 900, 'oldadmin', '8.8.8.8');
+  db.prepare("UPDATE users SET is_admin = 1 WHERE username = 'admin2'").run();
+  const adminBefore = userRow(db, 'admin2');
+
+  assert.strictEqual(mod.unban({ actor: 'Punkyroo', ref: 'nobody' }).reason, 'not_found');
+  assert.strictEqual(mod.unban({ actor: 'Punkyroo', ref: '#999' }).reason, 'not_found');
+  assert.strictEqual(mod.unban({ actor: 'Punkyroo', ref: 'clean' }).reason, 'not_banned');
+  assert.strictEqual(mod.unban({ actor: 'Punkyroo', ref: 'Punkyroo' }).reason, 'not_banned');
+  assert.deepStrictEqual(db.prepare("SELECT target, detail FROM mod_log WHERE action = 'unban_refused' ORDER BY id").all(), [
+    { target: 'nobody', detail: 'not found' },
+    { target: '#999', detail: 'not found' },
+    { target: 'clean', detail: 'not banned' },
+    { target: 'Punkyroo', detail: 'not banned' },
+  ]);
+
+  // Cleaning up the stale entry removes the ban_list row but leaves the admin row as it was.
+  const res = mod.unban({ actor: 'Punkyroo', ref: 'admin2' });
+  assert.strictEqual(res.rowsRemoved, 1);
+  assert.strictEqual(res.cleared, false);
+  assert.deepStrictEqual(userRow(db, 'admin2'), adminBefore);
+  assert.strictEqual(admin2.id, adminBefore.id);
+});
+
+test('unban rolls back completely if the audit write fails', () => {
+  const { db, addUser, mod } = setup();
+  addUser('victim', 0, { regIp: '10.0.0.1', loginIp: '10.0.0.2' });
+  mod.banUser({ actor: 'Punkyroo', username: 'victim' });
+  db.exec('DROP TABLE mod_log');
+  assert.throws(() => mod.unban({ actor: 'Punkyroo', ref: 'victim' }), /mod_log/);
+  assert.strictEqual(banRows(db, 'victim').length, 2);
+  assert.ok(userRow(db, 'victim').banned_at > 0);
+});
+
+test('setBanNote updates the entry and logs the note text; unknown ids are refused and logged', () => {
+  const { db, addUser, mod } = setup();
+  addUser('victim', 0, { regIp: '10.0.0.1' });
+  const ban = mod.banUser({ actor: 'Punkyroo', username: 'victim' });
+  const id = banRows(db, 'victim')[0].id;
+  assert.strictEqual(mod.setBanNote('Punkyroo', id, 'spam wave, see adminchat').ok, true);
+  assert.strictEqual(db.prepare('SELECT notes FROM ban_list WHERE id = ?').get(id).notes, 'spam wave, see adminchat');
+  const log = lastLog(db);
+  assert.deepStrictEqual([log.action, log.target, log.ref_id], ['ban_note', 'victim', ban.banLogId]);
+  assert.deepStrictEqual(JSON.parse(log.detail), { ban_list_id: id, note: 'spam wave, see adminchat' });
+  assert.strictEqual(mod.setBanNote('Punkyroo', 999, 'x').reason, 'not_found');
+  assert.deepStrictEqual([lastLog(db).action, lastLog(db).target], ['ban_note_refused', '#999']);
+});
+
+test('purgeActivityFor: whole-word, refuses admins and unknown names, allows old banned names', () => {
+  const { db, addUser, mod } = setup();
+  addUser('al'); addUser('alice'); addUser('admin2', 1);
+  const add = (m) => db.prepare("INSERT INTO activity_feed (category, event_type, message, created_at) VALUES ('c', 'e', ?, 1)").run(m);
+  add('📋 al started a topic'); add('📋 alice started a topic'); add('🏆 admin2 took #1'); add('👤 ghost just joined DIS!');
+  db.prepare("INSERT INTO game_feed (username, event_type, message, created_at) VALUES ('al', 'e', 'won', 1)").run();
+
+  const res = mod.purgeActivityFor('Punkyroo', 'al');
+  assert.deepStrictEqual([res.ok, res.activity, res.game], [true, 1, 1]);
+  assert.strictEqual(mod.purgeActivityFor('Punkyroo', 'admin2').reason, 'protected');
+  assert.strictEqual(mod.purgeActivityFor('Punkyroo', 'nobody').reason, 'not_found');
+  insertLegacyRow(db, 'ghost', 1, 'oldadmin', null);
+  const ghost = mod.purgeActivityFor('Punkyroo', 'ghost');
+  assert.deepStrictEqual([ghost.ok, ghost.account, ghost.activity], [true, false, 1]);
+
+  assert.deepStrictEqual(db.prepare('SELECT message FROM activity_feed ORDER BY id').all().map(r => r.message),
+    ['📋 alice started a topic', '🏆 admin2 took #1']);
+  assert.deepStrictEqual(db.prepare("SELECT action, target, detail FROM mod_log ORDER BY id").all(), [
+    { action: 'purge_activity', target: 'al', detail: '{"activity":1,"game":1}' },
+    { action: 'purge_activity_refused', target: 'admin2', detail: 'protected account' },
+    { action: 'purge_activity_refused', target: 'nobody', detail: 'not found' },
+    { action: 'purge_activity', target: 'ghost', detail: '{"activity":1,"game":0}' },
+  ]);
+});
+
+test('mod_log records every action: ban, note, purge, chrome, activity, unban', () => {
+  const { db, addUser, mod, chrome } = setup();
+  const t = addUser('target', 0, { regIp: '10.0.0.1' });
+  chrome.award('target', 5, 'welcome bonus');
+  const ban = mod.banUser({ actor: 'Punkyroo', username: 'target' });
+  mod.setBanNote('Punkyroo', banRows(db, 'target')[0].id, 'note');
+  mod.purgeUserContent('Punkyroo', userRow(db, 'target'));
+  mod.forfeitChrome('Punkyroo', userRow(db, 'target'));
+  mod.purgeActivityFor('Punkyroo', 'target');
+  mod.unban({ actor: 'Punkyroo', ref: 'target' });
+  assert.deepStrictEqual(mod.listLog({ target: 'target' }).map(r => r.action).reverse(),
+    ['ban', 'ban_note', 'purge_content', 'purge_chrome', 'purge_activity', 'unban']);
+  assert.ok(mod.listLog({ target: 'target' }).every(r => r.actor === 'Punkyroo'));
+  assert.strictEqual(ban.ok && t.id > 0, true);
+});
+
+test('listBanOverview shows banned accounts with their ban id alongside ban_list rows', () => {
+  const { db, addUser, mod } = setup();
+  addUser('victim', 0, { regIp: '10.0.0.1' });
+  const ban = mod.banUser({ actor: 'Punkyroo', username: 'victim' });
+  insertLegacyRow(db, 'ghost', 1, 'oldadmin', '9.9.9.9');
+  const o = mod.listBanOverview();
+  assert.deepStrictEqual(o.accounts.map(a => [a.username, a.ban_log_id, a.banned_by]), [['victim', ban.banLogId, 'Punkyroo']]);
+  assert.deepStrictEqual(o.rows.map(r => r.username).sort(), ['ghost', 'victim']);
+});
+
+test('inactive-user sweep never deletes banned (or admin) accounts', () => {
+  const { db, addUser, mod, statements } = setup();
+  addUser('idle'); addUser('bannedidle');
+  mod.banUser({ actor: 'Punkyroo', username: 'bannedidle' });
+  statements.sweepInactiveUsers.run(0);
+  assert.strictEqual(userRow(db, 'idle'), undefined);
+  assert.ok(userRow(db, 'bannedidle'));
+  assert.ok(userRow(db, 'Punkyroo'));
+});
+
+test('read-side visibility: banned accounts are hidden from leaderboards, member list and count', () => {
+  const { db, addUser, mod, chrome, statements } = setup();
+  addUser('good'); addUser('bad');
+  chrome.award('good', 10, 'x');
+  chrome.award('bad', 500, 'x');
+  db.prepare("INSERT INTO wordle_streaks (username, current_streak, best_streak, last_played_date) VALUES ('good', 2, 3, 'd'), ('bad', 9, 9, 'd')").run();
+  db.prepare("INSERT INTO wordle_results (username, date, solved, guesses, created_at) VALUES ('good', 'd', 1, 4, 1), ('bad', 'd', 1, 2, 1)").run();
+  const before = statements.countUsers.get().n;
+  mod.banUser({ actor: 'Punkyroo', username: 'bad' });   // keep: the balance stays
+
+  assert.deepStrictEqual(chrome.getLeaderboard(10).map(r => r.username), ['good']);
+  assert.deepStrictEqual(statements.wordleLeaderCurrent.all().map(r => r.username), ['good']);
+  assert.deepStrictEqual(statements.wordleLeaderBest.all().map(r => r.username), ['good']);
+  assert.deepStrictEqual(statements.wordleGetTodaySolvers.all('d').map(r => r.username), ['good']);
+  assert.strictEqual(statements.countUsers.get().n, before - 1);
+  assert.ok(!statements.listUsersPage.all(100, 0).some(r => r.username === 'bad'));
+
+  mod.unban({ actor: 'Punkyroo', ref: 'bad' });
+  assert.deepStrictEqual(chrome.getLeaderboard(10).map(r => r.username), ['bad', 'good']);
+  assert.strictEqual(statements.countUsers.get().n, before);
 });

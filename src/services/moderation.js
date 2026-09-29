@@ -45,6 +45,7 @@ const REFUSAL_DETAIL = {
   self: 'self',
   not_found: 'not found',
   already_banned: 'already banned',
+  not_banned: 'not banned',
 };
 
 function createModerationService({ db, nowEpoch, chrome }) {
@@ -72,6 +73,34 @@ function createModerationService({ db, nowEpoch, chrome }) {
   `);
   const stmtListModLog      = db.prepare('SELECT * FROM mod_log ORDER BY id DESC LIMIT ?');
   const stmtListModLogFor   = db.prepare('SELECT * FROM mod_log WHERE target = ? COLLATE NOCASE ORDER BY id DESC LIMIT ?');
+  const stmtBanPurgeLogs    = db.prepare("SELECT detail FROM mod_log WHERE action = 'purge_content' AND ref_id = ?");
+
+  // Unban / notes / listing.
+  const stmtGetBanRow       = db.prepare('SELECT * FROM ban_list WHERE id = ?');
+  const stmtBanRowsByLogId  = db.prepare('SELECT * FROM ban_list WHERE ban_log_id = ?');
+  // Rows written before ban_log_id existed: one /ban wrote them all with the
+  // same username, created_at and banned_by.
+  const stmtLegacyGroup     = db.prepare(`
+    SELECT * FROM ban_list
+     WHERE ban_log_id IS NULL AND username = ? COLLATE NOCASE AND created_at = ? AND banned_by = ?
+  `);
+  const stmtBanRowsForName  = db.prepare(`
+    SELECT * FROM ban_list
+     WHERE username = ? COLLATE NOCASE
+        OR ban_log_id IN (SELECT ban_log_id FROM ban_list WHERE username = ? COLLATE NOCASE AND ban_log_id IS NOT NULL)
+  `);
+  const stmtBanNameRow      = db.prepare('SELECT username FROM ban_list WHERE username = ? COLLATE NOCASE LIMIT 1');
+  const stmtDeleteBanRow    = db.prepare('DELETE FROM ban_list WHERE id = ?');
+  const stmtClearBanned     = db.prepare('UPDATE users SET banned_at = NULL, banned_by = NULL WHERE id = ? AND is_admin = 0 AND banned_at IS NOT NULL');
+  const stmtUpdateBanNote   = db.prepare('UPDATE ban_list SET notes = ? WHERE id = ?');
+  const stmtListBanRows     = db.prepare('SELECT * FROM ban_list ORDER BY created_at DESC, id DESC');
+  const stmtListBannedAccounts = db.prepare(`
+    SELECT u.username, u.banned_at, u.banned_by,
+           (SELECT MAX(b.id) FROM ban_log b WHERE b.username = u.username) AS ban_log_id
+      FROM users u
+     WHERE u.banned_at IS NOT NULL
+     ORDER BY u.banned_at DESC
+  `);
 
   // Content purge. Own replies/votes go first so the cascade counts below
   // only see other users' rows.
@@ -193,7 +222,7 @@ function createModerationService({ db, nowEpoch, chrome }) {
 
   // The purge itself, for a row already re-read inside a transaction. Throws
   // a refusal for protected rows.
-  function purgeRow(actor, row, { chromeReason }) {
+  function purgeRow(row, { chromeReason }) {
     if (isProtected(row)) throw refusal('protected');
     const id = row.id;
     const name = row.username;
@@ -234,7 +263,7 @@ function createModerationService({ db, nowEpoch, chrome }) {
   // records the counts on the ban_log row, and throws on any refusal so the
   // whole ban rolls back.
   function purgeWithinBan(actor, row, banLogId) {
-    const result = purgeRow(actor, row, { chromeReason: 'ban forfeiture' });
+    const result = purgeRow(row, { chromeReason: 'ban forfeiture' });
     const c = result.counts;
     stmtUpdateBanLogCounts.run(
       c.chat_msgs, c.board_topics, c.board_comments, c.link_posts, c.link_comments,
@@ -262,7 +291,7 @@ function createModerationService({ db, nowEpoch, chrome }) {
         const row = stmtGetUserById.get(targetRow.id);
         if (isProtected(row)) throw refusal('protected');
         const reason = row.banned_at != null ? 'ban forfeiture' : 'admin forfeiture';
-        const result = purgeRow(actorName, row, { chromeReason: reason });
+        const result = purgeRow(row, { chromeReason: reason });
         log(actorName, 'purge_content', row.username, null, purgeLogDetail(result));
         return Object.assign({ ok: true, username: row.username }, result);
       })();
@@ -367,9 +396,129 @@ function createModerationService({ db, nowEpoch, chrome }) {
     }
   }
 
+  // All ban_list rows written by the same ban as `row`.
+  function banGroupFor(row) {
+    if (row.ban_log_id != null) return stmtBanRowsByLogId.all(row.ban_log_id);
+    if (row.username) return stmtLegacyGroup.all(row.username, row.created_at, row.banned_by);
+    return [row];
+  }
+
+  // Chrome forfeited by the purge that ran with these bans; null when no
+  // ban in the set was recorded (old bans deleted chrome outright).
+  function chromeForfeitedFor(banLogIds) {
+    if (!banLogIds.length) return null;
+    let total = 0;
+    for (const id of banLogIds) {
+      for (const r of stmtBanPurgeLogs.all(id)) {
+        try { total += Number(JSON.parse(r.detail).chrome_forfeited) || 0; } catch {}
+      }
+    }
+    return total;
+  }
+
+  // /unban <username> removes every ban_list row for that name plus any row
+  // linked to the same bans; /unban #<id> removes the group that row belongs
+  // to. One transaction: delete the rows, clear the account marker when no
+  // ban entry for the name remains, write the audit row. Admin rows are never
+  // updated (the UPDATE is guarded by is_admin = 0).
+  function unban({ actor, ref }) {
+    const actorName = String(actor || '').trim();
+    const raw = String(ref || '').trim();
+    if (!actorName) return { ok: false, reason: 'no_actor' };
+    if (!raw) return { ok: false, reason: 'not_found' };
+
+    let rows;
+    let name;
+    if (/^#\d+$/.test(raw)) {
+      const row = stmtGetBanRow.get(parseInt(raw.slice(1), 10));
+      if (!row) return refuseAction(actorName, 'unban_refused', raw, 'not_found');
+      rows = banGroupFor(row);
+      name = row.username || null;
+    } else {
+      const user = stmtGetUserByName.get(raw);
+      name = user ? user.username : raw;
+      rows = stmtBanRowsForName.all(name, name);
+      if (!rows.length && !(user && user.banned_at != null)) {
+        return refuseAction(actorName, 'unban_refused', name, user ? 'not_banned' : 'not_found');
+      }
+      if (!user) name = (rows.find(r => r.username) || {}).username || name;
+    }
+
+    const result = db.transaction(() => {
+      let removed = 0;
+      for (const r of rows) removed += stmtDeleteBanRow.run(r.id).changes;
+
+      const user = name ? stmtGetUserByName.get(name) : null;
+      let cleared = false;
+      if (user && user.banned_at != null && !stmtBanNameRow.get(user.username)) {
+        cleared = stmtClearBanned.run(user.id).changes === 1;
+      }
+      const after = user ? stmtGetUserById.get(user.id) : null;
+      const banLogIds = [...new Set(rows.map(r => r.ban_log_id).filter(v => v != null))];
+      const out = {
+        ok: true,
+        username: name,
+        rowsRemoved: removed,
+        account: !!user,
+        cleared,
+        stillBlocked: after ? isAccountBanned(after) : false,
+        banLogIds,
+        chromeForfeited: chromeForfeitedFor(banLogIds),
+      };
+      log(actorName, 'unban', name || raw, banLogIds[0] != null ? banLogIds[0] : null, {
+        ref: raw, rows_removed: removed, account: out.account, cleared, still_blocked: out.stillBlocked,
+        ban_log_ids: banLogIds, chrome_forfeited: out.chromeForfeited,
+      });
+      return out;
+    })();
+    return result;
+  }
+
+  function setBanNote(actor, banId, note) {
+    const actorName = String(actor || '').trim();
+    const text = String(note || '').trim();
+    if (!actorName) return { ok: false, reason: 'no_actor' };
+    const row = stmtGetBanRow.get(banId);
+    if (!row) return refuseAction(actorName, 'ban_note_refused', `#${banId}`, 'not_found');
+    return db.transaction(() => {
+      stmtUpdateBanNote.run(text, row.id);
+      log(actorName, 'ban_note', row.username || `#${row.id}`, row.ban_log_id, { ban_list_id: row.id, note: text });
+      return { ok: true, id: row.id, username: row.username || null };
+    })();
+  }
+
+  // /purgeactivity: whole-word feed purge for an existing account or a name
+  // that only survives in ban_list (old bans). Admin accounts are refused.
+  function purgeActivityFor(actor, username) {
+    const actorName = String(actor || '').trim();
+    const raw = String(username || '').trim();
+    if (!actorName) return { ok: false, reason: 'no_actor' };
+    if (!raw) return { ok: false, reason: 'not_found' };
+    const user = stmtGetUserByName.get(raw);
+    let name;
+    if (user) {
+      if (isProtected(user)) return refuseAction(actorName, 'purge_activity_refused', user.username, 'protected');
+      name = user.username;
+    } else {
+      const banned = stmtBanNameRow.get(raw);
+      if (!banned) return refuseAction(actorName, 'purge_activity_refused', raw, 'not_found');
+      name = banned.username;
+    }
+    return db.transaction(() => {
+      const counts = deleteFeedRowsFor(name);
+      log(actorName, 'purge_activity', name, null, counts);
+      return Object.assign({ ok: true, username: name, account: !!user }, counts);
+    })();
+  }
+
+  function listBanOverview() {
+    return { rows: stmtListBanRows.all(), accounts: stmtListBannedAccounts.all() };
+  }
+
   return {
     isAdminRow, isProtected, isAccountBanned, connectionBanHit, findUser,
     banUser, purgeWithinBan, purgeUserContent, forfeitChrome, deleteFeedRowsFor,
+    unban, setBanNote, purgeActivityFor, listBanOverview,
     log, listLog,
   };
 }

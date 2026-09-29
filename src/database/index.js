@@ -556,6 +556,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
   const sweepInactiveUsers = db.prepare(`
     DELETE FROM users
      WHERE is_admin = 0
+       AND banned_at IS NULL
        AND COALESCE(last_login_at, created_at) <= strftime('%s','now') - ?
   `);
 
@@ -577,10 +578,12 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
       FROM users
      ORDER BY username COLLATE NOCASE ASC
   `);
-  const countUsers = db.prepare('SELECT COUNT(1) AS n FROM users');
+  // Banned accounts keep their row but are hidden from the member list.
+  const countUsers = db.prepare('SELECT COUNT(1) AS n FROM users WHERE banned_at IS NULL');
   const listUsersPage = db.prepare(`
     SELECT username, display_name, last_login_at
       FROM users
+     WHERE banned_at IS NULL
   ORDER BY username COLLATE NOCASE ASC
      LIMIT ? OFFSET ?
   `);
@@ -639,18 +642,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
      WHERE id = ?
   `);
 
-  const insertBan = db.prepare(`
-    INSERT INTO ban_list (created_at, banned_by, username, ip, fingerprint_hash, notes)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `);
-  const listBans = db.prepare(`
-    SELECT id, created_at, banned_by, username, ip, fingerprint_hash, notes
-      FROM ban_list
-     ORDER BY created_at DESC
-  `);
-  const getBanById = db.prepare(`SELECT * FROM ban_list WHERE id = ?`);
-  const deleteBanById = db.prepare(`DELETE FROM ban_list WHERE id = ?`);
-  const updateBanNote = db.prepare(`UPDATE ban_list SET notes = ? WHERE id = ?`);
+  // ban_list writes (ban, unban, notes) live in src/services/moderation.js.
 
   const checkBanByUsername = db.prepare(`
     SELECT id FROM ban_list WHERE LOWER(username) = LOWER(?) LIMIT 1
@@ -750,15 +742,21 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
   `);
   const wordleLeaderCurrent   = db.prepare(`
     SELECT username, current_streak FROM wordle_streaks
-     WHERE current_streak > 0 ORDER BY current_streak DESC, username ASC LIMIT 10
+     WHERE current_streak > 0
+       AND NOT EXISTS (SELECT 1 FROM users u WHERE u.username = wordle_streaks.username AND u.banned_at IS NOT NULL)
+     ORDER BY current_streak DESC, username ASC LIMIT 10
   `);
   const wordleLeaderBest      = db.prepare(`
     SELECT username, best_streak FROM wordle_streaks
-     WHERE best_streak > 0 ORDER BY best_streak DESC, username ASC LIMIT 10
+     WHERE best_streak > 0
+       AND NOT EXISTS (SELECT 1 FROM users u WHERE u.username = wordle_streaks.username AND u.banned_at IS NOT NULL)
+     ORDER BY best_streak DESC, username ASC LIMIT 10
   `);
   const wordleGetTodaySolvers = db.prepare(`
     SELECT username, guesses FROM wordle_results
-     WHERE date = ? AND solved = 1 ORDER BY guesses ASC, created_at ASC LIMIT 20
+     WHERE date = ? AND solved = 1
+       AND NOT EXISTS (SELECT 1 FROM users u WHERE u.username = wordle_results.username AND u.banned_at IS NOT NULL)
+     ORDER BY guesses ASC, created_at ASC LIMIT 20
   `);
   const gameFeedInsert        = db.prepare('INSERT INTO game_feed (username, event_type, message, created_at) VALUES (?, ?, ?, ?)');
   const gameFeedList          = db.prepare(`
@@ -1009,11 +1007,6 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
     markPasswordResetTokenUsed,
     updateUserFingerprint,
     updateUserFingerprintOnRegister,
-    insertBan,
-    listBans,
-    getBanById,
-    deleteBanById,
-    updateBanNote,
     checkBanByUsername,
     checkBanByIp,
     checkBanByFingerprint,
