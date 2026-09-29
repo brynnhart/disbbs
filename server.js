@@ -888,76 +888,23 @@ function renderSplash(api, state){
   api.batch(b=>{
     b.clear();
     b.printHTML(splashSVG());
-    b.print('Enter username to log in', 'cyan');
-    b.print('or type /register <user> <pass> to create a new account.', 'dim');
-    b.setInputType('text', 'Username or /register');
+    b.print(SPLASH_POINTER, 'cyan');
+    b.setInputType('text', 'type /login to reload');
     b.setInputLimit(null);
   });
   state.login.step='username'; state.login.tempUser='';
 }
+// Credentials are only accepted through the web form (/api/login), which
+// runs the ban checks; the terminal never takes a password.
+const SPLASH_POINTER = 'Not logged in. Refresh the page (or type /login) to log in or join through the web form.';
 function splashHandleCommand(cmd, api){
-  if (cmd==='help'){ api.hr(); api.print('Splash commands:', 'yellow'); api.print('  /help','cyan'); api.print('  /clear','cyan'); api.print('  /register <user> <pass>','cyan'); return true; }
+  if (cmd==='help'){ api.hr(); api.print('Splash commands:', 'yellow'); api.print('  /help','cyan'); api.print('  /clear','cyan'); api.print('  /login   Reload the page to reach the login form','cyan'); return true; }
   if (cmd==='clear'){ api.clear(); return true; }
+  if (cmd==='login'){ sendOps(api.ws, [{ op: 'reload' }]); return true; }
   return false;
 }
 function splashHandleRaw(text, api, state){
-  if (state.login.step==='username'){
-    if (!text){ api.print('Please enter a username.', 'dim'); return true; }
-    state.login.tempUser = text;
-    api.print('Enter password:', 'cyan'); api.setInputType('password', 'Password'); api.setInputLimit(null); state.login.step='password'; return true;
-  }
-  if (state.login.step==='password'){
-    const user = verifyLogin(state.login.tempUser, text);
-    if (user) {
-      state.authenticated = true;
-      state.userId   = user.id;
-      state.username = user.username; // canonical case
-      state.isAdmin  = !!user.is_admin;
-      const authToken = makeAuthToken();
-      AUTH_TOKENS.set(authToken, {
-        userId: state.userId,
-        username: state.username,
-        isAdmin: state.isAdmin,
-        expMs: Date.now() + AUTH_TOKEN_TTL_MS,
-      });
-      if (api && api.ws) {
-        sendOps(api.ws, [{ op: 'auth', token: authToken }]);
-      }
-
-      // ensure normalization columns are up-to-date for this user
-    
-
-
-      // pull color + display name
-      const rc = getUserColor.get(state.userId);
-      state.userColor = rc ? rc.preferred_color : null;
-      const dnRow = getUserDisplay.get(state.userId);
-      state.displayName = dnRow && dnRow.display_name ? dnRow.display_name : state.username;
-
-      refreshUserNormsByRow({ id: state.userId, username: state.username, display_name: state.displayName });
-
-      // presence
-      HUB.online.add(state.username);
-      if (!HUB.socketsByUser.has(state.username)) HUB.socketsByUser.set(state.username, new Set());
-      HUB.socketsByUser.get(state.username).add(api.ws);
-      broadcastAdminChatSystem(`${state.username} joined`, nowEpoch());
-      state.lastInputAt = nowEpoch();
-
-      // ⚠ login path (specs/PLACES.md Phase 2) — manual review before deploy
-      sendOps(api.ws, [{ op: 'status', unread: countUnreadDMs.get(state.userId)?.count || 0 }]);
-
-      api.setInputType('text', 'Type here… try /help');
-      api.setInputLimit(null);
-      api.print('Login successful.', 'green');
-
-      routeGo(api, state, 'menu');
-    } else {
-      api.print('Invalid credentials. Try again.', 'red');
-      state.login.step='username'; state.login.tempUser='';
-      api.print('Enter username:', 'cyan'); api.setInputType('text','Username'); api.setInputLimit(null);
-    }
-    return true;
-  }
+  api.print(SPLASH_POINTER, 'dim');
   return true;
 }
 
@@ -5784,9 +5731,10 @@ function doLogout(api, state){
 
   if (api && api.ws) {
     api.ws.__ctx = { state };
+    // No reload op here: the client's 4001 close handler clears the auth
+    // cookie via /api/logout and then reloads, in that order.
     sendOps(api.ws, [
-      { op: 'print', text: 'Logging out…', cls: 'yellow' },
-      { op: 'reload' }
+      { op: 'print', text: 'Logging out…', cls: 'yellow' }
     ]);
     setTimeout(() => {
       try { api.ws.close(4001, 'logout'); } catch {}

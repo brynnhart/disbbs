@@ -2710,6 +2710,16 @@ body[data-crt="full"] .prompt::after{
       ws = null;
       setInputLimit(null);
       if (ev && ev.code === 4001) {
+        // /logout: clear the disbbs_auth cookie before reloading, or /api/me
+        // would log us straight back in.
+        fetch('/api/logout', { method: 'POST', credentials: 'include' })
+          .catch(function(){})
+          .then(function(){ op_reload(); });
+        return;
+      }
+      if (ev && ev.code === 4003) {
+        // Suspended: reconnecting would only hit the same ban check again.
+        op_print('Connection closed: this account has been suspended.', 'red');
         return;
       }
       scheduleReconnect();
