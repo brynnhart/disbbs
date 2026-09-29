@@ -93,7 +93,7 @@ const notifications = createNotificationService({
 });
 const chrome = createChromeService({ db, nowEpoch: timeUtils.nowEpoch, dayKeyET: timeUtils.dayKeyET, hub: hubApi.hub, sendOps: hubApi.sendOps });
 const delve = createDelveService({ db, chrome, timeUtils, hub: hubApi.hub });
-const moderation = createModerationService({ db, nowEpoch: timeUtils.nowEpoch });
+const moderation = createModerationService({ db, nowEpoch: timeUtils.nowEpoch, chrome });
 
 function fmtCr(n) {
   return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
@@ -997,7 +997,8 @@ function cmdHelp(api, state){
     api.print('  /pinannounce <id>            Pin an announcement to /main (or /pinannounce clear)', 'cyan');
     api.print('  /newusers [n]                Most recent registrations with ban-list match check (default 20, max 50)', 'cyan');
     api.print('  /rejections                  Last 20 blocked registration attempts (no valid IP + incomplete fingerprint)', 'cyan');
-    api.print('  /ban <username>              Ban user (deletes content, blocks IP + fingerprint)', 'cyan');
+    api.print('  /ban <username> [keep]       Ban user (blocks IP + fingerprint; purges content + chrome unless keep)', 'cyan');
+    api.print('  /purgeuser <username>        Purge a user\'s content and forfeit their chrome (account kept)', 'cyan');
     api.print('  /banlist                     Show all ban list entries', 'cyan');
     api.print('  /unban <id>                  Remove a ban list entry by id', 'cyan');
     api.print('  /bannote <id> <text>         Add/update a note on a ban entry', 'cyan');
@@ -5529,96 +5530,98 @@ function cmdRejections(api, state) {
 }
 
 /* ======================= Admin ban commands ======================= */
-function cmdBan(api, state, args) {
-  if (!requireAuth(api, state)) return;
-  if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
+// Refusal text shared by /ban, /purgeuser and /purgechrome.
+function printModerationRefusal(api, reason, name, verb) {
+  if (reason === 'not_found')      api.print(`User not found: ${escapeHTML(name)} (exact username required).`, 'red');
+  else if (reason === 'self')      api.print(`You cannot ${verb} yourself.`, 'red');
+  else if (reason === 'protected') api.print(`Cannot ${verb} an admin account.`, 'red');
+  else if (reason === 'already_banned') api.print(`${escapeHTML(name)} is already banned. /banlist shows the entries.`, 'yellow');
+  else api.print(`Refused (${reason}).`, 'red');
+}
 
-  const targetName = (args || []).join(' ').trim();
-  if (!targetName) { api.print('Usage: /ban <username>', 'yellow'); return; }
-  if (targetName.toLowerCase() === state.username.toLowerCase()) {
-    api.print('You cannot ban yourself.', 'red'); return;
-  }
+function printPurgeSummary(api, result) {
+  const c = result.counts;
+  api.print(`  Purged: ${c.chat_msgs} chat msgs, ${c.board_topics} topics, ${c.board_comments} board replies, `
+    + `${c.link_posts} links, ${c.link_comments} link comments, ${c.poll_votes} poll votes, ${c.polls_created} polls, `
+    + `${c.status_posts} status posts, ${c.dm_sent} DMs sent, ${c.pixel_art} pixel art, ${c.notifications} notifications, `
+    + `${c.activity_feed} activity feed, ${c.game_feed} game feed, ${c.graffiti_cells} graffiti cells, ${c.graffiti_log} graffiti log`, 'dim');
+  api.print(`  Chrome forfeited: ${fmtCr(result.chromeForfeited)} ₢ (spent through the chrome service; ledger kept)`, 'dim');
+  const k = result.cascade;
+  api.print(`  Note: removing their topics, links and polls also removed other users' content by cascade: `
+    + `${k.board_replies} board replies, ${k.link_comments} link comments, ${k.poll_votes} poll votes.`, 'yellow');
+}
 
-  const target = getUserByName.get(targetName);
-  if (!target) { api.print(`User not found: ${escapeHTML(targetName)}`, 'red'); return; }
-  if (target.is_admin) { api.print('Cannot ban an admin account.', 'red'); return; }
-
-  const userId = target.id;
-  const now = nowEpoch();
-
-  // Count and delete content in one transaction
-  const summary = db.transaction(() => {
-    const chatMsgs      = db.prepare('SELECT COUNT(1) AS n FROM messages      WHERE user_id = ?').get(userId).n;
-    const boardTopics   = db.prepare('SELECT COUNT(1) AS n FROM board_topics  WHERE creator_id = ?').get(userId).n;
-    const boardComments = db.prepare('SELECT COUNT(1) AS n FROM board_comments WHERE user_id = ?').get(userId).n;
-    const linkPosts     = db.prepare('SELECT COUNT(1) AS n FROM news_posts    WHERE user_id = ?').get(userId).n;
-    const linkComments  = db.prepare('SELECT COUNT(1) AS n FROM news_comments  WHERE user_id = ?').get(userId).n;
-    const pollVotes     = db.prepare('SELECT COUNT(1) AS n FROM poll_votes    WHERE user_id = ?').get(userId).n;
-    const pollsCreated  = db.prepare('SELECT COUNT(1) AS n FROM polls         WHERE creator_id = ?').get(userId).n;
-    const statusPosts   = db.prepare('SELECT COUNT(1) AS n FROM status_posts  WHERE user_id = ?').get(userId).n;
-    const dmSent        = db.prepare('SELECT COUNT(1) AS n FROM dm_messages   WHERE sender_id = ?').get(userId).n;
-    const pxArt         = db.prepare('SELECT COUNT(1) AS n FROM pixel_art     WHERE creator_username = ?').get(target.username).n;
-
-    db.prepare('DELETE FROM messages       WHERE user_id = ?').run(userId);
-    db.prepare('DELETE FROM board_comments WHERE user_id = ?').run(userId);
-    db.prepare('DELETE FROM board_topics   WHERE creator_id = ?').run(userId);
-    db.prepare('DELETE FROM news_comments  WHERE user_id = ?').run(userId);
-    db.prepare('DELETE FROM news_posts     WHERE user_id = ?').run(userId);
-    db.prepare('DELETE FROM poll_votes     WHERE user_id = ?').run(userId);
-    db.prepare('DELETE FROM polls          WHERE creator_id = ?').run(userId);
-    db.prepare('DELETE FROM status_posts   WHERE user_id = ?').run(userId);
-    db.prepare('DELETE FROM dm_messages    WHERE sender_id = ?').run(userId);
-    db.prepare('DELETE FROM pixel_art      WHERE creator_username = ?').run(target.username);
-    db.prepare('DELETE FROM notifications  WHERE to_user_id = ? OR from_user_id = ?').run(userId, userId);
-    db.prepare("DELETE FROM activity_feed WHERE message LIKE ?").run(`%${target.username}%`);
-    db.prepare("DELETE FROM game_feed     WHERE message LIKE ? OR username = ?").run(`%${target.username}%`, target.username);
-    db.prepare('DELETE FROM graffiti_wall WHERE painted_by = ?').run(target.username);
-    db.prepare('DELETE FROM graffiti_activity WHERE username = ?').run(target.username);
-    db.prepare('DELETE FROM chrome_balances    WHERE username = ?').run(target.username);
-    db.prepare('DELETE FROM chrome_transactions WHERE username = ?').run(target.username);
-    db.prepare('DELETE FROM dots_lines   WHERE drawn_by  = ?').run(target.username);
-    db.prepare('DELETE FROM dots_squares WHERE claimed_by = ?').run(target.username);
-    db.prepare('DELETE FROM dots_turns   WHERE username   = ?').run(target.username);
-
-    insertBan.run(now, state.username, target.username, target.registration_ip || null, target.fingerprint_hash || null, null);
-    if (target.last_login_ip && target.last_login_ip !== target.registration_ip) {
-      insertBan.run(now, state.username, target.username, target.last_login_ip, null, null);
-    }
-
-    db.prepare('INSERT INTO ban_log (created_at, banned_by, username, chat_msgs, board_topics, board_comments, link_posts, link_comments, poll_votes, polls_created, status_posts, dm_sent, pixel_art) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
-      now, state.username, target.username,
-      chatMsgs, boardTopics, boardComments, linkPosts, linkComments,
-      pollVotes, pollsCreated, statusPosts, dmSent, pxArt
-    );
-
-    db.prepare('DELETE FROM users WHERE id = ?').run(userId);
-
-    return { chatMsgs, boardTopics, boardComments, linkPosts, linkComments, pollVotes, pollsCreated, statusPosts, dmSent, pxArt };
-  })();
-
-  // Force-close any live sockets for the banned user
-  const sockets = HUB.socketsByUser.get(target.username);
+// Closes a banned user's live sockets and drops any pending login tokens.
+function disconnectBannedUser(username) {
+  const sockets = HUB.socketsByUser.get(username);
   if (sockets) {
     for (const ws of sockets) {
       try { ws.close(4003, 'banned'); } catch {}
     }
-    HUB.socketsByUser.delete(target.username);
+    HUB.socketsByUser.delete(username);
   }
-  HUB.online.delete(target.username);
-  HUB.away.delete(target.username.toLowerCase());
-
-  // Invalidate any pending auth tokens for the banned user
+  HUB.online.delete(username);
+  HUB.away.delete(username.toLowerCase());
   for (const [token, record] of AUTH_TOKENS.entries()) {
-    if (record.username.toLowerCase() === target.username.toLowerCase()) {
+    if (record.username.toLowerCase() === username.toLowerCase()) {
       AUTH_TOKENS.delete(token);
     }
   }
+}
 
-  api.print(`Banned: ${escapeHTML(target.username)}`, 'red');
-  api.print(`  IP: ${target.registration_ip || '(none on record)'}`, 'dim');
-  api.print(`  Fingerprint: ${target.fingerprint_hash ? target.fingerprint_hash.slice(0, 16) + '…' : '(none on record)'}`, 'dim');
-  api.print(`  Deleted: ${summary.chatMsgs} chat msgs, ${summary.boardTopics} topics, ${summary.boardComments} board replies, ${summary.linkPosts} links, ${summary.linkComments} link comments, ${summary.pollVotes} votes, ${summary.pollsCreated} polls, ${summary.statusPosts} status posts, ${summary.dmSent} DMs sent, ${summary.pxArt} pixel art`, 'dim');
-  broadcastAdminChatSystem(`${escapeHTML(target.username)} has been removed.`, nowEpoch());
+// /ban <username> [keep] — marks the account banned (the row is never
+// deleted) and, unless "keep", purges its content and forfeits its chrome in
+// the same transaction.
+function cmdBan(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
+
+  let parts = (args || []).filter(Boolean);
+  let keep = false;
+  if (parts.length === 2 && parts[1].toLowerCase() === 'keep') { keep = true; parts = parts.slice(0, 1); }
+  if (parts.length !== 1) { api.print('Usage: /ban <username> [keep]   (keep = ban without purging content)', 'yellow'); return; }
+  const targetName = parts[0];
+
+  const res = moderation.banUser({
+    actor: state.username,
+    username: targetName,
+    withinBan: keep ? null : (row, banLogId) => moderation.purgeWithinBan(state.username, row, banLogId),
+  });
+  if (!res.ok) { printModerationRefusal(api, res.reason, targetName, 'ban'); return; }
+
+  disconnectBannedUser(res.username);
+
+  api.print(`Banned: ${res.username}  (ban #${res.banLogId})`, 'red');
+  api.print(`  IPs blocked: ${res.ips.length ? res.ips.join(', ') : '(none on record)'}`, 'dim');
+  api.print(`  Fingerprint: ${res.fingerprint ? res.fingerprint.slice(0, 16) + '…' : '(none on record)'}`, 'dim');
+  if (keep) {
+    api.print('  Content and chrome kept (keep). /purgeuser can remove them later.', 'dim');
+  } else {
+    printPurgeSummary(api, res.extra);
+  }
+  if (res.adminMatches.length) {
+    api.print(`  Warning: the banned IP or fingerprint also matches admin account(s): ${res.adminMatches.join(', ')}. Admins are exempt from IP/fingerprint bans.`, 'yellow');
+  }
+  broadcastAdminChatSystem(`${escapeHTML(res.username)} has been banned.`, nowEpoch());
+}
+
+// /purgeuser <username> — the content purge and chrome forfeiture on their
+// own. The account itself is untouched.
+function cmdPurgeUser(api, state, args) {
+  if (!requireAuth(api, state)) return;
+  if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
+  const parts = (args || []).filter(Boolean);
+  if (parts.length !== 1) { api.print('Usage: /purgeuser <username>', 'yellow'); return; }
+  const target = moderation.findUser(parts[0]);
+  if (!target) {
+    moderation.log(state.username, 'purge_refused', parts[0], null, 'not found');
+    printModerationRefusal(api, 'not_found', parts[0], 'purge');
+    return;
+  }
+  const res = moderation.purgeUserContent(state.username, target);
+  if (!res.ok) { printModerationRefusal(api, res.reason, parts[0], 'purge'); return; }
+  api.print(`Purged content for ${res.username} (account kept${target.banned_at != null ? ', still banned' : ''}).`, 'green');
+  printPurgeSummary(api, res);
 }
 
 function cmdPurgeActivity(api, state, args) {
@@ -5634,11 +5637,19 @@ function cmdPurgeActivity(api, state, args) {
 function cmdPurgeChrome(api, state, args) {
   if (!requireAuth(api, state)) return;
   if (!state.isAdmin) { api.print('Unknown command.', 'red'); return; }
-  const targetName = (args[0] || '').trim();
-  if (!targetName) { api.print('usage: /purgechrome <username>', 'yellow'); return; }
-  const r1 = db.prepare('DELETE FROM chrome_balances WHERE username = ?').run(targetName);
-  const r2 = db.prepare('DELETE FROM chrome_transactions WHERE username = ?').run(targetName);
-  api.print(`Purged chrome: ${r1.changes} balance rows, ${r2.changes} transaction rows for ${targetName}.`, 'green');
+  const parts = (args || []).filter(Boolean);
+  if (parts.length !== 1) { api.print('usage: /purgechrome <username>', 'yellow'); return; }
+  const target = moderation.findUser(parts[0]);
+  if (!target) {
+    moderation.log(state.username, 'purge_chrome_refused', parts[0], null, 'not found');
+    printModerationRefusal(api, 'not_found', parts[0], 'purge chrome from');
+    return;
+  }
+  // Forfeiture through the chrome service: nothing is deleted, and the
+  // ledger keeps both the earnings and the forfeiture.
+  const res = moderation.forfeitChrome(state.username, target);
+  if (!res.ok) { printModerationRefusal(api, res.reason, parts[0], 'purge chrome from'); return; }
+  api.print(`Chrome forfeited: ${fmtCr(res.amount)} ₢ from ${res.username} (${res.reason}; ledger kept).`, 'green');
 }
 
 function cmdBanList(api, state) {
@@ -5879,6 +5890,7 @@ function handleGlobalCommand(cmd, api, state, args){
     case 'checkuser':     cmdCheckUser(api, state, args); return true;
     case 'purgeactivity': cmdPurgeActivity(api, state, args); return true;
     case 'purgechrome':   cmdPurgeChrome(api, state, args); return true;
+    case 'purgeuser':     cmdPurgeUser(api, state, args); return true;
 
     default:
       return false;

@@ -5,12 +5,13 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 const { createDatabase, ensureModerationSchema } = require('../../src/database');
-const { createModerationService } = require('../../src/services/moderation');
+const { createModerationService, matchesUsername, likeContains } = require('../../src/services/moderation');
+const { createChromeService } = require('../../src/services/chrome');
 
 let clock = 1_700_000_000;
 const nowEpoch = () => ++clock;
 
-function setup() {
+function setup({ chromeOverride } = {}) {
   const { db } = createDatabase({ dbPath: ':memory:' });
   const addUser = (username, isAdmin = 0, extra = {}) => {
     db.prepare(`
@@ -19,8 +20,9 @@ function setup() {
     `).run(username, isAdmin, extra.regIp || null, extra.loginIp || null, extra.fp || null);
     return db.prepare('SELECT * FROM users WHERE username = ?').get(username);
   };
-  const mod = createModerationService({ db, nowEpoch });
-  return { db, addUser, mod };
+  const chrome = createChromeService({ db, nowEpoch, dayKeyET: () => 'day' });
+  const mod = createModerationService({ db, nowEpoch, chrome: chromeOverride ? chromeOverride(chrome) : chrome });
+  return { db, addUser, mod, chrome };
 }
 
 const modLog = (db) => db.prepare('SELECT actor, action, target, ref_id, detail FROM mod_log ORDER BY id').all();
@@ -257,4 +259,275 @@ test('listLog returns newest first and filters by target', () => {
   mod.log('Punkyroo', 'ban_note', 'ALICE', 3, 'second');
   assert.deepStrictEqual(mod.listLog({ limit: 10 }).map(r => r.detail), ['second', '{"rows":2}', 'first']);
   assert.deepStrictEqual(mod.listLog({ target: 'alice' }).map(r => r.detail), ['second', 'first']);
+});
+
+/* ---------------- Stage 3: purge, forfeiture, feed matching ---------------- */
+
+const count = (db, sql, ...p) => db.prepare(sql).get(...p).n;
+
+// Target "al" and bystander "alice": every feed row mentioning "alice" must
+// survive a purge of "al".
+function seedWorld(db, chrome, addUser) {
+  const al = addUser('al', 0, { regIp: '10.0.0.1', fp: 'fp-al' });
+  const alice = addUser('alice');
+  const ins = (sql, ...p) => Number(db.prepare(sql).run(...p).lastInsertRowid);
+
+  ins('INSERT INTO messages (user_id, body, created_at) VALUES (?, ?, 1)', al.id, 'hi');
+  ins('INSERT INTO messages (user_id, body, created_at) VALUES (?, ?, 1)', al.id, 'spam');
+  ins('INSERT INTO messages (user_id, body, created_at) VALUES (?, ?, 1)', alice.id, 'hello');
+
+  const t1 = ins('INSERT INTO board_topics (title, creator_id, created_at, last_commented_at) VALUES (?, ?, 1, 1)', 'al topic', al.id);
+  const t2 = ins('INSERT INTO board_topics (title, creator_id, created_at, last_commented_at) VALUES (?, ?, 1, 1)', 'alice topic', alice.id);
+  ins('INSERT INTO board_comments (topic_id, user_id, body, created_at) VALUES (?, ?, ?, 1)', t1, al.id, 'own');
+  ins('INSERT INTO board_comments (topic_id, user_id, body, created_at) VALUES (?, ?, ?, 1)', t1, alice.id, 'reply 1');
+  ins('INSERT INTO board_comments (topic_id, user_id, body, created_at) VALUES (?, ?, ?, 1)', t1, alice.id, 'reply 2');
+  ins('INSERT INTO board_comments (topic_id, user_id, body, created_at) VALUES (?, ?, ?, 1)', t2, al.id, 'al on alice topic');
+  ins('INSERT INTO board_comments (topic_id, user_id, body, created_at) VALUES (?, ?, ?, 1)', t2, alice.id, 'alice on own topic');
+
+  const p1 = ins("INSERT INTO news_posts (title, url, tag, user_id, created_at, last_commented_at) VALUES ('l', 'u', 't', ?, 1, 1)", al.id);
+  ins('INSERT INTO news_comments (post_id, user_id, body, created_at) VALUES (?, ?, ?, 1)', p1, al.id, 'own');
+  ins('INSERT INTO news_comments (post_id, user_id, body, created_at) VALUES (?, ?, ?, 1)', p1, alice.id, 'reply');
+
+  const poll1 = ins('INSERT INTO polls (question, creator_id, created_at) VALUES (?, ?, 1)', 'al poll', al.id);
+  const opt1 = ins("INSERT INTO poll_options (poll_id, option_index, option_text) VALUES (?, 1, 'a')", poll1);
+  const poll2 = ins('INSERT INTO polls (question, creator_id, created_at) VALUES (?, ?, 1)', 'alice poll', alice.id);
+  const opt2 = ins("INSERT INTO poll_options (poll_id, option_index, option_text) VALUES (?, 1, 'a')", poll2);
+  ins('INSERT INTO poll_votes (poll_id, option_id, user_id, created_at) VALUES (?, ?, ?, 1)', poll1, opt1, alice.id);
+  ins('INSERT INTO poll_votes (poll_id, option_id, user_id, created_at) VALUES (?, ?, ?, 1)', poll2, opt2, al.id);
+
+  ins('INSERT INTO status_posts (user_id, body, created_at) VALUES (?, ?, 1)', al.id, 'status');
+  ins('INSERT INTO status_posts (user_id, body, created_at) VALUES (?, ?, 1)', alice.id, 'status');
+  ins('INSERT INTO dm_messages (sender_id, recipient_id, body, created_at) VALUES (?, ?, ?, 1)', al.id, alice.id, 'sent by al');
+  ins('INSERT INTO dm_messages (sender_id, recipient_id, body, created_at) VALUES (?, ?, ?, 1)', alice.id, al.id, 'sent to al');
+  ins("INSERT INTO pixel_art (name, creator_username, pixel_data, created_at) VALUES ('a1', 'al', '[]', 1)");
+  ins("INSERT INTO pixel_art (name, creator_username, pixel_data, created_at) VALUES ('a2', 'alice', '[]', 1)");
+  ins("INSERT INTO notifications (to_user_id, from_user_id, kind, context, body, created_at) VALUES (?, ?, 'mention', 'chat', 'x', 1)", al.id, alice.id);
+  ins("INSERT INTO notifications (to_user_id, from_user_id, kind, context, body, created_at) VALUES (?, ?, 'mention', 'chat', 'x', 1)", alice.id, al.id);
+  ins("INSERT INTO notifications (to_user_id, from_user_id, kind, context, body, created_at) VALUES (?, ?, 'mention', 'chat', 'x', 1)", alice.id, alice.id);
+
+  for (const m of ['📋 al started a new topic: hi', '💥 alice robbed al.', '📋 alice started a new topic: al_x', '🏆 alice just took the #1 spot', '🎛 alice designed x.al']) {
+    ins("INSERT INTO activity_feed (category, event_type, message, created_at) VALUES ('c', 'e', ?, 1)", m);
+  }
+  ins("INSERT INTO game_feed (username, event_type, message, created_at) VALUES ('al', 'e', 'won a hand', 1)");
+  ins("INSERT INTO game_feed (username, event_type, message, created_at) VALUES ('alice', 'e', 'alice beat al at blackjack', 1)");
+  ins("INSERT INTO game_feed (username, event_type, message, created_at) VALUES ('alice', 'e', 'alice solved wordle', 1)");
+
+  ins("INSERT INTO graffiti_wall (cell_index, color, painted_by, painted_at) VALUES (1, '#f00', 'al', 1)");
+  ins("INSERT INTO graffiti_wall (cell_index, color, painted_by, painted_at) VALUES (2, '#0f0', 'alice', 1)");
+  ins("INSERT INTO graffiti_activity (username, last_logged) VALUES ('al', 1)");
+  ins("INSERT INTO graffiti_activity (username, last_logged) VALUES ('alice', 1)");
+
+  const game = ins('INSERT INTO dots_game (started_at, ends_at) VALUES (1, 2)');
+  ins("INSERT INTO dots_lines (game_id, line_idx, drawn_by, drawn_at) VALUES (?, 1, 'al', 1)", game);
+  ins("INSERT INTO dots_turns (game_id, username, last_drew_at) VALUES (?, 'al', 1)", game);
+  ins("INSERT INTO resource_balances (username, resource, amount) VALUES ('al', 'iron', 5)");
+
+  chrome.award('al', 100, 'welcome bonus');
+  chrome.award('alice', 50, 'welcome bonus');
+  return { al, alice };
+}
+
+const purgeHook = (mod, actor) => (row, banLogId) => mod.purgeWithinBan(actor, row, banLogId);
+
+test('matchesUsername is whole-word and case-insensitive', () => {
+  assert.strictEqual(matchesUsername('📋 al started a topic', 'al'), true);
+  assert.strictEqual(matchesUsername('robbed AL.', 'al'), true);
+  assert.strictEqual(matchesUsername('(al)', 'al'), true);
+  assert.strictEqual(matchesUsername("al's topic", 'al'), true);
+  assert.strictEqual(matchesUsername('alice started a topic', 'al'), false);
+  assert.strictEqual(matchesUsername('hal did a thing', 'al'), false);
+  assert.strictEqual(matchesUsername('al_x did a thing', 'al'), false);
+  assert.strictEqual(matchesUsername('al-x did a thing', 'al'), false);
+  assert.strictEqual(matchesUsername('x.al did a thing', 'al'), false);
+  assert.strictEqual(matchesUsername('al.x did a thing', 'al'), false);
+  assert.strictEqual(matchesUsername('a.b won', 'a.b'), true);
+  assert.strictEqual(matchesUsername('axb won', 'a.b'), false);
+  assert.strictEqual(likeContains('a_b%c\\d'), '%a\\_b\\%c\\\\d%');
+});
+
+test('deleteFeedRowsFor: "al" does not touch alice rows, and "_" is not a wildcard', () => {
+  const { db, mod } = setup();
+  const add = (m) => db.prepare("INSERT INTO activity_feed (category, event_type, message, created_at) VALUES ('c', 'e', ?, 1)").run(m);
+  add('alice joined'); add('al joined'); add('axb joined'); add('a_b joined');
+  assert.deepStrictEqual(mod.deleteFeedRowsFor('al'), { activity: 1, game: 0 });
+  assert.deepStrictEqual(mod.deleteFeedRowsFor('a_b'), { activity: 1, game: 0 });
+  assert.deepStrictEqual(db.prepare('SELECT message FROM activity_feed ORDER BY id').all().map(r => r.message), ['alice joined', 'axb joined']);
+});
+
+test('ban with purge: exact scope, cascade counts, chrome forfeited, account row kept', () => {
+  const { db, addUser, mod, chrome } = setup();
+  const { al } = seedWorld(db, chrome, addUser);
+
+  const res = mod.banUser({ actor: 'Punkyroo', username: 'al', withinBan: purgeHook(mod, 'Punkyroo') });
+  assert.strictEqual(res.ok, true);
+  assert.deepStrictEqual(res.extra.counts, {
+    chat_msgs: 2, board_comments: 2, board_topics: 1, link_comments: 1, link_posts: 1,
+    poll_votes: 1, polls_created: 1, status_posts: 1, dm_sent: 1, pixel_art: 1,
+    notifications: 2, activity_feed: 2, game_feed: 2, graffiti_cells: 1, graffiti_log: 1,
+  });
+  assert.deepStrictEqual(res.extra.cascade, { board_replies: 2, link_comments: 1, poll_votes: 1 });
+  assert.strictEqual(res.extra.chromeForfeited, 100);
+
+  // Account row kept and marked.
+  const row = db.prepare('SELECT * FROM users WHERE id = ?').get(al.id);
+  assert.ok(row && row.banned_at > 0);
+
+  // Alice's own content survives; only the cascade took her replies/vote.
+  assert.strictEqual(count(db, 'SELECT COUNT(1) n FROM messages'), 1);
+  assert.deepStrictEqual(db.prepare('SELECT title FROM board_topics').all(), [{ title: 'alice topic' }]);
+  assert.deepStrictEqual(db.prepare('SELECT body FROM board_comments').all(), [{ body: 'alice on own topic' }]);
+  assert.strictEqual(count(db, 'SELECT COUNT(1) n FROM news_posts'), 0);
+  assert.deepStrictEqual(db.prepare('SELECT question FROM polls').all(), [{ question: 'alice poll' }]);
+  assert.strictEqual(count(db, 'SELECT COUNT(1) n FROM poll_votes'), 0);
+  assert.strictEqual(count(db, 'SELECT COUNT(1) n FROM status_posts'), 1);
+  assert.deepStrictEqual(db.prepare('SELECT body FROM dm_messages').all(), [{ body: 'sent to al' }]);
+  assert.deepStrictEqual(db.prepare('SELECT creator_username c FROM pixel_art').all(), [{ c: 'alice' }]);
+  assert.strictEqual(count(db, 'SELECT COUNT(1) n FROM notifications'), 1);
+  assert.deepStrictEqual(db.prepare('SELECT message FROM activity_feed ORDER BY id').all().map(r => r.message),
+    ['📋 alice started a new topic: al_x', '🏆 alice just took the #1 spot', '🎛 alice designed x.al']);
+  assert.deepStrictEqual(db.prepare('SELECT message FROM game_feed').all(), [{ message: 'alice solved wordle' }]);
+  assert.deepStrictEqual(db.prepare('SELECT painted_by FROM graffiti_wall').all(), [{ painted_by: 'alice' }]);
+  assert.deepStrictEqual(db.prepare('SELECT username FROM graffiti_activity').all(), [{ username: 'alice' }]);
+
+  // Deliberately untouched: dots and minerals.
+  assert.strictEqual(count(db, "SELECT COUNT(1) n FROM dots_lines WHERE drawn_by = 'al'"), 1);
+  assert.strictEqual(count(db, "SELECT COUNT(1) n FROM dots_turns WHERE username = 'al'"), 1);
+  assert.strictEqual(count(db, "SELECT COUNT(1) n FROM resource_balances WHERE username = 'al'"), 1);
+
+  // Chrome: balance 0, and the ledger keeps both rows.
+  assert.strictEqual(chrome.getBalance('al'), 0);
+  assert.deepStrictEqual(db.prepare("SELECT amount, reason FROM chrome_transactions WHERE username = 'al' ORDER BY id").all(),
+    [{ amount: 100, reason: 'welcome bonus' }, { amount: -100, reason: 'ban forfeiture' }]);
+  assert.strictEqual(chrome.getBalance('alice'), 50);
+
+  // ban_log carries the counts; mod_log has the ban then the purge.
+  const bl = db.prepare('SELECT * FROM ban_log WHERE id = ?').get(res.banLogId);
+  assert.strictEqual(bl.chat_msgs, 2);
+  assert.strictEqual(bl.board_topics, 1);
+  assert.strictEqual(bl.pixel_art, 1);
+  assert.deepStrictEqual(db.prepare('SELECT action, ref_id FROM mod_log ORDER BY id').all(),
+    [{ action: 'ban', ref_id: res.banLogId }, { action: 'purge_content', ref_id: res.banLogId }]);
+});
+
+test('ban with keep: account banned, all content and chrome left in place', () => {
+  const { db, addUser, mod, chrome } = setup();
+  const { al } = seedWorld(db, chrome, addUser);
+  const res = mod.banUser({ actor: 'Punkyroo', username: 'al' });
+  assert.strictEqual(res.ok, true);
+  assert.ok(db.prepare('SELECT banned_at FROM users WHERE id = ?').get(al.id).banned_at > 0);
+  assert.strictEqual(count(db, 'SELECT COUNT(1) n FROM messages WHERE user_id = ?', al.id), 2);
+  assert.strictEqual(count(db, 'SELECT COUNT(1) n FROM board_topics WHERE creator_id = ?', al.id), 1);
+  assert.strictEqual(count(db, 'SELECT COUNT(1) n FROM activity_feed'), 5);
+  assert.strictEqual(chrome.getBalance('al'), 100);
+  assert.strictEqual(count(db, "SELECT COUNT(1) n FROM chrome_transactions WHERE username = 'al'"), 1);
+  const bl = db.prepare('SELECT chat_msgs, board_topics FROM ban_log WHERE id = ?').get(res.banLogId);
+  assert.deepStrictEqual(bl, { chat_msgs: 0, board_topics: 0 });
+  assert.deepStrictEqual(db.prepare('SELECT action FROM mod_log').all().map(r => r.action), ['ban']);
+});
+
+test('purgeUserContent on its own: content gone, account kept and not banned, admin forfeiture reason', () => {
+  const { db, addUser, mod, chrome } = setup();
+  const { al } = seedWorld(db, chrome, addUser);
+  const res = mod.purgeUserContent('Punkyroo', al);
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.counts.chat_msgs, 2);
+  assert.strictEqual(res.chromeForfeited, 100);
+  const row = db.prepare('SELECT * FROM users WHERE id = ?').get(al.id);
+  assert.ok(row);
+  assert.strictEqual(row.banned_at, null);
+  assert.deepStrictEqual(db.prepare("SELECT reason FROM chrome_transactions WHERE username = 'al' ORDER BY id").all().map(r => r.reason),
+    ['welcome bonus', 'admin forfeiture']);
+  assert.deepStrictEqual(db.prepare('SELECT action, target FROM mod_log').all(), [{ action: 'purge_content', target: 'al' }]);
+});
+
+test('admin targets are refused by /ban-with-purge, purgeUserContent and forfeitChrome; nothing changes', () => {
+  const { db, addUser, mod, chrome } = setup();
+  const admin2 = addUser('admin2', 1);
+  db.prepare('INSERT INTO messages (user_id, body, created_at) VALUES (?, ?, 1)').run(admin2.id, 'admin msg');
+  db.prepare("INSERT INTO activity_feed (category, event_type, message, created_at) VALUES ('c', 'e', 'admin2 posted', 1)").run();
+  chrome.award('admin2', 70, 'welcome bonus');
+
+  assert.strictEqual(mod.banUser({ actor: 'Punkyroo', username: 'admin2', withinBan: purgeHook(mod, 'Punkyroo') }).reason, 'protected');
+  assert.strictEqual(mod.purgeUserContent('Punkyroo', admin2).reason, 'protected');
+  assert.strictEqual(mod.forfeitChrome('Punkyroo', admin2).reason, 'protected');
+  // A stale row claiming is_admin 0 is re-read inside the transaction and still refused.
+  assert.strictEqual(mod.purgeUserContent('Punkyroo', Object.assign({}, admin2, { is_admin: 0 })).reason, 'protected');
+  assert.strictEqual(mod.forfeitChrome('Punkyroo', Object.assign({}, admin2, { is_admin: 0 })).reason, 'protected');
+  // Directly calling the ban hook on an admin row refuses too.
+  assert.throws(() => mod.purgeWithinBan('Punkyroo', admin2, 1), /refused: protected/);
+  assert.strictEqual(mod.purgeUserContent('Punkyroo', null).reason, 'not_found');
+
+  assert.strictEqual(count(db, 'SELECT COUNT(1) n FROM messages WHERE user_id = ?', admin2.id), 1);
+  assert.strictEqual(count(db, 'SELECT COUNT(1) n FROM activity_feed'), 1);
+  assert.strictEqual(chrome.getBalance('admin2'), 70);
+  assert.strictEqual(db.prepare("SELECT banned_at FROM users WHERE username = 'admin2'").get().banned_at, null);
+  assert.deepStrictEqual(db.prepare('SELECT action FROM mod_log ORDER BY id').all().map(r => r.action),
+    ['ban_refused', 'purge_refused', 'purge_chrome_refused', 'purge_refused', 'purge_chrome_refused']);
+});
+
+test('refusals for already-banned, unknown and self are logged with a reason', () => {
+  const { db, addUser, mod } = setup();
+  addUser('victim');
+  assert.strictEqual(mod.banUser({ actor: 'Punkyroo', username: 'victim' }).ok, true);
+  assert.strictEqual(mod.banUser({ actor: 'Punkyroo', username: 'victim' }).reason, 'already_banned');
+  assert.strictEqual(mod.banUser({ actor: 'Punkyroo', username: 'ghost' }).reason, 'not_found');
+  assert.strictEqual(mod.banUser({ actor: 'Punkyroo', username: 'Punkyroo' }).reason, 'self');
+  assert.deepStrictEqual(db.prepare("SELECT action, target, detail FROM mod_log WHERE action = 'ban_refused' ORDER BY id").all(), [
+    { action: 'ban_refused', target: 'victim', detail: 'already banned' },
+    { action: 'ban_refused', target: 'ghost', detail: 'not found' },
+    { action: 'ban_refused', target: 'Punkyroo', detail: 'self' },
+  ]);
+});
+
+function assertUntouched(db, chrome, al) {
+  assert.strictEqual(db.prepare('SELECT banned_at FROM users WHERE id = ?').get(al.id).banned_at, null);
+  assert.strictEqual(count(db, 'SELECT COUNT(1) n FROM ban_list'), 0);
+  assert.strictEqual(count(db, 'SELECT COUNT(1) n FROM ban_log'), 0);
+  assert.strictEqual(count(db, 'SELECT COUNT(1) n FROM mod_log'), 0);
+  assert.strictEqual(count(db, 'SELECT COUNT(1) n FROM messages WHERE user_id = ?', al.id), 2);
+  assert.strictEqual(count(db, 'SELECT COUNT(1) n FROM board_topics WHERE creator_id = ?', al.id), 1);
+  assert.strictEqual(count(db, "SELECT COUNT(1) n FROM board_comments WHERE body LIKE 'reply%'"), 2);
+  assert.strictEqual(count(db, 'SELECT COUNT(1) n FROM activity_feed'), 5);
+  assert.strictEqual(chrome.getBalance('al'), 100);
+  assert.deepStrictEqual(db.prepare("SELECT amount FROM chrome_transactions WHERE username = 'al'").all(), [{ amount: 100 }]);
+}
+
+test('a purge failing partway (a table delete throws) rolls back the whole ban', () => {
+  const { db, addUser, mod, chrome } = setup();
+  const { al } = seedWorld(db, chrome, addUser);
+  // graffiti_activity is purged late, after most content deletes have run.
+  db.exec('DROP TABLE graffiti_activity');
+  assert.throws(() => mod.banUser({ actor: 'Punkyroo', username: 'al', withinBan: purgeHook(mod, 'Punkyroo') }), /graffiti_activity/);
+  assertUntouched(db, chrome, al);
+});
+
+test('a failure after the chrome spend rolls the chrome back too (same transaction)', () => {
+  const { db, addUser, mod, chrome } = setup({
+    chromeOverride: (real) => ({
+      getBalance: real.getBalance,
+      spend: (...a) => { real.spend(...a); throw new Error('failed after spend'); },
+    }),
+  });
+  const { al } = seedWorld(db, chrome, addUser);
+  assert.throws(() => mod.banUser({ actor: 'Punkyroo', username: 'al', withinBan: purgeHook(mod, 'Punkyroo') }), /failed after spend/);
+  assertUntouched(db, chrome, al);
+});
+
+test('forfeitChrome: spends through the service, zero balance is a no-op', () => {
+  const { db, addUser, mod, chrome } = setup();
+  const rich = addUser('rich');
+  const poor = addUser('poor');
+  chrome.award('rich', 40, 'welcome bonus');
+  const r1 = mod.forfeitChrome('Punkyroo', rich);
+  assert.deepStrictEqual([r1.ok, r1.amount, r1.reason], [true, 40, 'admin forfeiture']);
+  assert.strictEqual(chrome.getBalance('rich'), 0);
+  assert.deepStrictEqual(db.prepare("SELECT amount, reason FROM chrome_transactions WHERE username = 'rich' ORDER BY id").all(),
+    [{ amount: 40, reason: 'welcome bonus' }, { amount: -40, reason: 'admin forfeiture' }]);
+  const r2 = mod.forfeitChrome('Punkyroo', poor);
+  assert.deepStrictEqual([r2.ok, r2.amount], [true, 0]);
+  assert.strictEqual(count(db, "SELECT COUNT(1) n FROM chrome_transactions WHERE username = 'poor'"), 0);
+  // A banned account's forfeiture is labelled as such.
+  mod.banUser({ actor: 'Punkyroo', username: 'poor' });
+  chrome.award('poor', 5, 'test');
+  assert.strictEqual(mod.forfeitChrome('Punkyroo', db.prepare("SELECT * FROM users WHERE username = 'poor'").get()).reason, 'ban forfeiture');
 });
