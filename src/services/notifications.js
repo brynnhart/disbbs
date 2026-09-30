@@ -1,6 +1,8 @@
 'use strict';
 
-function createNotificationService({ statements, helpers, hub, timeUtils, formatting }){
+// isHiddenUser(username) — optional; when it returns true (banned accounts),
+// mentions of that user are skipped entirely.
+function createNotificationService({ statements, helpers, hub, timeUtils, formatting, isHiddenUser = null }){
   const { insertNotification, listNotificationsForUser, markAllNotificationsSeen, countUnreadDMs } = statements;
   const { resolveUserHandle } = helpers;
   const { sendOps, hub: hubState } = hub;
@@ -46,6 +48,7 @@ function createNotificationService({ statements, helpers, hub, timeUtils, format
 
         const target = resolved.row;
         if (!target || (fromId && target.id === fromId)) return;
+        if (isHiddenUser && isHiddenUser(target.username)) return;
 
         insertNotification.run(target.id, fromId, 'mention', context, rawText, created);
 

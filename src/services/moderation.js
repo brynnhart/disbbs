@@ -48,7 +48,7 @@ const REFUSAL_DETAIL = {
   not_banned: 'not banned',
 };
 
-function createModerationService({ db, nowEpoch, chrome }) {
+function createModerationService({ db, nowEpoch, chrome, resolveUserHandle = null }) {
   const stmtGetUserByName   = db.prepare('SELECT * FROM users WHERE username = ?');
   const stmtGetUserById     = db.prepare('SELECT * FROM users WHERE id = ?');
   const stmtListAdmins      = db.prepare('SELECT username, registration_ip, last_login_ip, fingerprint_hash FROM users WHERE is_admin IS NOT 0');
@@ -74,6 +74,12 @@ function createModerationService({ db, nowEpoch, chrome }) {
   const stmtListModLog      = db.prepare('SELECT * FROM mod_log ORDER BY id DESC LIMIT ?');
   const stmtListModLogFor   = db.prepare('SELECT * FROM mod_log WHERE target = ? COLLATE NOCASE ORDER BY id DESC LIMIT ?');
   const stmtBanPurgeLogs    = db.prepare("SELECT detail FROM mod_log WHERE action = 'purge_content' AND ref_id = ?");
+
+  // Visibility. "Banned" here means a users row with is_admin = 0 and
+  // banned_at set — the same definition as the leaderboard filters. Old
+  // ban_list rows are ignored, so an admin can never be reported as banned.
+  const stmtUserBanState    = db.prepare('SELECT is_admin, banned_at FROM users WHERE username = ?');
+  const stmtBannedUsernames = db.prepare('SELECT username FROM users WHERE is_admin = 0 AND banned_at IS NOT NULL');
 
   // Unban / notes / listing.
   const stmtGetBanRow       = db.prepare('SELECT * FROM ban_list WHERE id = ?');
@@ -511,6 +517,80 @@ function createModerationService({ db, nowEpoch, chrome }) {
     })();
   }
 
+  // True when the named account is banned. Unknown names are false (callers
+  // keep their own "not found" path). Fails safe: if the lookup throws, the
+  // account is treated as banned, i.e. hidden and refused.
+  function isBannedUsername(username) {
+    const name = String(username || '').trim();
+    if (!name) return false;
+    try {
+      const row = stmtUserBanState.get(name);
+      if (!row) return false;
+      return row.is_admin === 0 && row.banned_at != null;
+    } catch (e) {
+      return true;
+    }
+  }
+
+  // Lowercased names of banned accounts, for filtering listings with one
+  // query. Returns null if the lookup fails; callers must then hide every
+  // item the viewer doesn't own.
+  function bannedUsernameSet() {
+    try {
+      return new Set(stmtBannedUsernames.all().map(r => r.username.toLowerCase()));
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // viewer is the server-side session state; only viewer.isAdmin === true
+  // counts as an admin.
+  function viewerIsAdmin(viewer) {
+    return !!viewer && viewer.isAdmin === true;
+  }
+
+  // Whether items by `creator` should be shown to `viewer`: admins see
+  // everything, everyone sees their own, banned creators are hidden.
+  function canViewerSee(viewer, creator) {
+    if (viewerIsAdmin(viewer)) return true;
+    if (viewer && viewer.username && creator && viewer.username.toLowerCase() === String(creator).toLowerCase()) return true;
+    return !isBannedUsername(creator);
+  }
+
+  // Listing filter built from one bannedUsernameSet() query.
+  function makeVisibilityFilter(viewer) {
+    if (viewerIsAdmin(viewer)) return () => true;
+    const own = viewer && viewer.username ? viewer.username.toLowerCase() : null;
+    const banned = bannedUsernameSet();
+    return (creator) => {
+      const c = String(creator || '').toLowerCase();
+      if (own && c === own) return true;
+      if (!banned) return false;
+      return !banned.has(c);
+    };
+  }
+
+  // resolveUserHandle, with banned accounts treated as not found. Admin
+  // viewers see everything unless adminBypass is false. Ambiguous matches
+  // drop banned candidates, so a banned name is never listed back.
+  function resolveVisibleUser(anyName, viewer, { adminBypass = true } = {}) {
+    if (!resolveUserHandle) throw new Error('moderation: resolveUserHandle is required');
+    const resolved = resolveUserHandle(anyName);
+    if (!resolved) return null;
+    if (adminBypass && viewerIsAdmin(viewer)) return resolved;
+    if (resolved.row) return isBannedUsername(resolved.row.username) ? null : resolved;
+    if (resolved.ambiguous) {
+      const visible = resolved.ambiguous.filter(r => !isBannedUsername(r.username));
+      if (!visible.length) return null;
+      if (visible.length === 1) {
+        const row = stmtGetUserByName.get(visible[0].username);
+        return row ? { row } : null;
+      }
+      return { ambiguous: visible };
+    }
+    return null;
+  }
+
   function listBanOverview() {
     return { rows: stmtListBanRows.all(), accounts: stmtListBannedAccounts.all() };
   }
@@ -519,6 +599,7 @@ function createModerationService({ db, nowEpoch, chrome }) {
     isAdminRow, isProtected, isAccountBanned, connectionBanHit, findUser,
     banUser, purgeWithinBan, purgeUserContent, forfeitChrome, deleteFeedRowsFor,
     unban, setBanNote, purgeActivityFor, listBanOverview,
+    isBannedUsername, bannedUsernameSet, canViewerSee, makeVisibilityFilter, resolveVisibleUser,
     log, listLog,
   };
 }

@@ -90,10 +90,12 @@ const notifications = createNotificationService({
   hub: hubApi,
   timeUtils,
   formatting,
+  // Late-bound: moderation is created below, before any mention can happen.
+  isHiddenUser: (username) => moderation.isBannedUsername(username),
 });
 const chrome = createChromeService({ db, nowEpoch: timeUtils.nowEpoch, dayKeyET: timeUtils.dayKeyET, hub: hubApi.hub, sendOps: hubApi.sendOps });
 const delve = createDelveService({ db, chrome, timeUtils, hub: hubApi.hub });
-const moderation = createModerationService({ db, nowEpoch: timeUtils.nowEpoch, chrome });
+const moderation = createModerationService({ db, nowEpoch: timeUtils.nowEpoch, chrome, resolveUserHandle: helpers.resolveUserHandle });
 
 function fmtCr(n) {
   return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
@@ -993,6 +995,7 @@ function cmdHelp(api, state){
     api.print('  /newusers [n]                Most recent registrations with ban-list match check (default 20, max 50)', 'cyan');
     api.print('  /rejections                  Last 20 blocked registration attempts (no valid IP + incomplete fingerprint)', 'cyan');
     api.print('  /ban <username> [keep]       Ban user (blocks IP + fingerprint; purges content + chrome unless keep)', 'cyan');
+    api.print('                               Banned accounts\' patches and songs are hidden from listings even with keep', 'cyan');
     api.print('  /purgeuser <username>        Purge a user\'s content and forfeit their chrome (account kept)', 'cyan');
     api.print('  /banlist                     Show banned accounts and all ban list entries', 'cyan');
     api.print('  /unban <username> | #<id>    Lift a whole ban (all its entries) and restore the account', 'cyan');
@@ -1233,14 +1236,17 @@ function validatePatch(obj){
   return out;
 }
 
-function findSynthPatchByNameOrId(nameOrId){
+// viewer is the session state: patches by banned accounts are invisible to
+// everyone but admins (and are not deleted).
+function findSynthPatchByNameOrId(nameOrId, viewer){
   const trimmed = String(nameOrId || '').trim();
   if (!trimmed) return null;
+  const visible = (row) => (row && moderation.canViewerSee(viewer, row.creator_username)) ? row : null;
   if (/^\d+$/.test(trimmed)){
-    const row = getSynthPatchById.get(parseInt(trimmed, 10));
+    const row = visible(getSynthPatchById.get(parseInt(trimmed, 10)));
     if (row) return row;
   }
-  return getSynthPatchByName.get(trimmed.toLowerCase()) || null;
+  return visible(getSynthPatchByName.get(trimmed.toLowerCase()));
 }
 
 function cmdSynth(api, state, args){
@@ -1249,7 +1255,7 @@ function cmdSynth(api, state, args){
     sendOps(api.ws, [{ op: 'openSynth' }]);
     return;
   }
-  const row = findSynthPatchByNameOrId(args.join(' '));
+  const row = findSynthPatchByNameOrId(args.join(' '), state);
   if (!row){ api.print('No patch found with that name or id.', 'red'); return; }
   let patchData;
   try { patchData = JSON.parse(row.patch_data); } catch { patchData = null; }
@@ -1261,7 +1267,8 @@ function cmdSynth(api, state, args){
 
 function cmdPatches(api, state){
   if (!requireAuth(api, state)) return;
-  const rows = listSynthPatches.all();
+  const canSee = moderation.makeVisibilityFilter(state);
+  const rows = listSynthPatches.all().filter(r => canSee(r.creator_username));
   api.batch(b => {
     b.clear();
     b.setInputLimit(null);
@@ -1283,7 +1290,7 @@ function cmdPatches(api, state){
 function cmdEditPatch(api, state, args){
   if (!requireAuth(api, state)) return;
   if (!args.length){ api.print('Usage: /editpatch <name or id>', 'yellow'); return; }
-  const row = findSynthPatchByNameOrId(args.join(' '));
+  const row = findSynthPatchByNameOrId(args.join(' '), state);
   if (!row){ api.print('No patch found with that name or id.', 'red'); return; }
   if (row.creator_username.toLowerCase() !== state.username.toLowerCase() && !state.isAdmin){
     api.print('You can only edit your own patch.', 'red'); return;
@@ -1299,13 +1306,21 @@ function cmdEditPatch(api, state, args){
 function cmdDeletePatch(api, state, args){
   if (!requireAuth(api, state)) return;
   if (!args.length){ api.print('Usage: /deletepatch <name or id>', 'yellow'); return; }
-  const row = findSynthPatchByNameOrId(args.join(' '));
+  const row = findSynthPatchByNameOrId(args.join(' '), state);
   if (!row){ api.print('No patch found with that name or id.', 'red'); return; }
   if (row.creator_username.toLowerCase() !== state.username.toLowerCase() && !state.isAdmin){
     api.print('You can only delete your own patch.', 'red'); return;
   }
   deleteSynthPatch.run(row.id);
   api.print(`Patch "${row.name}" (#${row.id}) deleted.`, 'green');
+}
+
+// Names stay reserved by hidden (banned-account) patches; don't reveal that
+// one exists.
+function patchNameTakenMessage(rawName, viewer){
+  const taken = getSynthPatchByName.get(rawName);
+  if (taken && !moderation.canViewerSee(viewer, taken.creator_username)) return 'That name is taken. Choose a different name.';
+  return `A patch named "${rawName}" already exists. Choose a different name.`;
 }
 
 function handleSavePatch(msg, api, state){
@@ -1327,7 +1342,7 @@ function handleSavePatch(msg, api, state){
   } catch(e){
     const emsg = (e && e.message) || '';
     if (emsg.toLowerCase().includes('unique')){
-      sendOps(api.ws, [{ op: 'synth_error', message: `A patch named "${rawName}" already exists. Choose a different name.` }]);
+      sendOps(api.ws, [{ op: 'synth_error', message: patchNameTakenMessage(rawName, state) }]);
     } else {
       console.error('Failed to save synth patch:', e);
       sendOps(api.ws, [{ op: 'synth_error', message: 'Failed to save patch.' }]);
@@ -1363,7 +1378,7 @@ function handleUpdatePatch(msg, api, state){
   }
   const conflict = getSynthPatchByName.get(rawName);
   if (conflict && conflict.id !== id){
-    sendOps(api.ws, [{ op: 'synth_error', message: `A patch named "${rawName}" already exists. Choose a different name.` }]);
+    sendOps(api.ws, [{ op: 'synth_error', message: patchNameTakenMessage(rawName, state) }]);
     return;
   }
   try {
@@ -1377,7 +1392,8 @@ function handleUpdatePatch(msg, api, state){
 
 function handleGetPatchList(msg, api, state){
   if (!requireAuth(api, state)) return;
-  const rows = listSynthPatchesWithData.all();
+  const canSee = moderation.makeVisibilityFilter(state);
+  const rows = listSynthPatchesWithData.all().filter(r => canSee(r.creator_username));
   const patches = [];
   for (const r of rows){
     let patchData;
@@ -1443,14 +1459,25 @@ function validateSong(obj){
   return { v: 1, bpm: bpm, steps: TRACKER_STEPS, tracks: tracks };
 }
 
-function findTrackerSongByNameOrId(nameOrId){
+// viewer is the session state: songs by banned accounts are invisible to
+// everyone but admins (and are not deleted).
+function findTrackerSongByNameOrId(nameOrId, viewer){
   const trimmed = String(nameOrId || '').trim();
   if (!trimmed) return null;
+  const visible = (row) => (row && moderation.canViewerSee(viewer, row.creator_username)) ? row : null;
   if (/^\d+$/.test(trimmed)){
-    const row = getTrackerSongById.get(parseInt(trimmed, 10));
+    const row = visible(getTrackerSongById.get(parseInt(trimmed, 10)));
     if (row) return row;
   }
-  return getTrackerSongByName.get(trimmed.toLowerCase()) || null;
+  return visible(getTrackerSongByName.get(trimmed.toLowerCase()));
+}
+
+// Names stay reserved by hidden (banned-account) songs; don't reveal that
+// one exists.
+function songNameTakenMessage(rawName, viewer){
+  const taken = getTrackerSongByName.get(rawName);
+  if (taken && !moderation.canViewerSee(viewer, taken.creator_username)) return 'That name is taken. Choose a different name.';
+  return `A song named "${rawName}" already exists. Choose a different name.`;
 }
 
 function cmdTracker(api, state, args){
@@ -1459,7 +1486,7 @@ function cmdTracker(api, state, args){
     sendOps(api.ws, [{ op: 'openTracker' }]);
     return;
   }
-  const row = findTrackerSongByNameOrId(args.join(' '));
+  const row = findTrackerSongByNameOrId(args.join(' '), state);
   if (!row){ api.print('No song found with that name or id.', 'red'); return; }
   let songData;
   try { songData = JSON.parse(row.song_data); } catch { songData = null; }
@@ -1471,7 +1498,8 @@ function cmdTracker(api, state, args){
 
 function cmdSongs(api, state){
   if (!requireAuth(api, state)) return;
-  const rows = listTrackerSongs.all();
+  const canSee = moderation.makeVisibilityFilter(state);
+  const rows = listTrackerSongs.all().filter(r => canSee(r.creator_username));
   api.batch(b => {
     b.clear();
     b.setInputLimit(null);
@@ -1493,7 +1521,7 @@ function cmdSongs(api, state){
 function cmdEditSong(api, state, args){
   if (!requireAuth(api, state)) return;
   if (!args.length){ api.print('Usage: /editsong <name or id>', 'yellow'); return; }
-  const row = findTrackerSongByNameOrId(args.join(' '));
+  const row = findTrackerSongByNameOrId(args.join(' '), state);
   if (!row){ api.print('No song found with that name or id.', 'red'); return; }
   if (row.creator_username.toLowerCase() !== state.username.toLowerCase() && !state.isAdmin){
     api.print('You can only edit your own song.', 'red'); return;
@@ -1509,7 +1537,7 @@ function cmdEditSong(api, state, args){
 function cmdDeleteSong(api, state, args){
   if (!requireAuth(api, state)) return;
   if (!args.length){ api.print('Usage: /deletesong <name or id>', 'yellow'); return; }
-  const row = findTrackerSongByNameOrId(args.join(' '));
+  const row = findTrackerSongByNameOrId(args.join(' '), state);
   if (!row){ api.print('No song found with that name or id.', 'red'); return; }
   if (row.creator_username.toLowerCase() !== state.username.toLowerCase() && !state.isAdmin){
     api.print('You can only delete your own song.', 'red'); return;
@@ -1537,7 +1565,7 @@ function handleSaveSong(msg, api, state){
   } catch(e){
     const emsg = (e && e.message) || '';
     if (emsg.toLowerCase().includes('unique')){
-      sendOps(api.ws, [{ op: 'tracker_error', message: `A song named "${rawName}" already exists. Choose a different name.` }]);
+      sendOps(api.ws, [{ op: 'tracker_error', message: songNameTakenMessage(rawName, state) }]);
     } else {
       console.error('Failed to save tracker song:', e);
       sendOps(api.ws, [{ op: 'tracker_error', message: 'Failed to save song.' }]);
@@ -1573,7 +1601,7 @@ function handleUpdateSong(msg, api, state){
   }
   const conflict = getTrackerSongByName.get(rawName);
   if (conflict && conflict.id !== id){
-    sendOps(api.ws, [{ op: 'tracker_error', message: `A song named "${rawName}" already exists. Choose a different name.` }]);
+    sendOps(api.ws, [{ op: 'tracker_error', message: songNameTakenMessage(rawName, state) }]);
     return;
   }
   try {
@@ -2189,7 +2217,8 @@ function cmdFeed(api, state, args){
   const lookup = targetRaw.startsWith('@') ? targetRaw.slice(1) : targetRaw;
   let resolved = null;
   try {
-    resolved = resolveUserHandle ? resolveUserHandle(lookup) : null;
+    // Banned accounts are "No such user." to everyone but admins.
+    resolved = moderation.resolveVisibleUser(lookup, state);
   } catch (e) {
     resolved = null;
   }
@@ -4507,6 +4536,9 @@ function attemptRob(attackerUsername, targetUsername, resource) {
 
   const targetRow = db.prepare('SELECT username FROM chrome_balances WHERE LOWER(username) = LOWER(?)').get(targetUsername);
   if (!targetRow) return { error: `no user found: ${targetUsername}.` };
+  // Banned accounts look exactly like unknown ones (fails safe: a failed
+  // lookup counts as banned, so nothing is moved).
+  if (moderation.isBannedUsername(targetRow.username)) return { error: `no user found: ${targetUsername}.` };
 
   const resolvedTarget = targetRow.username;
   if (resolvedTarget.toLowerCase() === attackerUsername.toLowerCase()) {
@@ -4984,7 +5016,9 @@ function cmdProfile(api, state, args){
   const whoTyped = (args && args[0]) ? args[0].trim() : state.username;
   if (!whoTyped) { api.print('Usage: /profile [username]', 'yellow'); return; }
 
-  const resolved = resolveUserHandle(whoTyped);
+  // Banned accounts are "No such user." to everyone but admins.
+  let resolved = null;
+  try { resolved = moderation.resolveVisibleUser(whoTyped, state); } catch (e) { resolved = null; }
   if (!resolved){ api.print('No such user.', 'red'); return; }
   if (resolved.ambiguous){
     const opts = resolved.ambiguous.map(r => r.username).join(', ');
@@ -5006,6 +5040,7 @@ function cmdProfile(api, state, args){
   api.printHTML(`Display: ${sanitizeAndFormatDIS(display)}`);
   api.printHTML(`Joined: <span class="dim">${escapeHTML(created)}</span>`);
   api.printHTML(`Last seen: <span class="dim">${escapeHTML(last)}</span>`);
+  if (row.banned_at != null) api.print(`[banned ${formatStampET(row.banned_at * 1000)} by ${row.banned_by || '?'}]`, 'red');
   if (color) api.printHTML(`Chat color: <span style="color:${color}">${escapeHTML(color)}</span>`);
   try {
     const chromeBal = chrome.getBalance(row.username);
@@ -5165,15 +5200,11 @@ function cmdDM(api, state, args){
   }
 
   // --- resolve recipient: username OR display name ---
+  // Banned accounts can't be messaged by anyone (admins included) and look
+  // exactly like an unknown name.
   let resolved = null;
   try {
-    if (typeof resolveUserHandle === 'function') {
-      resolved = resolveUserHandle(toTyped);
-    } else {
-      // Fallback: direct username lookup if resolver not wired yet
-      const row = getUserByName.get(toTyped);
-      if (row) resolved = { row };
-    }
+    resolved = moderation.resolveVisibleUser(toTyped, state, { adminBypass: false });
   } catch (e) {
     resolved = null;
   }

@@ -12,7 +12,7 @@ let clock = 1_700_000_000;
 const nowEpoch = () => ++clock;
 
 function setup({ chromeOverride } = {}) {
-  const { db, statements } = createDatabase({ dbPath: ':memory:' });
+  const { db, statements, helpers } = createDatabase({ dbPath: ':memory:' });
   const addUser = (username, isAdmin = 0, extra = {}) => {
     db.prepare(`
       INSERT INTO users (username, password_hash, is_admin, created_at, registration_ip, last_login_ip, fingerprint_hash)
@@ -21,8 +21,11 @@ function setup({ chromeOverride } = {}) {
     return db.prepare('SELECT * FROM users WHERE username = ?').get(username);
   };
   const chrome = createChromeService({ db, nowEpoch, dayKeyET: () => 'day' });
-  const mod = createModerationService({ db, nowEpoch, chrome: chromeOverride ? chromeOverride(chrome) : chrome });
-  return { db, addUser, mod, chrome, statements };
+  const mod = createModerationService({
+    db, nowEpoch, chrome: chromeOverride ? chromeOverride(chrome) : chrome,
+    resolveUserHandle: helpers.resolveUserHandle,
+  });
+  return { db, addUser, mod, chrome, statements, helpers };
 }
 
 const modLog = (db) => db.prepare('SELECT actor, action, target, ref_id, detail FROM mod_log ORDER BY id').all();
@@ -777,4 +780,141 @@ test('read-side visibility: banned accounts are hidden from leaderboards, member
   mod.unban({ actor: 'Punkyroo', ref: 'bad' });
   assert.deepStrictEqual(chrome.getLeaderboard(10).map(r => r.username), ['bad', 'good']);
   assert.strictEqual(statements.countUsers.get().n, before);
+});
+
+/* ---------------- Visibility helpers (follow-up Stage A) ---------------- */
+
+const { createNotificationService } = require('../../src/services/notifications');
+const formatting = require('../../src/utils/formatting');
+
+const ADMIN_VIEWER = { username: 'Punkyroo', isAdmin: true };
+const USER_VIEWER  = { username: 'viewer', isAdmin: false };
+
+test('isBannedUsername: banned true; clean, unknown and admin false; case-insensitive', () => {
+  const { db, addUser, mod } = setup();
+  addUser('clean'); addUser('bad');
+  mod.banUser({ actor: 'Punkyroo', username: 'bad' });
+  assert.strictEqual(mod.isBannedUsername('bad'), true);
+  assert.strictEqual(mod.isBannedUsername('BAD'), true);
+  assert.strictEqual(mod.isBannedUsername('clean'), false);
+  assert.strictEqual(mod.isBannedUsername('nobody'), false);
+  assert.strictEqual(mod.isBannedUsername(''), false);
+  assert.strictEqual(mod.isBannedUsername(null), false);
+  assert.strictEqual(mod.isBannedUsername('Punkyroo'), false);
+});
+
+test('isBannedUsername never reports an admin, even with an old ban_list row naming them', () => {
+  const { db, addUser, mod } = setup();
+  addUser('admin2');
+  insertLegacyRow(db, 'admin2', 1, 'oldadmin', '1.2.3.4');
+  db.prepare("UPDATE users SET is_admin = 1 WHERE username = 'admin2'").run();
+  assert.strictEqual(mod.isBannedUsername('admin2'), false);
+  assert.ok(!mod.bannedUsernameSet().has('admin2'));
+  assert.strictEqual(mod.canViewerSee(USER_VIEWER, 'admin2'), true);
+});
+
+test('isBannedUsername fails safe: a failing lookup counts as banned; bannedUsernameSet returns null', () => {
+  const { db, addUser, mod } = setup();
+  addUser('clean');
+  db.exec('ALTER TABLE users RENAME TO users_moved');
+  assert.strictEqual(mod.isBannedUsername('clean'), true);
+  assert.strictEqual(mod.bannedUsernameSet(), null);
+  // With no set, a non-admin listing shows only the viewer's own items.
+  const canSee = mod.makeVisibilityFilter(USER_VIEWER);
+  assert.strictEqual(canSee('viewer'), true);
+  assert.strictEqual(canSee('clean'), false);
+  // Admins still see everything.
+  assert.strictEqual(mod.makeVisibilityFilter(ADMIN_VIEWER)('clean'), true);
+});
+
+test('bannedUsernameSet matches banned accounts exactly', () => {
+  const { addUser, mod } = setup();
+  addUser('Bad1'); addUser('bad2'); addUser('fine');
+  mod.banUser({ actor: 'Punkyroo', username: 'Bad1' });
+  mod.banUser({ actor: 'Punkyroo', username: 'bad2' });
+  assert.deepStrictEqual([...mod.bannedUsernameSet()].sort(), ['bad1', 'bad2']);
+});
+
+test('viewer admin status comes only from isAdmin === true on the session state', () => {
+  const { addUser, mod } = setup();
+  addUser('bad');
+  mod.banUser({ actor: 'Punkyroo', username: 'bad' });
+  assert.strictEqual(mod.canViewerSee({ username: 'x', isAdmin: true }, 'bad'), true);
+  for (const v of [null, undefined, {}, { isAdmin: 1 }, { isAdmin: 'true' }, { is_admin: 1 }, { isAdmin: false }]) {
+    assert.strictEqual(mod.canViewerSee(v, 'bad'), false, JSON.stringify(v));
+  }
+});
+
+test('resolveVisibleUser: banned is not found for users, visible to admins, never with adminBypass false', () => {
+  const { db, addUser, mod } = setup();
+  addUser('bad'); addUser('good');
+  mod.banUser({ actor: 'Punkyroo', username: 'bad' });
+  assert.strictEqual(mod.resolveVisibleUser('bad', USER_VIEWER), null);
+  assert.strictEqual(mod.resolveVisibleUser('good', USER_VIEWER).row.username, 'good');
+  assert.strictEqual(mod.resolveVisibleUser('bad', ADMIN_VIEWER).row.username, 'bad');
+  assert.strictEqual(mod.resolveVisibleUser('bad', ADMIN_VIEWER, { adminBypass: false }), null);
+  assert.strictEqual(mod.resolveVisibleUser('nobody', ADMIN_VIEWER), null);
+  assert.ok(db);
+});
+
+test('resolveVisibleUser drops banned candidates from ambiguous display-name matches', () => {
+  const { db, addUser, mod, helpers } = setup();
+  addUser('bad'); addUser('good'); addUser('other');
+  for (const [u, d] of [['bad', 'Twin'], ['good', 'Twin']]) {
+    db.prepare('UPDATE users SET display_name = ? WHERE username = ?').run(d, u);
+    helpers.refreshUserNormsByRow(db.prepare('SELECT id, username, display_name FROM users WHERE username = ?').get(u));
+  }
+  assert.ok(helpers.resolveUserHandle('twin').ambiguous, 'fixture should be ambiguous before the ban');
+  mod.banUser({ actor: 'Punkyroo', username: 'bad' });
+  // Only one visible candidate left: resolves straight to it.
+  assert.strictEqual(mod.resolveVisibleUser('twin', USER_VIEWER).row.username, 'good');
+  // Admins still get the full ambiguous list.
+  assert.deepStrictEqual(mod.resolveVisibleUser('twin', ADMIN_VIEWER).ambiguous.map(r => r.username).sort(), ['bad', 'good']);
+});
+
+test('canViewerSee / makeVisibilityFilter: admin sees banned creators, users do not, owners see their own', () => {
+  const { addUser, mod } = setup();
+  addUser('bad'); addUser('good');
+  mod.banUser({ actor: 'Punkyroo', username: 'bad' });
+  const userFilter = mod.makeVisibilityFilter(USER_VIEWER);
+  const adminFilter = mod.makeVisibilityFilter(ADMIN_VIEWER);
+  assert.deepStrictEqual(['bad', 'good', 'viewer'].map(userFilter), [false, true, true]);
+  assert.deepStrictEqual(['bad', 'good', 'viewer'].map(adminFilter), [true, true, true]);
+  assert.strictEqual(mod.canViewerSee(USER_VIEWER, 'BAD'), false);
+  assert.strictEqual(mod.canViewerSee(ADMIN_VIEWER, 'bad'), true);
+});
+
+test('unbanning restores visibility everywhere the helpers are used', () => {
+  const { addUser, mod } = setup();
+  addUser('bad');
+  mod.banUser({ actor: 'Punkyroo', username: 'bad' });
+  assert.strictEqual(mod.canViewerSee(USER_VIEWER, 'bad'), false);
+  mod.unban({ actor: 'Punkyroo', ref: 'bad' });
+  assert.strictEqual(mod.isBannedUsername('bad'), false);
+  assert.ok(!mod.bannedUsernameSet().has('bad'));
+  assert.strictEqual(mod.canViewerSee(USER_VIEWER, 'bad'), true);
+  assert.strictEqual(mod.makeVisibilityFilter(USER_VIEWER)('bad'), true);
+  assert.strictEqual(mod.resolveVisibleUser('bad', USER_VIEWER).row.username, 'bad');
+});
+
+test('mentions of a banned account create nothing; unban restores them (real notification service)', () => {
+  const { db, addUser, mod, statements, helpers } = setup();
+  const sent = [];
+  const socketsByUser = new Map([['bad', new Set([{ id: 'ws' }])]]);
+  const notifications = createNotificationService({
+    statements, helpers,
+    hub: { sendOps: (ws, ops) => sent.push(ops), hub: { socketsByUser, away: new Map() } },
+    timeUtils: { nowEpoch: () => 5 }, formatting,
+    isHiddenUser: (n) => mod.isBannedUsername(n),
+  });
+  const sender = addUser('sender');
+  const bad = addUser('bad');
+  mod.banUser({ actor: 'Punkyroo', username: 'bad' });
+  notifications.notifyMentions('hey @bad', sender, 'chat');
+  assert.strictEqual(count(db, 'SELECT COUNT(1) n FROM notifications WHERE to_user_id = ?', bad.id), 0);
+  assert.strictEqual(sent.length, 0);
+  mod.unban({ actor: 'Punkyroo', ref: 'bad' });
+  notifications.notifyMentions('hey @bad', sender, 'chat');
+  assert.strictEqual(count(db, 'SELECT COUNT(1) n FROM notifications WHERE to_user_id = ?', bad.id), 1);
+  assert.strictEqual(sent.length, 1);
 });

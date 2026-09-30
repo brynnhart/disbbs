@@ -174,3 +174,25 @@ test('listMentionsForUser and markMentionsSeen proxy to statements', () => {
   service.markMentionsSeen(7);
   assert.strictEqual(marked, 7);
 });
+
+test('notifyMentions skips hidden (banned) users entirely', () => {
+  const inserted = [];
+  const sentOps = [];
+  const socketsByUser = new Map([['Hidden', new Set([{ id: 'h' }])], ['Shown', new Set([{ id: 's' }])]]);
+  const rows = { hidden: { id: 2, username: 'Hidden' }, shown: { id: 3, username: 'Shown' } };
+  const service = createNotificationService({
+    statements: {
+      insertNotification: { run: (...args) => inserted.push(args) },
+      listNotificationsForUser: { all: () => [] },
+      markAllNotificationsSeen: { run() {} },
+    },
+    helpers: { resolveUserHandle: (h) => (rows[h] ? { row: rows[h] } : null) },
+    hub: { sendOps: (ws, ops) => sentOps.push({ ws, ops }), hub: { socketsByUser } },
+    timeUtils: { nowEpoch: () => 1 },
+    formatting,
+    isHiddenUser: (name) => name === 'Hidden',
+  });
+  service.notifyMentions('hi @hidden and @shown', { id: 1, username: 'Alice' }, 'chat');
+  assert.deepStrictEqual(inserted.map(a => a[0]), [3]);
+  assert.deepStrictEqual(sentOps.map(o => o.ws.id), ['s']);
+});
