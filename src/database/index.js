@@ -774,12 +774,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
     SELECT id, kofi_transaction_id, kofi_name, dis_username, amount, message, chrome_awarded, created_at
       FROM donations ORDER BY created_at DESC LIMIT ?
   `);
-  const updateDonationAwarded      = db.prepare(`
-    UPDATE donations SET dis_username = ?, chrome_awarded = ? WHERE id = ?
-  `);
-  const getUnlinkedDonationsByKofi = db.prepare(`
-    SELECT id, amount FROM donations WHERE LOWER(kofi_name) = LOWER(?) AND dis_username IS NULL
-  `);
+  // Claiming and awarding held donations lives in src/services/donations.js.
   const insertDonationLink         = db.prepare(`
     INSERT INTO donation_links (kofi_name, dis_username, created_at) VALUES (?, ?, ?)
     ON CONFLICT(kofi_name) DO UPDATE SET dis_username = excluded.dis_username, created_at = excluded.created_at
@@ -1041,8 +1036,6 @@ CREATE INDEX IF NOT EXISTS idx_activity_feed_category ON activity_feed(category,
     insertDonation,
     getDonationByTxId,
     listRecentDonations,
-    updateDonationAwarded,
-    getUnlinkedDonationsByKofi,
     insertDonationLink,
     getDonationLinkByKofi,
     deleteDonationLink,

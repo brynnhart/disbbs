@@ -11,6 +11,7 @@ const { createNotificationService } = require('./src/services/notifications');
 const { createChromeService } = require('./src/services/chrome');
 const { createDelveService } = require('./src/services/delve');
 const { createModerationService } = require('./src/services/moderation');
+const { createDonationService } = require('./src/services/donations');
 const formatting = require('./src/utils/formatting');
 const timeUtils = require('./src/utils/time');
 
@@ -96,6 +97,7 @@ const notifications = createNotificationService({
 const chrome = createChromeService({ db, nowEpoch: timeUtils.nowEpoch, dayKeyET: timeUtils.dayKeyET, hub: hubApi.hub, sendOps: hubApi.sendOps });
 const delve = createDelveService({ db, chrome, timeUtils, hub: hubApi.hub });
 const moderation = createModerationService({ db, nowEpoch: timeUtils.nowEpoch, chrome, resolveUserHandle: helpers.resolveUserHandle });
+const donations = createDonationService({ db, nowEpoch: timeUtils.nowEpoch, chrome, moderation, statements });
 
 function fmtCr(n) {
   return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
@@ -456,13 +458,7 @@ const {
   wordleGetTodaySolvers,
   gameFeedInsert,
   gameFeedList,
-  insertDonation,
-  getDonationByTxId,
   listRecentDonations,
-  updateDonationAwarded,
-  getUnlinkedDonationsByKofi,
-  insertDonationLink,
-  getDonationLinkByKofi,
   deleteDonationLink,
   listDonationsForMonthCalc,
   checkUserIsDonor,
@@ -570,7 +566,6 @@ const stmtNudgeMarketPrice   = db.prepare('UPDATE market_prices SET current_pric
 
 const {
   refreshUserNormsByRow,
-  resolveUserHandle,
   normalizeHandle,
   createUser,
   verifyLogin,
@@ -4951,27 +4946,29 @@ function cmdLinkDonor(api, state, args) {
     api.print('Usage: /linkdonor <kofi_name> <dis_username>', 'yellow');
     return;
   }
-  const user = getUserByName.get(disName);
-  if (!user) { api.print(`No DIS user found: ${disName}`, 'red'); return; }
+  // Each held donation is claimed and awarded in one transaction, so re-runs
+  // (including after /unban) never award the same donation twice.
+  const res = donations.linkDonor({ actor: state.username, kofiName, username: disName });
+  if (!res.ok) { api.print(`No DIS user found: ${disName}`, 'red'); return; }
+  api.print(`Linked ko-fi "${kofiName}" → ${res.username}`, 'green');
 
-  insertDonationLink.run(kofiName, user.username, nowEpoch());
-  api.print(`Linked ko-fi "${kofiName}" → ${user.username}`, 'green');
-
-  const unlinked = getUnlinkedDonationsByKofi.all(kofiName);
-  if (unlinked.length > 0) {
-    let totalAwarded = 0;
-    for (const d of unlinked) {
-      const cr = Math.floor(d.amount * 100);
-      if (cr > 0) { chrome.award(user.username, cr, 'donation bonus'); totalAwarded += cr; }
-      updateDonationAwarded.run(user.username, cr, d.id);
+  if (res.banned) {
+    if (res.held.count) {
+      api.print(`${res.username} is banned: ${res.held.count} donation(s) ($${res.held.amount.toFixed(2)}, ${fmtCr(res.held.chrome)} ₢) not awarded and logged to /modlog.`, 'yellow');
+      api.print(`Re-run /linkdonor ${kofiName} ${res.username} after /unban ${res.username} to award them.`, 'yellow');
+    } else {
+      api.print(`${res.username} is banned; no held donations to award. Future donations will be held and logged.`, 'yellow');
     }
-    if (totalAwarded > 0) {
-      api.print(`Retroactively awarded ${fmtCr(totalAwarded)} ₢ for ${unlinked.length} prior donation(s).`, 'yellow');
-      const sockets = HUB.socketsByUser.get(user.username);
-      if (sockets) {
-        const ops = [{ op: 'print', text: `💙 thank you for your donation! you've been awarded ${fmtCr(totalAwarded)} ₢`, cls: 'cyan' }];
-        for (const ws of sockets) { try { sendOps(ws, ops); } catch {} }
-      }
+    return;
+  }
+  if (res.failed) api.print(`${res.failed} donation(s) could not be awarded and stay unlinked (see /modlog).`, 'red');
+  const totalAwarded = res.awarded.chrome;
+  if (totalAwarded > 0) {
+    api.print(`Retroactively awarded ${fmtCr(totalAwarded)} ₢ for ${res.awarded.count} prior donation(s).`, 'yellow');
+    const sockets = HUB.socketsByUser.get(res.username);
+    if (sockets) {
+      const ops = [{ op: 'print', text: `💙 thank you for your donation! you've been awarded ${fmtCr(totalAwarded)} ₢`, cls: 'cyan' }];
+      for (const ws of sockets) { try { sendOps(ws, ops); } catch {} }
     }
   }
 }
@@ -7031,33 +7028,29 @@ app.post('/api/kofi/webhook', (req, res) => {
 
   if (!txId || !kofiName) return res.status(200).json({ ok: true });
 
-  if (getDonationByTxId.get(txId)) return res.status(200).json({ ok: true, duplicate: true });
-
-  // Username match: scan message words, then fall back to donation_links table
-  let disUsername = null;
-  if (message) {
-    const words = message.split(/\s+/);
-    for (const word of words) {
-      const cleaned = word.replace(/[^a-zA-Z0-9_-]/g, '');
-      if (!cleaned) continue;
-      const user = getUserByName.get(cleaned);
-      if (user) { disUsername = user.username; break; }
-    }
+  // Attribution, the award and any ban hold happen in src/services/donations.js
+  // (one transaction; duplicates by tx id are no-ops).
+  let result;
+  try {
+    result = donations.recordKofiDonation({ txId, kofiName, amount, message });
+  } catch (e) {
+    // Nothing was written; a non-200 lets Ko-fi retry the delivery.
+    console.error('[kofi] donation could not be recorded:', e && e.message);
+    return res.status(500).json({ ok: false });
   }
-  if (!disUsername) {
-    const link = getDonationLinkByKofi.get(kofiName);
-    if (link) disUsername = link.dis_username;
-  }
+  if (result.status === 'duplicate') return res.status(200).json({ ok: true, duplicate: true });
 
-  const chromeAmount = Math.floor(amount * 100);
+  const disUsername = result.status === 'awarded' ? result.username : null;
+  const chromeAmount = result.chromeAmount || 0;
   const now = nowEpoch();
 
-  insertDonation.run(txId, kofiName, disUsername || null, amount, message, disUsername ? chromeAmount : 0, now);
+  if (result.status === 'held_banned') {
+    console.log(`[kofi] donation from ${kofiName} held: target ${result.heldFor} is banned (logged to mod_log)`);
+  } else if (result.status === 'award_failed') {
+    console.error(`[kofi] award to ${result.intended} failed; donation stored unlinked (logged to mod_log)`);
+  }
 
   if (disUsername && chromeAmount > 0) {
-    try { chrome.award(disUsername, chromeAmount, 'donation bonus'); } catch (e) {
-      console.error('[kofi] chrome award failed:', e && e.message);
-    }
     checkLeaderChange();
 
     const sockets = HUB.socketsByUser.get(disUsername);
